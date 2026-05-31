@@ -1,0 +1,153 @@
+Research and score the following health insurance payer as an ABM target on a 30-point framework.
+
+**Company:** {{COMPANY_NAME}}
+
+Evaluate against these criteria: 200,000+ lives/members covered, nationwide or regional scope, demonstrated interest in AI automation through partnership announcements, pilot programs, executive hires, conference presentations, RFPs, or public statements in the last 24 months.
+
+Include Medicaid MCOs, Medicare Advantage plans, regional commercial plans, BCBS affiliates, and provider-sponsored health plans. Exclude the top 5 nationals (UnitedHealthcare, Elevance/Anthem, CVS/Aetna, Cigna, Humana) unless a regional subsidiary shows strong signals.
+
+Use only publicly available information. If data is missing, infer logically and label as *Likely* or *Unknown*.
+
+---
+
+## 1. Firmographic Fit (0–10)
+
+Evaluate and score based on:
+- Size, revenue, and plan complexity
+- Lives covered (200K+ is the floor)
+- Growth indicators (expansion, M&A, new markets)
+- Plan type (Medicaid MCO, MA, commercial, BCBS affiliate, provider-sponsored)
+
+---
+
+## 2. Technographic Fit (0–10)
+
+Evaluate and score based on:
+- Core admin platform (if known)
+- Tech maturity and digital transformation posture
+- Integration complexity and modernization signals
+- Known tech vendors or partnerships
+
+---
+
+## 3. Intent Signals (0–10)
+
+Evaluate and score based on:
+- Strength and recency of AI/automation signals
+- Pain points: prior auth backlogs, claims processing costs, member services volume, CMS interoperability mandates
+- Executive hires (CDO, VP Automation, VP Innovation)
+- Partnership announcements or vendor contracts
+
+---
+
+## Tiers
+
+- **Tier 1: 22+**
+- **Tier 2: 18–21**
+- **Tier 3: 15–17**
+
+---
+
+## OUTPUT FORMAT
+
+Produce your response in exactly this markdown structure. Use tables wherever specified. Do not add extra prose sections outside of what is defined below.
+
+**CRITICAL FORMATTING RULE:** Every markdown table cell MUST stay on a single line. Never insert a line break inside `| ... |` boundaries. If you cite a source, keep the citation inline within the same cell on the same line — do not put the cited snippet on its own line. Tables with multi-line cells render as broken rows in Notion.
+
+---
+
+# {{COMPANY_NAME}}
+
+## Fit Scores
+| Firmographic | Technographic | Intent |
+|---|---|---|
+| X/10 | X/10 | X/10 |
+
+**Overall Score: X/30 — Tier [1 / 2 / 3]**
+
+---
+
+## Organization Profile
+| | |
+|---|---|
+| **Plan Type** | [Medicaid MCO / Medicare Advantage / Commercial / BCBS Affiliate / Provider-Sponsored] |
+| **Headquarters** | [City, State] |
+| **Parent Company** | [If applicable, else Independent] |
+| **Lives Covered** | [Number] (estimated) |
+| **States of Operation** | [List] |
+| **Annual Revenue** | $[Range] (estimated) |
+| **Employees** | [Range] (estimated) |
+| **Admin Platform** | [System name or Unknown] |
+| **Ownership** | [Public / Private / Non-profit / Government] |
+| **Market Position** | [One-line description] |
+
+---
+
+## AI / Automation Signals
+| Signal | Date | Source |
+|---|---|---|
+| [Specific signal] | [Month Year or Unknown] | [URL or publication] |
+| [Specific signal] | [Month Year or Unknown] | [URL or publication] |
+| [Specific signal] | [Month Year or Unknown] | [URL or publication] |
+
+---
+
+## Decision Makers
+| Role | Contact | Notes |
+|---|---|---|
+| [Primary role ⭐] | [Name or Unknown] | [Context — tenure, background, focus area] |
+| [Role] | [Name or Unknown] | [Context] |
+| [Role] | [Name or Unknown] | [Context] |
+
+---
+
+## Entry Strategy
+
+**TIMING: [HIGH / MODERATE / LOW] – [ONE-LINE RATIONALE IN CAPS]**
+
+**Primary Angles:**
+1. "[Angle 1 — specific to this account]"
+2. "[Angle 2]"
+3. "[Angle 3]"
+4. "[Angle 4]"
+
+**CAUTION:** [Any sensitivities — e.g. recent acquisition, RFP cycle, competitor lock-in]
+
+**Deal Size:** $[X]–[X]M annually
+
+---
+
+## Operational Complexity
+| Factor | Complexity |
+|---|---|
+| [e.g. Prior Auth Volume] | [Description] |
+| [e.g. Claims Processing] | [Description] |
+| [e.g. Member Services] | [Description] |
+| [e.g. CMS Compliance] | [Description] |
+| [e.g. Multi-State Operations] | [Description] |
+
+---
+
+## Recent News & Context
+- **[Topic] ([Year]):** [Specific detail with source]
+- **[Topic] ([Year]):** [Specific detail with source]
+- **[Topic] ([Year]):** [Specific detail with source]
+
+---
+
+## Key Pain Points
+- [Pain point 1 — specific to this payer, not generic]
+- [Pain point 2]
+- [Pain point 3]
+- [Pain point 4]
+
+---
+
+## Messaging Angles
+> "[Personalized message 1 — reference a specific signal or pain point from above]"
+
+> "[Personalized message 2]"
+
+> "[Personalized message 3]"
+
+> "[Personalized message 4]"

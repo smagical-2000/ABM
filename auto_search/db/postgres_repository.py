@@ -24,6 +24,7 @@ import json
 import logging
 import os
 from datetime import UTC, datetime
+from pathlib import Path
 
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
@@ -53,6 +54,18 @@ class PostgresRepository:
 
     def close(self) -> None:
         self._pool.close()
+
+    def ensure_schema(self) -> None:
+        """Create the tables if they don't exist (idempotent).
+
+        schema.sql uses CREATE TABLE / INDEX IF NOT EXISTS, so running it on
+        every boot is safe. This makes a fresh deploy (e.g. a new Railway
+        Postgres) self-initialising — no manual migration step.
+        """
+        sql = (Path(__file__).resolve().parent / "schema.sql").read_text()
+        with self._pool.connection() as conn:
+            conn.execute(sql)
+        logger.info("schema ensured")
 
     # ── writes ─────────────────────────────────────────────────────────
 

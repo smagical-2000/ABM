@@ -48,6 +48,10 @@ async def lifespan(app: FastAPI):
     # Build the service once; the repo (Postgres pool or JSON file) lives for
     # the app's lifetime. Stored on app.state so handlers reuse it.
     repo = get_repository()
+    # Fresh deploy self-initialises its tables (idempotent).
+    ensure = getattr(repo, "ensure_schema", None)
+    if callable(ensure):
+        ensure()
     app.state.service = ReviewService(repo)
     app.state.repo = repo
     logger.info("discovery API ready (repo=%s)", type(repo).__name__)

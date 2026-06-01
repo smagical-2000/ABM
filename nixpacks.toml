@@ -1,0 +1,20 @@
+# Build config for Railway's Nixpacks builder.
+#
+# The WEB service is API-only (FastAPI serving /api + the static UI). It does
+# NOT need the Playwright browser — only the warntracker (layoffs) connector
+# does, and that runs in the discovery cron, not the web process. So we install
+# the pip deps but never run `playwright install chromium` here, keeping the
+# web image small and the build fast.
+
+[phases.setup]
+nixPkgs = ["python312"]
+
+[phases.install]
+cmds = [
+  "python -m venv --copies /opt/venv",
+  "/opt/venv/bin/pip install --upgrade pip",
+  "/opt/venv/bin/pip install -r requirements.txt",
+]
+
+[start]
+cmd = "/opt/venv/bin/uvicorn auto_search.api.app:app --host 0.0.0.0 --port $PORT"

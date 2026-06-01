@@ -1,0 +1,17 @@
+# Keep the deploy image lean — none of this is needed at runtime.
+.git
+.github
+venv
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+tests
+docs
+outputs
+data
+.env
+*.md
+"ABM New"

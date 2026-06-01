@@ -1,4 +1,13 @@
-"""End-to-end test of the WARN-tracker discovery pipeline.
+"""DEPRECATED — single-source warntracker test harness.
+
+The canonical entry point is now `scripts/run_discovery.py`, which runs all
+connectors through dedup → qualify → persist. Keep this only for isolated
+warntracker debugging (e.g. tuning the Playwright fetch with --cache).
+Prefer: `python scripts/run_discovery.py --only layoffs ...`
+
+---
+
+End-to-end test of the WARN-tracker discovery pipeline.
 
 Pipeline under test:
     warntracker.com (Playwright)

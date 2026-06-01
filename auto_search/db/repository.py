@@ -70,6 +70,20 @@ class DiscoveryRepository(Protocol):
         """
         ...
 
+    def get(self, company_key: str) -> dict | None:
+        """Return one stored company row (for the detail drawer), or None."""
+        ...
+
+    def set_review(
+        self, company_key: str, review_status: str, *, reason: str | None = None,
+    ) -> dict | None:
+        """Record Galyna's decision (promoted / rejected / deferred / pending).
+
+        Returns the updated row, or None if the company isn't stored. Stamps
+        reviewed_at; stores rejection reason; stamps promoted_at on promote.
+        """
+        ...
+
 
 # ── JSON-file implementation (works now, zero infra) ──────────────────
 
@@ -102,6 +116,10 @@ class JsonFileRepository:
                 "normalized_name": key,
                 "display_name": candidate.company_name,
                 "first_seen_at": now,
+                # Human workflow state, separate from the machine icp_status.
+                # 'pending' until Galyna promotes / rejects / defers. Set only
+                # on first insert so re-qualifying never resets her decision.
+                "review_status": "pending",
                 "signals": [],
             }
             self._store[key] = existing
@@ -171,6 +189,32 @@ class JsonFileRepository:
             )
         counts["total"] = len(self._store)
         return counts
+
+    def get(self, company_key: str) -> dict | None:
+        return self._store.get(company_key)
+
+    _REVIEW_STATUSES = frozenset({"pending", "promoted", "rejected", "deferred"})
+
+    def set_review(
+        self, company_key: str, review_status: str, *, reason: str | None = None,
+    ) -> dict | None:
+        if review_status not in self._REVIEW_STATUSES:
+            raise ValueError(
+                f"invalid review_status {review_status!r}; "
+                f"expected one of {sorted(self._REVIEW_STATUSES)}"
+            )
+        row = self._store.get(company_key)
+        if row is None:
+            return None
+        now = datetime.now(UTC).isoformat()
+        row["review_status"] = review_status
+        row["reviewed_at"] = now
+        if review_status == "promoted":
+            row["promoted_at"] = now
+        if review_status == "rejected":
+            row["rejection_reason"] = reason
+        self._flush()
+        return row
 
     # -- internals --
 

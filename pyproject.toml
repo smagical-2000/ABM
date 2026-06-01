@@ -1,8 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "abm-scorer"
 version = "0.1.0"
 description = "Magical ABM — account scoring + auto-search discovery pipeline"
 requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["auto_search*"]
 
 [project.optional-dependencies]
 dev = [

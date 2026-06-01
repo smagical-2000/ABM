@@ -40,8 +40,33 @@ of the platform is *promotion*: a human turning a qualified company into an
 | `clients/signalbase.py` | SignalBase transport via Apify run-sync — actor-agnostic, paged, credit-capped |
 | `qualifier.py` | Website-based ICP evaluation via Claude + `web_search`; writes traces |
 | `pipeline.py` | Orchestration: pull → dedup → qualify → `CompanyCandidate` |
+| `services/review.py` | **The UI/API boundary** — typed DTOs + promote/reject/defer workflow |
 | `db/schema.sql` | Target Postgres schema (3 tables, dedup via UNIQUE constraints) |
 | `db/repository.py` | Storage interface + JSON-file impl (runs without Postgres) |
+
+## For the UI / API layer
+
+The UI depends on **`ReviewService`** (typed DTOs), never on the repository
+dicts or the CLI scripts. Storage can move JSON → Postgres underneath without
+the UI changing.
+
+```python
+from auto_search.db import JsonFileRepository      # swap for PostgresRepository later
+from auto_search.services import ReviewService
+
+svc = ReviewService(JsonFileRepository())
+
+svc.list_panel(segment="health_system")   # -> list[PanelCompany]  (qualified, pending)
+svc.get_company(key)                        # -> PanelCompany | None  (detail drawer)
+svc.stats()                                 # -> DiscoveryStats        (dashboard tiles)
+svc.promote(key)                            # -> stub account id (real bridge w/ accounts table)
+svc.reject(key, reason="too small")
+svc.defer(key)
+```
+
+A company leaves the panel once promoted / rejected / deferred, but its row
+stays as the don't-re-qualify ledger. `scripts/run_discovery.py` is CLI/cron
+only — never call it from the UI.
 
 ## Connectors (signal sources)
 

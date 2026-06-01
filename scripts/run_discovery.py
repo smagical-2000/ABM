@@ -1,0 +1,194 @@
+"""Unified discovery runner — all signal sources → qualify → persist.
+
+For each connector (layoffs, leadership, M&A):
+    pull signals  →  dedup by company  →  qualify via Claude (website ICP)  →
+    persist verdict + provenance to the repository.
+
+Only companies the qualifier marks `qualified` reach the review panel; every
+evaluated company is still stored as the "don't re-qualify" ledger, so a
+company already decided in a prior run is skipped (no repeat Claude cost).
+
+This is the entry point a cron will call (one `since = now − interval` per run).
+
+COST — two independent meters:
+  • SignalBase  : ~per record pulled  (control with --limit)
+  • Claude      : ~$0.10–0.15 per UNIQUE company qualified
+Use --no-qualify for a free-ish dry run (pull + dedup + store as pending, no
+Claude). Use --limit to cap records per connector.
+
+Run:
+    # cheap dry run — what would we discover? (no Claude)
+    python scripts/run_discovery.py --days 7 --limit 5 --no-qualify
+
+    # real run — discover + qualify + persist (costs Claude per company)
+    python scripts/run_discovery.py --days 7 --limit 5
+
+    # just one source
+    python scripts/run_discovery.py --only leadership --days 7 --limit 5
+
+    # show the current panel (no fetching, no cost)
+    python scripts/run_discovery.py --panel
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import logging
+import sys
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from dotenv import load_dotenv
+
+from auto_search import pipeline
+from auto_search.connectors.acquisitions import AcquisitionsConnector
+from auto_search.connectors.leadership_changes import LeadershipChangesConnector
+from auto_search.connectors.warntracker import WarnTrackerConnector
+from auto_search.db import JsonFileRepository
+
+load_dotenv()
+
+BOLD, GREEN, YELLOW, RED, DIM, CYAN, RESET = (
+    "\033[1m", "\033[92m", "\033[93m", "\033[91m", "\033[2m", "\033[96m", "\033[0m",
+)
+
+# Connector registry — add a new source here and it joins the run for free.
+CONNECTORS = {
+    "layoffs": lambda limit: WarnTrackerConnector(),
+    "leadership": lambda limit: LeadershipChangesConnector(max_pages=1, per_page=limit),
+    "acquisitions": lambda limit: AcquisitionsConnector(max_pages=1, per_page=limit),
+}
+
+
+def configure_logging(debug: bool) -> None:
+    logging.basicConfig(
+        level=logging.DEBUG if debug else logging.INFO,
+        format="  %(levelname)-7s %(message)s",
+    )
+    for noisy in ("httpx", "httpcore", "anthropic"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+def banner(text: str) -> None:
+    print(f"\n{BOLD}{'─'*72}\n  {text}\n{'─'*72}{RESET}")
+
+
+def verdict_icon(status: str) -> str:
+    return {
+        "qualified": f"{GREEN}✅ qualified  {RESET}",
+        "needs_review": f"{YELLOW}🟡 review     {RESET}",
+        "disqualified": f"{RED}❌ disqualified{RESET}",
+        "error": f"{RED}⚠️  error     {RESET}",
+    }.get(status, status)
+
+
+async def run_connector(
+    name: str,
+    connector,
+    since: datetime,
+    repo: JsonFileRepository,
+    *,
+    limit: int,
+    qualify: bool,
+) -> dict[str, int]:
+    """Run one connector through the pipeline and persist results."""
+    banner(f"{name.upper()}  ({connector.source_name})")
+    counts = {"qualified": 0, "needs_review": 0, "disqualified": 0, "error": 0}
+
+    if not qualify:
+        # Dry run: pull + dedup only, no Claude. Show what we'd evaluate.
+        groups = await pipeline.collect_unique_companies(connector, since, limit=limit)
+        for i, signals in enumerate(groups.values(), 1):
+            rep = max(signals, key=lambda s: s.signal_strength)
+            print(f"  {i:>3}  {DIM}would qualify{RESET}  {rep.company_name_raw[:40]:40}"
+                  f"  ({len(signals)} signal{'s' if len(signals) != 1 else ''})")
+        print(f"\n  {len(groups)} unique companies discovered (not qualified — dry run)")
+        return counts
+
+    # Real run: dedup → qualify → persist. Skip companies already decided.
+    async for cand in pipeline.run(
+        connector, since, limit=limit,
+        skip_already_qualified=repo.already_qualified,
+    ):
+        repo.save_candidate(cand)
+        status = cand.qualification.to_status()
+        counts[status] = counts.get(status, 0) + 1
+        q = cand.qualification
+        print(f"  {verdict_icon(status)}  {BOLD}{cand.company_name[:38]:38}{RESET}"
+              f"  seg={q.segment or '—':<13} conf={q.confidence:.2f}")
+        if status == "qualified" and q.reasoning:
+            print(f"     {DIM}{q.reasoning[:100]}{RESET}")
+    return counts
+
+
+def show_panel(repo: JsonFileRepository) -> None:
+    banner("REVIEW PANEL — qualified companies")
+    rows = repo.panel(statuses=("qualified",))
+    if not rows:
+        print(f"  {DIM}empty — run discovery first{RESET}")
+        return
+    for i, r in enumerate(rows, 1):
+        print(f"  {i:>3}  {GREEN}●{RESET} {BOLD}{r['display_name'][:38]:38}{RESET}"
+              f"  seg={r.get('segment') or '—':<13} conf={r.get('confidence', 0):.2f}"
+              f"  signals={len(r.get('signals', []))}")
+        if r.get("evidence_url"):
+            print(f"       {DIM}{r['evidence_url']}{RESET}")
+    print(f"\n  {len(rows)} qualified compan{'y' if len(rows) == 1 else 'ies'} in panel")
+
+
+async def main(args: argparse.Namespace) -> None:
+    configure_logging(args.debug)
+    repo = JsonFileRepository()
+
+    if args.panel:
+        show_panel(repo)
+        return
+
+    since = datetime.now(UTC) - timedelta(days=args.days)
+    selected = [args.only] if args.only else list(CONNECTORS)
+
+    print(f"\n{BOLD}Discovery run{RESET}  since {since.date()} ({args.days}d), "
+          f"limit {args.limit}/source, "
+          f"{'QUALIFY' if not args.no_qualify else 'dry run (no Claude)'}")
+    if not args.no_qualify:
+        print(f"  {YELLOW}Cost: SignalBase per record + ~$0.10–0.15 Claude "
+              f"per new company{RESET}")
+
+    totals: dict[str, int] = {}
+    for name in selected:
+        connector = CONNECTORS[name](args.limit)
+        counts = await run_connector(
+            name, connector, since, repo,
+            limit=args.limit, qualify=not args.no_qualify,
+        )
+        for k, v in counts.items():
+            totals[k] = totals.get(k, 0) + v
+
+    if not args.no_qualify:
+        banner("RUN SUMMARY")
+        print(f"  {GREEN}qualified:     {totals.get('qualified', 0)}{RESET}")
+        print(f"  {YELLOW}needs review:  {totals.get('needs_review', 0)}{RESET}")
+        print(f"  {RED}disqualified:  {totals.get('disqualified', 0)}{RESET}")
+        print(f"  {RED}errors:        {totals.get('error', 0)}{RESET}")
+        print(f"\n  store totals: {repo.stats()}")
+        print(f"  {DIM}panel (qualified) → python scripts/run_discovery.py --panel{RESET}")
+
+
+if __name__ == "__main__":
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--days", type=int, default=7,
+                   help="Lookback window per source (default 7)")
+    p.add_argument("--limit", type=int, default=5,
+                   help="Max records/companies per source (cost knob, default 5)")
+    p.add_argument("--only", choices=list(CONNECTORS),
+                   help="Run a single source instead of all three")
+    p.add_argument("--no-qualify", action="store_true",
+                   help="Dry run: discover + dedup only, no Claude qualification")
+    p.add_argument("--panel", action="store_true",
+                   help="Show the current qualified-company panel and exit")
+    p.add_argument("--debug", action="store_true")
+    asyncio.run(main(p.parse_args()))

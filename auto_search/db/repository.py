@@ -60,6 +60,16 @@ class DiscoveryRepository(Protocol):
         """
         ...
 
+    def panel(self, statuses: tuple[str, ...] = ("qualified",)) -> list[dict]:
+        """Return companies for the review panel, most recent first.
+
+        Only companies whose verdict is in `statuses` surface here — by
+        default just `qualified`. This is what the UI reads; disqualified /
+        error rows stay in storage (as the don't-reprocess ledger) but never
+        reach the panel.
+        """
+        ...
+
 
 # ── JSON-file implementation (works now, zero infra) ──────────────────
 
@@ -145,6 +155,22 @@ class JsonFileRepository:
     def already_qualified(self, company_key: str) -> bool:
         row = self._store.get(company_key)
         return bool(row) and row.get("icp_status") in self._DECIDED_STATUSES
+
+    def panel(self, statuses: tuple[str, ...] = ("qualified",)) -> list[dict]:
+        rows = [r for r in self._store.values() if r.get("icp_status") in statuses]
+        # Most recently qualified first — that's the order the UI wants.
+        rows.sort(key=lambda r: r.get("qualified_at") or "", reverse=True)
+        return rows
+
+    def stats(self) -> dict[str, int]:
+        """Counts by verdict status — for the runner summary + ops view."""
+        counts: dict[str, int] = {}
+        for r in self._store.values():
+            counts[r.get("icp_status", "pending")] = (
+                counts.get(r.get("icp_status", "pending"), 0) + 1
+            )
+        counts["total"] = len(self._store)
+        return counts
 
     # -- internals --
 

@@ -31,12 +31,28 @@ of the platform is *promotion*: a human turning a qualified company into an
 |---|---|
 | `normalize.py` | **Single source of truth** for company-name dedup keys + loose int parsing |
 | `models.py` | `RawSignal`, `QualificationResult`, shared constants |
+| `llm.py` | Shared Claude web_search call + JSON extraction (used by qualifier + connectors) |
 | `connectors/base.py` | `SignalConnector` protocol — the contract every source implements |
-| `connectors/warntracker.py` | WARN-notice source (Playwright → `/api/sample_warn_listings`) |
+| `connectors/warntracker.py` | Layoffs source — WARN notices (Playwright → `/api/sample_warn_listings`) |
+| `connectors/leadership_changes.py` | Leadership source — SignalBase job changes (CXO/rev-cycle/finance) |
+| `clients/signalbase.py` | SignalBase transport via Apify run-sync (paged, credit-capped) |
 | `qualifier.py` | Website-based ICP evaluation via Claude + `web_search`; writes traces |
 | `pipeline.py` | Orchestration: pull → dedup → qualify → `CompanyCandidate` |
 | `db/schema.sql` | Target Postgres schema (3 tables, dedup via UNIQUE constraints) |
 | `db/repository.py` | Storage interface + JSON-file impl (runs without Postgres) |
+
+## Connectors (signal sources)
+
+| Source | Signal | Recency | Filtering |
+|---|---|---|---|
+| **warntracker** | Layoffs (WARN filings) | layoff/notice date | structural (US, ≥10 laid off) + website ICP |
+| **leadership_changes** | New CXO / rev-cycle / finance / pop-health hires | `occurredAt` | server: `positions` + `countries`; client: healthcare industry + title + cutoff |
+
+Leadership detection is **deterministic** — SignalBase's `positions` free-text
+filter narrows ~1M job changes to target roles server-side; the connector then
+keeps only US healthcare providers/payers with a leadership title newer than
+the cutoff. No news scraping, no LLM in detection. It pages newest-first and
+stops at the date cutoff to minimise Apify credits (~1 per page).
 
 ## Why website-based qualification (not keyword rules)
 
@@ -85,19 +101,23 @@ Dedup is enforced by **database UNIQUE constraints**, not app code:
 ## Testing
 
 ```bash
-# Fetch + dedup only — no LLM, no cost (--cache uses saved rows, no browser)
+# Layoffs: fetch + dedup only — no LLM, no cost (--cache = saved rows, no browser)
 python scripts/test_warntracker_pipeline.py --no-qualify --cache
 
-# Full pipeline on N unique companies
-python scripts/test_warntracker_pipeline.py --limit 10 -v
+# Leadership: detect recent US healthcare CXO/rev-cycle changes (~1 credit/page)
+python scripts/test_leadership_changes.py --days 7 --pages 1
 
-# One company by name (prompt tuning)
+# One company by name (qualifier prompt tuning)
 python scripts/test_qualifier_one.py --custom "Advanced Specialty Hospitals of Toledo"
+
+# Unit tests (no network, no LLM, no credits)
+pytest
 ```
 
 ## Status
 
-- [x] Connector (warntracker, Playwright)
+- [x] Connector (warntracker layoffs, Playwright)
+- [x] Connector (leadership changes, SignalBase via Apify — deterministic)
 - [x] Website-based qualifier (Claude + web_search)
 - [x] Dedup (within-run grouping + across-run skip)
 - [x] Storage interface + JSON impl

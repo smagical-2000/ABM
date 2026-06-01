@@ -28,6 +28,18 @@ rationale. Listed so reviewers know they're acknowledged, not missed.
   worker pool should manage its lifecycle (create on startup, close on
   shutdown) rather than lazy-init a global.
 
+## Leadership connector (SignalBase)
+
+- **Industry filter is client-side.** SignalBase's `industry`/`categories`
+  params are silently ignored by the Apify run-sync path (only `positions`,
+  `countries`, `seniorities`, date work server-side). We narrow by `positions`
+  server-side and filter healthcare industry in Python. If SignalBase is ever
+  called via a live Standby container, the `industry` hint we already send
+  would filter server-side and cut credit use further.
+- **`positions` is free-text** and matches sub-leadership roles too (e.g.
+  "Revenue Cycle Analyst"); the connector drops these via `_NON_LEADER_MARKERS`.
+  Tune that list + `_TITLE_PHRASES` as Galyna refines the target roles.
+
 ## Accepted as-is (documented, low priority)
 
 - **Model split.** `scorer.py` uses Opus (deep scoring); the qualifier uses

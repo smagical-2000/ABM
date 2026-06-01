@@ -1,10 +1,11 @@
-"""Tests for the qualifier's JSON extraction — the parser that turns Claude's
-text into a verdict. Brittleness here means valid verdicts get thrown away.
+"""Tests for the shared LLM JSON extraction — the parser that turns Claude's
+text into structured data. Brittleness here means valid results get thrown away.
 """
 
 import pytest
 
-from auto_search.qualifier import _first_balanced_object, _parse_json_strict
+from auto_search.llm import _first_balanced_object
+from auto_search.llm import parse_json_object as _parse_json_strict
 
 
 class TestParseJsonStrict:

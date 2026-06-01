@@ -17,27 +17,18 @@ Cost ~ $0.05–0.15 per company on Sonnet 4.5 with web_search.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
-import random
-import re
 import textwrap
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from anthropic import (
-    APIConnectionError,
-    APITimeoutError,
-    AsyncAnthropic,
-    BadRequestError,
-    InternalServerError,
-    RateLimitError,
-)
+from anthropic import BadRequestError
 from dotenv import load_dotenv
 
+from auto_search import llm
 from auto_search.models import MIN_LAID_OFF, QualificationResult, RawSignal
 from auto_search.normalize import slugify
 
@@ -53,11 +44,6 @@ _CONFIDENCE_FLOOR    = 0.70
 # can read exactly what Claude saw, searched for, and concluded. Critical
 # for debugging prompt issues without re-running expensive LLM calls.
 _TRACE_DIR = Path(os.getenv("QUALIFIER_TRACE_DIR", "./data/qualifier_traces"))
-
-# Retry config for Claude calls
-_LLM_MAX_RETRIES       = 4
-_LLM_INITIAL_BACKOFF_S = 1.0
-_LLM_BACKOFF_MULT      = 2.0
 
 # Country values treated as US for the structural pre-filter. Empty is
 # allowed because WARN data carries no country field (US-only by statute).
@@ -187,20 +173,8 @@ def passes_rules(signal: RawSignal) -> tuple[bool, str]:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# Stage 2 — Claude with web_search
+# Stage 2 — Claude with web_search (shared helpers live in llm.py)
 # ═════════════════════════════════════════════════════════════════════
-
-_client: AsyncAnthropic | None = None
-
-
-def _get_client() -> AsyncAnthropic:
-    global _client
-    if _client is None:
-        key = os.getenv("ANTHROPIC_API_KEY")
-        if not key:
-            raise RuntimeError("ANTHROPIC_API_KEY not set in .env")
-        _client = AsyncAnthropic(api_key=key)
-    return _client
 
 
 async def qualify_with_llm(signal: RawSignal) -> QualificationResult:
@@ -235,13 +209,16 @@ async def qualify_with_llm(signal: RawSignal) -> QualificationResult:
         signal.observed_at.date(),
     )
 
-    response = await _call_claude_with_retry(
+    response = await llm.call_with_web_search(
         system=ICP_SYSTEM_PROMPT,
         user_message=user_message,
+        max_searches=_WEB_SEARCH_MAX_USES,
+        max_tokens=_MAX_TOKENS,
+        model=_MODEL,
     )
 
-    text = _extract_final_text(response)
-    web_searches = _extract_web_searches(response)
+    text = llm.extract_text(response)
+    web_searches = llm.extract_web_searches(response)
     if web_searches:
         logger.info(
             "  → %d web search(es): %s",
@@ -255,7 +232,7 @@ async def qualify_with_llm(signal: RawSignal) -> QualificationResult:
     verdict: QualificationResult
 
     try:
-        data = _parse_json_strict(text)
+        data = llm.parse_json_object(text)
     except ValueError as e:
         parse_error = str(e)
         logger.warning("qualifier got non-JSON for %s: %s",
@@ -363,84 +340,8 @@ async def qualify(signal: RawSignal) -> QualificationResult:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# Anthropic helpers — retry, content extraction, JSON parsing
+# Trace persistence
 # ═════════════════════════════════════════════════════════════════════
-
-async def _call_claude_with_retry(*, system: str, user_message: str):
-    """Call Claude w/ web_search tool. Exponential backoff on transients."""
-    backoff = _LLM_INITIAL_BACKOFF_S
-    for attempt in range(_LLM_MAX_RETRIES):
-        try:
-            return await _get_client().messages.create(
-                model=_MODEL,
-                max_tokens=_MAX_TOKENS,
-                system=system,
-                tools=[
-                    {
-                        "type": "web_search_20260209",
-                        "name": "web_search",
-                        "max_uses": _WEB_SEARCH_MAX_USES,
-                    }
-                ],
-                messages=[{"role": "user", "content": user_message}],
-            )
-        except (RateLimitError, APIConnectionError,
-                APITimeoutError, InternalServerError) as e:
-            if attempt == _LLM_MAX_RETRIES - 1:
-                raise
-            jitter = random.uniform(0, backoff * 0.25)
-            sleep_for = backoff + jitter
-            logger.warning(
-                "Claude transient error (%s) attempt %d/%d — sleeping %.1fs",
-                type(e).__name__, attempt + 1,
-                _LLM_MAX_RETRIES, sleep_for,
-            )
-            await asyncio.sleep(sleep_for)
-            backoff *= _LLM_BACKOFF_MULT
-
-
-def _extract_final_text(response: Any) -> str:
-    """Concatenate text blocks from a Claude response.
-
-    With server-side tools (web_search), response.content has multiple
-    blocks: text, server_tool_use, web_search_tool_result, more text.
-    We want only the text blocks — Claude's final answer.
-    """
-    parts: list[str] = []
-    for block in response.content:
-        block_type = _block_attr(block, "type")
-        if block_type != "text":
-            continue
-        text = _block_attr(block, "text")
-        if text:
-            parts.append(text)
-    return "\n".join(parts).strip()
-
-
-def _extract_web_searches(response: Any) -> list[str]:
-    """Pull out the search queries Claude ran (for logging + traces)."""
-    queries: list[str] = []
-    for block in response.content:
-        if _block_attr(block, "type") != "server_tool_use":
-            continue
-        if _block_attr(block, "name") != "web_search":
-            continue
-        inp = _block_attr(block, "input") or {}
-        q = (inp.get("query") if isinstance(inp, dict) else None)
-        if q:
-            queries.append(str(q))
-    return queries
-
-
-def _block_attr(block: Any, name: str) -> Any:
-    """SDK content blocks expose attrs; dict-form falls back to .get()."""
-    val = getattr(block, name, None)
-    if val is not None:
-        return val
-    if isinstance(block, dict):
-        return block.get(name)
-    return None
-
 
 def _write_trace(
     *,
@@ -504,70 +405,3 @@ def _write_trace(
         logger.debug("trace written: %s/%s", day_dir, fname)
     except Exception as e:    # noqa: BLE001 — never fail real work for tracing
         logger.warning("failed to write qualifier trace: %s", e)
-
-
-def _parse_json_strict(text: str) -> dict:
-    """Extract and parse the JSON object from Claude's output.
-
-    Strategy, cheapest first:
-      1. Whole text is already valid JSON (what our prompt asks for).
-      2. Otherwise, find the first BALANCED {...} block and parse that.
-
-    Step 2 uses brace-counting rather than a regex so it survives nested
-    objects — a regex like `\\{.*?\\}` stops at the first '}' and silently
-    corrupts any nested structure. We strip code fences first so a fenced
-    block reduces to plain text before brace-scanning.
-
-    Raises ValueError (which json.JSONDecodeError subclasses) on failure.
-    """
-    if not text or not text.strip():
-        raise ValueError("empty text")
-
-    stripped = text.strip()
-
-    # 1. Fast path — the whole thing is JSON.
-    try:
-        return json.loads(stripped)
-    except json.JSONDecodeError:
-        pass
-
-    # 2. Remove ```json … ``` fences, then scan for a balanced object.
-    unfenced = re.sub(r"```(?:json)?|```", "", stripped)
-    obj = _first_balanced_object(unfenced)
-    if obj is None:
-        raise ValueError(f"no balanced JSON object found in: {stripped[:200]!r}")
-    return json.loads(obj)
-
-
-def _first_balanced_object(text: str) -> str | None:
-    """Return the first balanced {...} substring, or None.
-
-    Brace-aware and string-aware: braces inside JSON string literals (and
-    escaped quotes) don't affect the depth count.
-    """
-    start = text.find("{")
-    if start == -1:
-        return None
-
-    depth = 0
-    in_string = False
-    escaped = False
-    for i in range(start, len(text)):
-        ch = text[i]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_string = False
-            continue
-        if ch == '"':
-            in_string = True
-        elif ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
-    return None

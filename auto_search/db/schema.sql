@@ -48,6 +48,13 @@ CREATE TABLE IF NOT EXISTS discovery_companies (
     hq_state              TEXT,
     hq_city               TEXT,
 
+    -- human review workflow (separate from machine icp_status) ----------
+    -- 'pending' until Galyna acts; never reset by re-qualification.
+    review_status         TEXT NOT NULL DEFAULT 'pending'
+        CHECK (review_status IN ('pending','promoted','rejected','deferred')),
+    reviewed_at           TIMESTAMPTZ,               -- when Galyna decided
+    rejection_reason      TEXT,                       -- set on reject
+
     -- lifecycle ---------------------------------------------------------
     first_seen_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     qualified_at          TIMESTAMPTZ,               -- when Claude ran

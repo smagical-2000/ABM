@@ -1,13 +1,41 @@
 # Magical ABM
 
-Two parts:
+Three parts:
 
 1. **CLI Account Scorer** (`scorer.py`) — runs Galyna's ABM scoring frameworks
-   against a named company. Uses Claude Opus with live web search.
+   against a named company. Claude (Sonnet) with live web search.
 2. **Auto Search** (`auto_search/`) — discovery pipeline that finds healthcare
-   companies showing distress/intent signals (starting with layoffs),
-   qualifies them against the ICP, and dedupes them into a review list.
-   See [`auto_search/README.md`](auto_search/README.md).
+   companies showing buying signals (layoffs, leadership changes, M&A),
+   qualifies them against the ICP, and dedupes them. See
+   [`auto_search/README.md`](auto_search/README.md).
+3. **Discovery Panel** (`auto_search/api/` + `web/discovery/`) — FastAPI +
+   React UI where Galyna reviews qualified companies and promotes/rejects/defers.
+
+---
+
+## Run the live Discovery app
+
+```bash
+# 1. Postgres (local). Railway: just set DATABASE_URL to the platform URL.
+brew install postgresql@16 && brew services start postgresql@16
+createdb abm_discovery
+psql -d abm_discovery -f auto_search/db/schema.sql
+
+# 2. Point the app at it (unset DATABASE_URL → falls back to a JSON file)
+echo "DATABASE_URL=postgresql://localhost/abm_discovery" >> .env
+
+# 3. Populate real accounts (costs: SignalBase per record + Sonnet per company)
+python scripts/run_discovery.py --only leadership --days 60 --limit 25
+python scripts/run_discovery.py --panel                 # inspect (no cost)
+
+# 4. Serve the API + UI  →  http://127.0.0.1:8000
+uvicorn auto_search.api.app:app --port 8000
+```
+
+Storage is chosen by `get_repository()`: Postgres when `DATABASE_URL` is set,
+else a JSON file (zero-infra). The UI talks only to the API; the API talks only
+to `ReviewService`; the service talks only to the repository protocol — so the
+JSON ↔ Postgres swap, or a future hosted deploy, never touches the layers above.
 
 ---
 

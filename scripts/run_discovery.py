@@ -47,9 +47,9 @@ from auto_search import pipeline
 from auto_search.connectors.acquisitions import AcquisitionsConnector
 from auto_search.connectors.leadership_changes import LeadershipChangesConnector
 from auto_search.connectors.warntracker import WarnTrackerConnector
-from auto_search.db import JsonFileRepository
+from auto_search.db import get_repository
 
-load_dotenv()
+load_dotenv(override=True)
 
 BOLD, GREEN, YELLOW, RED, DIM, CYAN, RESET = (
     "\033[1m", "\033[92m", "\033[93m", "\033[91m", "\033[2m", "\033[96m", "\033[0m",
@@ -89,7 +89,7 @@ async def run_connector(
     name: str,
     connector,
     since: datetime,
-    repo: JsonFileRepository,
+    repo,
     *,
     limit: int,
     qualify: bool,
@@ -124,7 +124,7 @@ async def run_connector(
     return counts
 
 
-def show_panel(repo: JsonFileRepository) -> None:
+def show_panel(repo) -> None:
     banner("REVIEW PANEL — qualified companies")
     rows = repo.panel(statuses=("qualified",))
     if not rows:
@@ -141,7 +141,7 @@ def show_panel(repo: JsonFileRepository) -> None:
 
 async def main(args: argparse.Namespace) -> None:
     configure_logging(args.debug)
-    repo = JsonFileRepository()
+    repo = get_repository()
 
     if args.panel:
         show_panel(repo)

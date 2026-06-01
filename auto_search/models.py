@@ -95,6 +95,28 @@ class RawSignal(BaseModel):
         """
         return normalize_company_name(self.company_name_raw)
 
+    @property
+    def summary(self) -> str:
+        """Human one-liner for the 'why discovered' UI list.
+
+        Derived from the signal-specific payload. Defined here (not in a repo)
+        so every storage backend renders the same text from the same fields.
+        """
+        p = self.payload
+        if self.signal_type == "layoff":
+            n = p.get("laid_off_count")
+            where = p.get("city") or p.get("state") or ""
+            head = f"{n} laid off" if n else "layoff"
+            return f"{head}{f' in {where}' if where else ''}".strip()
+        if self.signal_type == "leadership_change":
+            return p.get("new_role") or "leadership change"
+        if self.signal_type == "acquisition":
+            acq = p.get("acquirer_name")
+            amt = p.get("deal_amount_usd")
+            amt_s = f" (${amt:,})" if isinstance(amt, int) else ""
+            return f"Acquired by {acq}{amt_s}" if acq else "acquisition"
+        return self.signal_type
+
 
 class QualificationResult(BaseModel):
     """The qualifier's verdict on whether a company fits Magical's ICP.

@@ -34,7 +34,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -109,8 +109,15 @@ class AcquisitionRecord(_BaseRecord):
     # deal
     amount: int | None = None
     currency: str | None = None
-    percentage: float | None = None
+    # Free text in the wild: a number ("100"), a percent, or "Majority" /
+    # "Minority". Keep it as a string and never let it break parsing.
+    percentage: str | None = None
     sources: list[dict] | None = None
+
+    @field_validator("percentage", mode="before")
+    @classmethod
+    def _percent_to_str(cls, v: object) -> str | None:
+        return None if v is None else str(v)
 
 
 # ── client ────────────────────────────────────────────────────────────
@@ -158,7 +165,9 @@ class SignalBaseClient:
         async for raw in self._iter_raw(
             JOB_CHANGES_ACTOR, filters, per_page=per_page, max_pages=max_pages
         ):
-            yield JobChangeRecord.from_api(raw)
+            rec = _parse_or_skip(JobChangeRecord, raw)
+            if rec is not None:
+                yield rec
 
     async def iter_acquisitions(
         self,
@@ -181,7 +190,9 @@ class SignalBaseClient:
         async for raw in self._iter_raw(
             ACQUISITIONS_ACTOR, filters, per_page=per_page, max_pages=max_pages
         ):
-            yield AcquisitionRecord.from_api(raw)
+            rec = _parse_or_skip(AcquisitionRecord, raw)
+            if rec is not None:
+                yield rec
 
     # ── generic transport ─────────────────────────────────────────────
 
@@ -237,3 +248,19 @@ class SignalBaseClient:
 def _compact(d: dict[str, Any]) -> dict[str, Any]:
     """Drop None-valued keys so we only send filters that are set."""
     return {k: v for k, v in d.items() if v is not None}
+
+
+def _parse_or_skip(model_cls, raw: dict):
+    """Build a record, or log+skip on a validation error.
+
+    One malformed row (e.g. an unexpected field type from the upstream API)
+    must never crash a whole paid pull — we already spent the credits.
+    """
+    try:
+        return model_cls.from_api(raw)
+    except Exception as e:  # noqa: BLE001 — defensive at the API boundary
+        logger.warning(
+            "skipping unparseable %s record (%s): %.120s",
+            model_cls.__name__, e, raw,
+        )
+        return None

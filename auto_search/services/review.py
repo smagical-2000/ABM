@@ -82,15 +82,17 @@ class ReviewService:
     def list_panel(
         self,
         *,
+        statuses: tuple[str, ...] = ("qualified",),
         segment: str | None = None,
         signal_type: str | None = None,
     ) -> list[PanelCompany]:
-        """Qualified companies still awaiting a decision (review_status pending).
+        """Companies of the given verdict status(es) still awaiting a decision.
 
-        Promoted / rejected / deferred companies drop out of the panel. Optional
-        filters narrow by segment or by presence of a given signal type.
+        Defaults to `qualified`; pass `("needs_review",)` for that tab. Only
+        review_status='pending' rows surface — promoted / rejected / deferred
+        drop out. Optional filters narrow by segment or signal type.
         """
-        rows = self._repo.panel(statuses=("qualified",))
+        rows = self._repo.panel(statuses=statuses)
         out: list[PanelCompany] = []
         for row in rows:
             if row.get("review_status", "pending") != "pending":

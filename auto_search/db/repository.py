@@ -155,7 +155,7 @@ class JsonFileRepository:
                 "source": sig.source,
                 "signal_type": sig.signal_type,
                 "source_external_id": sig.source_external_id,
-                "summary": _signal_summary(sig),
+                "summary": sig.summary,
                 "signal_strength": sig.signal_strength,
                 "observed_at": sig.observed_at.isoformat(),
                 "payload": sig.payload,
@@ -247,18 +247,5 @@ class JsonFileRepository:
 # ── helpers ───────────────────────────────────────────────────────────
 
 
-def _signal_summary(sig) -> str:
-    """Human one-liner for the UI's 'why is this here' list."""
-    p = sig.payload
-    if sig.signal_type == "layoff":
-        n = p.get("laid_off_count")
-        where = p.get("city") or p.get("state") or ""
-        head = f"{n} laid off" if n else "layoff"
-        return f"{head}{f' in {where}' if where else ''}".strip()
-    return sig.signal_type
-
-
-# NOTE: PostgresRepository(asyncpg) implements the same protocol against
-# schema.sql. Deferred until Railway Postgres is connected — the JSON impl
-# above keeps the pipeline runnable and tested until then. The swap is a
-# one-line change at the call site (which repo we instantiate).
+# Signal-summary text lives on RawSignal.summary (models.py) so JSON and
+# Postgres repos render the 'why discovered' line identically.

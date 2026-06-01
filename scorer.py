@@ -28,7 +28,9 @@ load_dotenv(Path(__file__).parent / ".env")
 # Configuration
 # ---------------------------------------------------------------------------
 
-MODEL = "claude-opus-4-7"
+# Sonnet by default — markedly cheaper than Opus, ample for scoring. Override
+# with ANTHROPIC_MODEL if a deeper model is ever needed for a one-off.
+MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 OUTPUTS_DIR = Path(__file__).parent / "outputs"
 

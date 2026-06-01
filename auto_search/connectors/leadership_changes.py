@@ -265,7 +265,7 @@ if __name__ == "__main__":
 
     from dotenv import load_dotenv
 
-    load_dotenv()
+    load_dotenv(override=True)
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s  %(levelname)-7s  %(message)s")
     # Usage: python -m auto_search.connectors.leadership_changes [days] [limit] [pages]

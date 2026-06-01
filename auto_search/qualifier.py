@@ -32,7 +32,7 @@ from auto_search import llm
 from auto_search.models import MIN_LAID_OFF, QualificationResult, RawSignal
 from auto_search.normalize import slugify
 
-load_dotenv()
+load_dotenv(override=True)
 logger = logging.getLogger(__name__)
 
 _MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")

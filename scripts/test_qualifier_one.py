@@ -34,7 +34,7 @@ from dotenv import load_dotenv
 from auto_search.models import RawSignal
 from auto_search.qualifier import qualify
 
-load_dotenv()
+load_dotenv(override=True)
 
 
 # Hand-picked test cases covering each ICP class

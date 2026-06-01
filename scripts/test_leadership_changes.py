@@ -29,7 +29,7 @@ from dotenv import load_dotenv
 from auto_search import pipeline
 from auto_search.connectors.leadership_changes import LeadershipChangesConnector
 
-load_dotenv()
+load_dotenv(override=True)
 
 BOLD, GREEN, YELLOW, RED, DIM, RESET = (
     "\033[1m", "\033[92m", "\033[93m", "\033[91m", "\033[2m", "\033[0m",

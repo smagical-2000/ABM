@@ -4,14 +4,13 @@ Detects US healthcare leaders (CEO/CFO/CMO/CNO/CIO, revenue-cycle, finance,
 population-health) who recently changed jobs — deterministically, from
 SignalBase's real-time job-change feed (each record has an `occurredAt` date).
 
-CREDIT NOTE: SignalBase is billed via Apify at ~1 credit per page (≤50 rows).
-The connector pages newest-first and STOPS once it crosses the date cutoff, so
-a daily run is typically 1 page. `--pages` caps it.
+CREDIT NOTE: SignalBase bills per RECORD (~$30 / 1,000). Cost of a run ≈
+--limit × --pages. Defaults are tiny (5 × 1 = 5 records) so a CLI check is cheap.
 
 Run:
-    python scripts/test_leadership_changes.py                    # 30d, 3 pages
-    python scripts/test_leadership_changes.py --days 7 --pages 1 # daily-cron shape
-    python scripts/test_leadership_changes.py --qualify          # + Claude ICP check
+    python scripts/test_leadership_changes.py                     # 5 records (~5)
+    python scripts/test_leadership_changes.py --limit 5 --days 30 # explicit
+    python scripts/test_leadership_changes.py --qualify           # + Claude ICP check
 """
 
 from __future__ import annotations
@@ -52,10 +51,12 @@ async def main(args: argparse.Namespace) -> None:
 
     print(f"\n{BOLD}{'─'*70}\n  SignalBase Leadership Changes — US Healthcare"
           f"\n{'─'*70}{RESET}")
+    est = args.limit * args.pages
     print(f"  Window:  since {since.date()} ({args.days}d)")
-    print(f"  Pages:   up to {args.pages}  (~{args.pages} Apify credit(s))")
+    print(f"  {RED}Cost:    ~{est} record-credit(s)  "
+          f"(limit {args.limit} × {args.pages} page){RESET}")
 
-    connector = LeadershipChangesConnector(max_pages=args.pages)
+    connector = LeadershipChangesConnector(max_pages=args.pages, per_page=args.limit)
 
     if not args.qualify:
         n = 0
@@ -72,7 +73,7 @@ async def main(args: argparse.Namespace) -> None:
 
     print(f"\n  {DIM}Running full pipeline (SignalBase + Claude qualification)…{RESET}")
     n = 0
-    async for cand in pipeline.run(connector, since, limit=args.pages * 50):
+    async for cand in pipeline.run(connector, since, limit=args.limit * args.pages):
         n += 1
         q = cand.qualification
         icon = (f"{GREEN}✅{RESET}" if q.qualified else
@@ -91,9 +92,12 @@ if __name__ == "__main__":
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--days", type=int, default=30,
                    help="Lookback window on occurredAt (default 30)")
-    p.add_argument("--pages", type=int, default=3,
-                   help="Max pages to fetch (≈ credits). Connector stops early "
-                        "at the date cutoff (default 3)")
+    p.add_argument("--limit", type=int, default=5,
+                   help="Records per page. COST = SignalBase bills per record "
+                        "(~$30/1000), so spend ≈ limit × pages. Default 5.")
+    p.add_argument("--pages", type=int, default=1,
+                   help="Max pages (connector stops early at the date cutoff). "
+                        "Default 1.")
     p.add_argument("--qualify", action="store_true",
                    help="Run Claude ICP qualification on each company")
     p.add_argument("--debug", action="store_true")

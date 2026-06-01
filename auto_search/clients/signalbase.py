@@ -1,31 +1,29 @@
-"""SignalBase client — real-time job-change signals via an Apify actor.
+"""SignalBase client — real-time GTM signals via Apify actors.
 
-Why SignalBase
---------------
-A purpose-built, real-time job-change feed (~1M tracked changes). Each record
-carries `occurredAt` (exact recency), the new role, and full company context
-(name, domain, industry, country, employee count). Deterministic: no news
-scraping, no LLM in the detection path.
+SignalBase exposes several signal feeds, each as its own Standby Apify actor:
+  • job changes   — executive/leadership role changes
+  • acquisitions  — M&A deals (acquirer + acquired company)
+  (funding is available too; add an actor + record model when needed)
 
-How it's called
----------------
-SignalBase is wrapped by a Standby Apify actor. We invoke it through Apify's
-`run-sync` endpoint with the filters as a JSON body (the same shape the Apify
-console's input "JSON" tab shows). The actor proxies to SignalBase and returns
+All feeds share the same transport: POST the filters as a JSON body to the
+actor's Apify `run-sync` endpoint; the actor proxies to SignalBase and returns
 its native response: {success, data:[...], pagination:{...}, meta:{creditsUsed}}.
 
-Server-side filters that actually work: `countries`, `seniorities`, date.
-`categories`/`industry`/`subcategories` are silently ignored by the actor, so
-healthcare + role filtering is done client-side in the connector.
+Server-side filters that work (per SignalBase docs):
+  • `categories`  — pipe-separated LinkedIn industry labels (company industry)
+  • `countries`   — comma-separated ISO codes
+  • `positions`   — free-text role match (job changes)
+  • `seniorities` — enum
+  • date_preset / dateFrom / dateTo
+  (`industry`/`subcategories` behave differently — we use `categories`.)
 
 CREDIT SAFETY
 -------------
-Apify bills one "api-call" event per page (≤ per_page rows), regardless of how
-many match. So cost == pages fetched. The client:
-  • caps pages at MAX_PAGES,
-  • yields page-by-page so the connector can STOP early (it pages newest-first
-    and bails once it crosses the date cutoff),
-  • logs the running page/credit count.
+SignalBase bills per RECORD returned (~$20–30 / 1,000). Cost of a pull ≈
+per_page × pages_fetched, so keep per_page SMALL when testing. The client:
+  • caps per_page at MAX_PER_PAGE and pages at MAX_PAGES,
+  • yields page-by-page so a connector can STOP early at its date cutoff,
+  • logs rows pulled per page so spend is visible.
 """
 
 from __future__ import annotations
@@ -40,38 +38,86 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-_ACTOR = "signalbase~signalbase-job-changes"
-_RUN_SYNC = f"https://api.apify.com/v2/acts/{_ACTOR}/run-sync"
+# One actor per signal feed.
+JOB_CHANGES_ACTOR = "signalbase~signalbase-job-changes"
+ACQUISITIONS_ACTOR = "signalbase~signalbase-acquisitions"
 
-# Hard ceiling on pages per pull, so one run can't drain the Apify balance.
+_RUN_SYNC = "https://api.apify.com/v2/acts/{actor}/run-sync"
+
+# Hard ceilings so one run can't drain the balance. SignalBase bills per
+# record, so per_page is the real cost knob — cap it low.
 MAX_PAGES = 10
-DEFAULT_PER_PAGE = 50  # the actor's effective page size
+MAX_PER_PAGE = 50
+DEFAULT_PER_PAGE = 5  # cost-safe default (records per call = credits)
 
 
-class JobChangeRecord(BaseModel):
-    """The subset of a SignalBase signal we use. Extra fields ignored."""
+# ── typed records ─────────────────────────────────────────────────────
+
+
+class _BaseRecord(BaseModel):
+    """Shared helper: build from a raw dict, ignoring unknown fields."""
+
+    @classmethod
+    def from_api(cls, raw: dict[str, Any]):
+        known = {k: raw.get(k) for k in cls.model_fields}
+        return cls(**{k: v for k, v in known.items() if v is not None})
+
+
+class JobChangeRecord(_BaseRecord):
+    """A SignalBase job-change signal (subset we use)."""
 
     signalId: str | None = None
-    occurredAt: str | None = None           # ISO ts — the recency field
+    occurredAt: str | None = None           # ISO ts — recency
     personName: str | None = None
     personLinkedinUrl: str | None = None
     newRole: str | None = None
     postContent: str | None = None
     companyName: str | None = None
-    companyWebsite: str | None = None       # domain (may be a short/vanity link)
+    companyWebsite: str | None = None
     companyLinkedinUrl: str | None = None
     companyIndustry: str | None = None
+    companySubcategory: str | None = None
     companyCountry: str | None = None
     companyEmployeeCount: int | None = None
 
-    @classmethod
-    def from_api(cls, raw: dict[str, Any]) -> JobChangeRecord:
-        known = {k: raw.get(k) for k in cls.model_fields}
-        return cls(**{k: v for k, v in known.items() if v is not None})
+
+class AcquisitionRecord(_BaseRecord):
+    """A SignalBase acquisition signal (subset we use).
+
+    The PRIMARY company fields (companyName, …) describe the ACQUIRED company —
+    the one "in transition", which is the buying signal we care about. The
+    acquiringCompany* fields describe the buyer (kept for context).
+    """
+
+    signalId: str | None = None
+    occurredAt: str | None = None           # ISO ts — recency
+    announcedDate: str | None = None
+    # acquired (target) company — the signal subject
+    companyName: str | None = None
+    companyWebsite: str | None = None
+    companyLinkedin: str | None = None
+    companyIndustry: str | None = None
+    companySubcategory: str | None = None
+    companyCountry: str | None = None
+    companyEmployeeCount: int | None = None
+    companyDescription: str | None = None
+    # acquiring company — context
+    acquiringCompanyName: str | None = None
+    acquiringCompanyWebsite: str | None = None
+    acquiringCompanyIndustry: str | None = None
+    acquiringCompanyCountry: str | None = None
+    # deal
+    amount: int | None = None
+    currency: str | None = None
+    percentage: float | None = None
+    sources: list[dict] | None = None
+
+
+# ── client ────────────────────────────────────────────────────────────
 
 
 class SignalBaseClient:
-    """Pages the SignalBase job-changes feed via Apify run-sync."""
+    """Pages any SignalBase feed via Apify run-sync. Actor-agnostic."""
 
     def __init__(
         self,
@@ -82,7 +128,9 @@ class SignalBaseClient:
         self._token = api_token or os.getenv("APIFY_API_KEY")
         if not self._token:
             raise RuntimeError("APIFY_API_KEY not set in .env")
-        self._http = http  # injected for tests; otherwise we open per-call
+        self._http = http  # injected for tests; otherwise opened per-call
+
+    # ── typed feeds ───────────────────────────────────────────────────
 
     async def iter_job_changes(
         self,
@@ -90,65 +138,102 @@ class SignalBaseClient:
         positions: str | None = None,
         countries: str = "US",
         seniorities: str | None = None,
-        industry: str | None = None,
+        categories: str | None = None,
         date_preset: str | None = None,
-        date_from: str | None = None,
         per_page: int = DEFAULT_PER_PAGE,
-        max_pages: int = 3,
+        max_pages: int = 1,
     ) -> AsyncIterator[JobChangeRecord]:
-        """Yield job-change records newest-first, page by page.
+        """Yield job-change records newest-first.
 
-        The caller decides when to stop consuming (e.g. once records predate
-        its cutoff) — yielding lazily keeps credit spend minimal.
+        `positions` (free-text role match) is the strongest narrowing;
+        `categories` filters by company industry server-side.
+        """
+        filters = _compact({
+            "positions": positions,
+            "countries": countries,
+            "seniorities": seniorities,
+            "categories": categories,
+            "date_preset": date_preset,
+        })
+        async for raw in self._iter_raw(
+            JOB_CHANGES_ACTOR, filters, per_page=per_page, max_pages=max_pages
+        ):
+            yield JobChangeRecord.from_api(raw)
 
-        `positions` is a free-text role filter (partial match on the new role)
-        and is the strongest server-side narrowing we have — pass Galyna's
-        target titles here so most rows are already relevant. `industry` is
-        forwarded but ignored by the run-sync path today, so callers still
-        filter industry locally.
+    async def iter_acquisitions(
+        self,
+        *,
+        categories: str | None = None,
+        countries: str = "US",
+        date_preset: str | None = None,
+        per_page: int = DEFAULT_PER_PAGE,
+        max_pages: int = 1,
+    ) -> AsyncIterator[AcquisitionRecord]:
+        """Yield acquisition records newest-first.
+
+        `categories` filters by the ACQUIRED company's industry server-side.
+        """
+        filters = _compact({
+            "categories": categories,
+            "countries": countries,
+            "date_preset": date_preset,
+        })
+        async for raw in self._iter_raw(
+            ACQUISITIONS_ACTOR, filters, per_page=per_page, max_pages=max_pages
+        ):
+            yield AcquisitionRecord.from_api(raw)
+
+    # ── generic transport ─────────────────────────────────────────────
+
+    async def _iter_raw(
+        self,
+        actor: str,
+        filters: dict[str, Any],
+        *,
+        per_page: int,
+        max_pages: int,
+    ) -> AsyncIterator[dict]:
+        """Page an actor's feed, yielding raw record dicts newest-first.
+
+        Stops at the last available page. Callers stop earlier (at their date
+        cutoff) by simply not consuming further — every record yielded after
+        the cutoff still costs credits, so connectors break promptly.
         """
         pages = min(max_pages, MAX_PAGES)
-        base_filters: dict[str, Any] = {
-            "countries": countries,
+        per_page = max(1, min(per_page, MAX_PER_PAGE))
+        base = {
+            **filters,
             "limit": per_page,
-            "sort_by": "occurred_at",   # API value is snake_case (not occurredAt)
+            "sort_by": "occurred_at",   # snake_case API value (not occurredAt)
             "sort_order": "desc",
         }
-        if positions:
-            base_filters["positions"] = positions
-        if seniorities:
-            base_filters["seniorities"] = seniorities
-        if industry:
-            base_filters["industry"] = industry
-        if date_preset:
-            base_filters["date_preset"] = date_preset
-        if date_from:
-            base_filters["dateFrom"] = date_from
 
         for page in range(1, pages + 1):
-            body = {**base_filters, "page": page}
-            data = await self._run_sync(body)
+            data = await self._run_sync(actor, {**base, "page": page})
             records = data.get("data", []) or []
             credits = data.get("meta", {}).get("creditsUsed", "?")
-            logger.info("signalbase page %d/%d: %d records (credits used: %s)",
-                        page, pages, len(records), credits)
-
+            logger.info(
+                "signalbase[%s] page %d/%d: %d records (credits: %s)",
+                actor.split("~")[-1], page, pages, len(records), credits,
+            )
             if not records:
                 break
             for raw in records:
-                yield JobChangeRecord.from_api(raw)
-
-            # No further pages available?
+                yield raw
             if not data.get("pagination", {}).get("hasNextPage", False):
                 break
 
-    # ── internals ─────────────────────────────────────────────────────
-
-    async def _run_sync(self, body: dict) -> dict:
+    async def _run_sync(self, actor: str, body: dict) -> dict:
+        url = _RUN_SYNC.format(actor=actor)
         params = {"token": self._token}
         if self._http is not None:
-            resp = await self._http.post(_RUN_SYNC, params=params, json=body)
+            resp = await self._http.post(url, params=params, json=body)
             return resp.json()
         async with httpx.AsyncClient(timeout=120.0) as c:
-            resp = await c.post(_RUN_SYNC, params=params, json=body)
+            resp = await c.post(url, params=params, json=body)
             return resp.json()
+
+
+def _compact(d: dict[str, Any]) -> dict[str, Any]:
+    """Drop None-valued keys so we only send filters that are set."""
+    return {k: v for k, v in d.items() if v is not None}

@@ -33,7 +33,9 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
 from auto_search.clients.signalbase import JobChangeRecord, SignalBaseClient
+from auto_search.healthcare import CATEGORIES_FILTER, is_healthcare_provider
 from auto_search.models import RawSignal
+from auto_search.normalize import clean_domain, parse_iso_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -56,26 +58,6 @@ _TARGET_POSITIONS = ",".join((
     "population health",
     "vp finance",
 ))
-
-# Sent as a hint (ignored by run-sync today, used if called via standby).
-# Provider/payer industries only — pharma/biotech/device are ICP disqualifiers.
-_HINT_INDUSTRIES = "Hospitals and Health Care,Medical Practices,Mental Health Care"
-
-# Client-side healthcare gate. Match provider/payer industry strings…
-# NOTE: use "hospitals" (plural, as in LinkedIn's "Hospitals and Health Care")
-# not "hospital" — the latter is a substring of "Hospitality" and would let
-# resorts/bars through.
-_HEALTHCARE_INCLUDE = (
-    "health care", "hospitals", "medical practice", "mental health",
-    "behavioral health", "nursing", "home health", "ambulatory",
-    "health system", "health insurance",
-)
-# …but exclude industries that look healthcare-ish but are out of ICP:
-# life sciences (pharma/biotech/device) and hospitality (the "hospital" trap).
-_HEALTHCARE_EXCLUDE = (
-    "pharmaceutical", "biotechnology", "medical device", "medical equipment",
-    "research services", "hospitality",
-)
 
 # Multi-word title phrases matching Galyna's target roles (substring match
 # on the lowercased newRole). These are specific enough not to misfire.
@@ -115,10 +97,14 @@ class LeadershipChangesConnector:
         self,
         *,
         client: SignalBaseClient | None = None,
-        max_pages: int = 3,
+        max_pages: int = 1,
+        per_page: int = 5,
     ) -> None:
+        # COST = SignalBase bills per RECORD returned (~$30/1000). So the spend
+        # of one pull ≈ per_page × max_pages. Keep per_page small for testing.
         self._client = client or SignalBaseClient()
         self._max_pages = max_pages
+        self._per_page = per_page
 
     async def pull(self, since: datetime) -> AsyncIterator[RawSignal]:
         """Yield a leadership_change signal per US healthcare leader who
@@ -131,8 +117,9 @@ class LeadershipChangesConnector:
         records = self._client.iter_job_changes(
             positions=_TARGET_POSITIONS,        # primary server-side narrowing
             countries="US",
+            categories=CATEGORIES_FILTER,       # healthcare industries, server-side
             date_preset=_since_to_preset(since),
-            industry=_HINT_INDUSTRIES,          # hint only (ignored by run-sync)
+            per_page=self._per_page,
             max_pages=self._max_pages,
         )
 
@@ -168,7 +155,7 @@ def _record_to_signal(
     if not company:
         return None, "missing_company"
 
-    observed_at = _parse_dt(rec.occurredAt)
+    observed_at = parse_iso_datetime(rec.occurredAt)
     if observed_at is None:
         return None, "unparseable_date"
     if observed_at < since:
@@ -177,7 +164,7 @@ def _record_to_signal(
     if (rec.companyCountry or "").upper() not in ("US", ""):
         return None, "non_us"
 
-    if not _is_healthcare(rec.companyIndustry):
+    if not is_healthcare_provider(rec.companyIndustry, rec.companySubcategory):
         return None, "not_healthcare"
 
     if not _is_target_title(rec.newRole):
@@ -189,7 +176,7 @@ def _record_to_signal(
             source_external_id=rec.signalId or _fallback_id(rec, observed_at),
             signal_type="leadership_change",
             company_name_raw=company,
-            company_domain_raw=_clean_domain(rec.companyWebsite),
+            company_domain_raw=clean_domain(rec.companyWebsite),
             observed_at=observed_at,
             signal_strength=_signal_strength(rec.newRole),
             payload={
@@ -204,16 +191,6 @@ def _record_to_signal(
         ),
         "",
     )
-
-
-def _is_healthcare(industry: str | None) -> bool:
-    """True for provider/payer industries, False for pharma/biotech/device."""
-    ind = (industry or "").lower()
-    if not ind:
-        return False
-    if any(x in ind for x in _HEALTHCARE_EXCLUDE):
-        return False
-    return any(x in ind for x in _HEALTHCARE_INCLUDE)
 
 
 def _is_csuite(role: str | None) -> bool:
@@ -249,37 +226,10 @@ def _word(text: str, w: str) -> bool:
     return re.search(rf"\b{re.escape(w)}\b", text) is not None
 
 
-def _clean_domain(website: str | None) -> str | None:
-    """SignalBase sometimes returns vanity links (e.g. 'co.jll/4ozae4w').
-    Keep only plausible bare domains; the qualifier finds the real site anyway.
-    """
-    w = (website or "").strip().lower()
-    if not w or "/" in w or " " in w or "." not in w:
-        return None
-    return w
-
-
 def _fallback_id(rec: JobChangeRecord, observed_at: datetime) -> str:
     name = (rec.personName or "unknown").lower().replace(" ", "_")
     comp = "".join(c if c.isalnum() else "_" for c in (rec.companyName or "")).strip("_")
     return f"{name}::{comp}::{observed_at.date().isoformat()}"
-
-
-def _parse_dt(s: str | None) -> datetime | None:
-    s = (s or "").strip()
-    if not s:
-        return None
-    # ISO-8601, typically '2026-05-30T01:19:36.672Z'
-    try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00"))
-    except ValueError:
-        pass
-    for fmt in ("%Y-%m-%d", "%Y-%m"):
-        try:
-            return datetime.strptime(s, fmt).replace(tzinfo=UTC)
-        except ValueError:
-            continue
-    return None
 
 
 def _since_to_preset(since: datetime) -> str:
@@ -318,14 +268,16 @@ if __name__ == "__main__":
     load_dotenv()
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s  %(levelname)-7s  %(message)s")
+    # Usage: python -m auto_search.connectors.leadership_changes [days] [limit] [pages]
     days = int(sys.argv[1]) if len(sys.argv) > 1 else 30
+    limit = int(sys.argv[2]) if len(sys.argv) > 2 else 5    # records/call = credits
+    pages = int(sys.argv[3]) if len(sys.argv) > 3 else 1
     since = datetime.now(UTC) - timedelta(days=days)
-    pages = int(sys.argv[2]) if len(sys.argv) > 2 else 3
-    print(f"\nSignalBase leadership changes since {since.date()} ({days}d), "
-          f"max {pages} page(s) ≈ {pages} Apify credit(s)\n")
+    print(f"\nSignalBase leadership changes since {since.date()} ({days}d) — "
+          f"≈ {limit * pages} record-credit(s) (limit {limit} × {pages} page)\n")
 
     async def _run() -> None:
-        connector = LeadershipChangesConnector(max_pages=pages)
+        connector = LeadershipChangesConnector(max_pages=pages, per_page=limit)
         n = 0
         async for sig in connector.pull(since=since):
             n += 1

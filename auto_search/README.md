@@ -29,13 +29,15 @@ of the platform is *promotion*: a human turning a qualified company into an
 
 | File | Responsibility |
 |---|---|
-| `normalize.py` | **Single source of truth** for company-name dedup keys + loose int parsing |
+| `normalize.py` | **Single source of truth** for dedup keys + loose int / ISO-date / domain parsing |
+| `healthcare.py` | **Single source of truth** for the healthcare-ICP gate (`is_healthcare_provider`) + `categories` filter |
 | `models.py` | `RawSignal`, `QualificationResult`, shared constants |
 | `llm.py` | Shared Claude web_search call + JSON extraction (used by qualifier + connectors) |
 | `connectors/base.py` | `SignalConnector` protocol — the contract every source implements |
 | `connectors/warntracker.py` | Layoffs source — WARN notices (Playwright → `/api/sample_warn_listings`) |
 | `connectors/leadership_changes.py` | Leadership source — SignalBase job changes (CXO/rev-cycle/finance) |
-| `clients/signalbase.py` | SignalBase transport via Apify run-sync (paged, credit-capped) |
+| `connectors/acquisitions.py` | M&A source — SignalBase acquisitions (acquired healthcare co) |
+| `clients/signalbase.py` | SignalBase transport via Apify run-sync — actor-agnostic, paged, credit-capped |
 | `qualifier.py` | Website-based ICP evaluation via Claude + `web_search`; writes traces |
 | `pipeline.py` | Orchestration: pull → dedup → qualify → `CompanyCandidate` |
 | `db/schema.sql` | Target Postgres schema (3 tables, dedup via UNIQUE constraints) |
@@ -46,13 +48,19 @@ of the platform is *promotion*: a human turning a qualified company into an
 | Source | Signal | Recency | Filtering |
 |---|---|---|---|
 | **warntracker** | Layoffs (WARN filings) | layoff/notice date | structural (US, ≥10 laid off) + website ICP |
-| **leadership_changes** | New CXO / rev-cycle / finance / pop-health hires | `occurredAt` | server: `positions` + `countries`; client: healthcare industry + title + cutoff |
+| **leadership_changes** | New CXO / rev-cycle / finance / pop-health hires | `occurredAt` | server: `positions` + `categories` + `countries`; client: healthcare gate + title + cutoff |
+| **acquisitions** | Healthcare provider/payer **acquired** (in transition) | `occurredAt` | server: `categories` + `countries`; client: healthcare gate (excl. pharma/biotech) + cutoff |
 
-Leadership detection is **deterministic** — SignalBase's `positions` free-text
-filter narrows ~1M job changes to target roles server-side; the connector then
-keeps only US healthcare providers/payers with a leadership title newer than
-the cutoff. No news scraping, no LLM in detection. It pages newest-first and
-stops at the date cutoff to minimise Apify credits (~1 per page).
+Both SignalBase connectors are **deterministic** (no news, no LLM in detection):
+they push the strongest filters server-side — `positions` (leadership) or
+`categories` (both) — then apply the shared `is_healthcare_provider()` gate
+client-side as the authority. Crucially, that gate checks SignalBase's strict
+`companySubcategory` so a biotech mislabelled "Hospitals and Health Care"
+(e.g. a vaccine startup bought by pharma) is excluded. Connectors page
+newest-first and STOP at the date cutoff to minimise per-record spend.
+
+> **Cost:** SignalBase bills per RECORD (~$20–30 / 1,000), so spend ≈
+> `per_page × pages`. Keep `per_page` small (default 5) when testing.
 
 ## Why website-based qualification (not keyword rules)
 

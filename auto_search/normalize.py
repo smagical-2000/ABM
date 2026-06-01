@@ -18,6 +18,7 @@ This module is that one implementation. Import from here; never re-roll it.
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 
 # Legal-entity suffixes and filler words that don't help identify a company.
 # Stripped before generating the dedup key so "Acme Health LLC" and
@@ -103,3 +104,44 @@ def parse_int_loose(value: object) -> int | None:
         return int(digits.group(0).replace(",", ""))
     except ValueError:
         return None
+
+
+def parse_iso_datetime(s: str | None) -> datetime | None:
+    """Parse an ISO-8601 timestamp (or plain date) to an aware UTC datetime.
+
+    Handles the SignalBase shape ('2026-05-30T01:19:36.672Z') plus bare dates
+    ('2026-05-30', '2026-05'). Returns None when nothing parses. Shared by
+    every connector so date handling can't drift between sources.
+    """
+    s = (s or "").strip()
+    if not s:
+        return None
+    parsed: datetime | None = None
+    try:
+        parsed = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        for fmt in ("%Y-%m-%d", "%Y-%m"):
+            try:
+                parsed = datetime.strptime(s, fmt)
+                break
+            except ValueError:
+                continue
+    if parsed is None:
+        return None
+    # fromisoformat on a date-only string ('2026-04-10') yields a NAIVE
+    # datetime; force UTC so callers can always compare against aware cutoffs.
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def clean_domain(website: str | None) -> str | None:
+    """Return a bare domain, or None if the value isn't a clean domain.
+
+    SignalBase sometimes returns vanity/short links (e.g. 'co.jll/4ozae4w');
+    we'd rather store nothing than a broken domain — the qualifier finds the
+    real site anyway. Accepts 'orthoindy.com', rejects anything with a path,
+    a space, or no dot.
+    """
+    w = (website or "").strip().lower()
+    if not w or "/" in w or " " in w or "." not in w:
+        return None
+    return w

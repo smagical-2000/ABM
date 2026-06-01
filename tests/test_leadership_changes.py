@@ -11,12 +11,12 @@ import pytest
 from auto_search.clients.signalbase import JobChangeRecord
 from auto_search.connectors.leadership_changes import (
     LeadershipChangesConnector,
-    _is_healthcare,
     _is_target_title,
     _record_to_signal,
     _signal_strength,
     _since_to_preset,
 )
+from auto_search.healthcare import is_healthcare_provider as _is_healthcare
 
 SINCE = datetime(2026, 3, 1, tzinfo=UTC)
 

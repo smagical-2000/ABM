@@ -39,9 +39,10 @@ import json
 import logging
 import os
 from collections import Counter
-from datetime import datetime, timezone
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 
 from auto_search.models import MIN_LAID_OFF, RawSignal
 from auto_search.normalize import parse_int_loose, slugify
@@ -218,7 +219,13 @@ class WarnTrackerConnector:
         return (
             RawSignal(
                 source=self.source_name,
-                source_external_id=_external_id(company, observed_at),
+                source_external_id=_external_id(
+                    company=company,
+                    observed_at=observed_at,
+                    state=state,
+                    city=city,
+                    company_id=_first(row, _F_COMPANY_ID),
+                ),
                 signal_type="layoff",
                 company_name_raw=company,
                 company_domain_raw=None,  # qualifier discovers the domain
@@ -250,14 +257,33 @@ def _first(row: dict[str, Any], keys: tuple[str, ...]) -> Any:
     return None
 
 
-def _external_id(company: str, observed_at: datetime) -> str:
-    """Stable per-event dedup key: same company + same date = same id.
+def _external_id(
+    *,
+    company: str,
+    observed_at: datetime,
+    state: str | None,
+    city: str | None,
+    company_id: str | None,
+) -> str:
+    """Stable per-EVENT dedup key — must be unique per distinct WARN filing.
 
-    Uses slugify (readable) rather than the dedup normaliser because this id
-    is also used in trace filenames and logs. Company-level dedup (one Claude
-    call per company) is enforced separately via normalize_company_name().
+    A company can file multiple WARN notices on the same date for different
+    sites (e.g. two plants in two cities). Keying on company+date alone would
+    collapse them and silently drop the second one. So we include location
+    and the source's own companyId to keep distinct filings distinct, while
+    staying stable across re-runs (same filing → same id → safe to re-ingest).
+
+    Company-LEVEL dedup (one Claude call per company) is a separate concern,
+    enforced via RawSignal.company_key / normalize_company_name().
     """
-    return f"{slugify(company)}::{observed_at.date().isoformat()}"
+    parts = [
+        slugify(company),
+        (company_id or "").strip().lower(),
+        (state or "").strip().lower(),
+        slugify(city or ""),
+        observed_at.date().isoformat(),
+    ]
+    return "::".join(parts)
 
 
 def _parse_date(s: str) -> datetime | None:
@@ -266,7 +292,7 @@ def _parse_date(s: str) -> datetime | None:
         return None
     for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y"):
         try:
-            return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+            return datetime.strptime(s, fmt).replace(tzinfo=UTC)
         except ValueError:
             continue
     return None
@@ -301,7 +327,7 @@ if __name__ == "__main__":
     )
 
     days = int(sys.argv[1]) if len(sys.argv) > 1 else 90
-    since = datetime.now(timezone.utc) - timedelta(days=days)
+    since = datetime.now(UTC) - timedelta(days=days)
     print(f"\nFetching WARN notices since {since.date()} ({days}d back)\n")
 
     async def _run() -> None:

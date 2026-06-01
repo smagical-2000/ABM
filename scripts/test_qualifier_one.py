@@ -24,7 +24,7 @@ import argparse
 import asyncio
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -94,7 +94,7 @@ def make_signal(case: dict) -> RawSignal:
         source_external_id=f"test::{case['company'].lower()}",
         signal_type="layoff",
         company_name_raw=case["company"],
-        observed_at=datetime.now(timezone.utc),
+        observed_at=datetime.now(UTC),
         signal_strength=0.7,
         payload={
             "laid_off_count": case["laid_off"],

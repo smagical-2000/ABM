@@ -24,11 +24,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -37,6 +36,7 @@ from dotenv import load_dotenv
 
 from auto_search import pipeline
 from auto_search.connectors.warntracker import WarnTrackerConnector
+from auto_search.db import JsonFileRepository
 
 load_dotenv()
 
@@ -73,9 +73,9 @@ async def main(args: argparse.Namespace) -> None:
         os.environ["WARN_USE_CACHE"] = "true"
 
     since = (
-        datetime.fromisoformat(args.since).replace(tzinfo=timezone.utc)
+        datetime.fromisoformat(args.since).replace(tzinfo=UTC)
         if args.since
-        else datetime.now(timezone.utc) - timedelta(days=args.days)
+        else datetime.now(UTC) - timedelta(days=args.days)
     )
     limit = args.limit or DEFAULT_LIMIT
 
@@ -95,7 +95,7 @@ async def main(args: argparse.Namespace) -> None:
         groups = await pipeline.collect_unique_companies(
             connector, since, limit=limit
         )
-        for i, (key, signals) in enumerate(groups.items(), 1):
+        for i, (_key, signals) in enumerate(groups.items(), 1):
             rep = max(signals, key=lambda s: s.signal_strength)
             print(f"  {i:>3}  {rep.company_name_raw[:38]:38}"
                   f"  signals={len(signals)}  s={rep.signal_strength:.2f}")
@@ -103,40 +103,28 @@ async def main(args: argparse.Namespace) -> None:
               f"(from {sum(len(v) for v in groups.values())} signals)")
         return
 
-    # ── full pipeline ──
+    # ── full pipeline (with persistence + cross-run dedup) ──
+    # The repository both stores results AND tells the pipeline which
+    # companies were already decided in a PRIOR run, so they're skipped
+    # (no repeat Claude call) unless --no-skip is passed.
+    repo = JsonFileRepository()
+    skip = None if args.no_skip else repo.already_qualified
+
     banner("Qualifying each unique company via Claude + web_search")
-    stats = {"qualified": 0, "needs_review": 0, "disqualified": 0}
-    qualified_rows: list[dict] = []
+    stats = {"qualified": 0, "needs_review": 0, "disqualified": 0, "error": 0}
 
     idx = 0
-    async for cand in pipeline.run(connector, since, limit=limit):
+    async for cand in pipeline.run(connector, since, limit=limit,
+                                   skip_already_qualified=skip):
         idx += 1
         q = cand.qualification
-
-        if q.needs_human_review:
-            stats["needs_review"] += 1
-        elif q.qualified:
-            stats["qualified"] += 1
-            qualified_rows.append({
-                "company": cand.company_name,
-                "segment": q.segment,
-                "sub_segment": q.sub_segment,
-                "company_type": q.company_type,
-                "employees": q.approximate_employees,
-                "confidence": q.confidence,
-                "reasoning": q.reasoning,
-                "evidence_url": q.evidence_url,
-                "signal_count": len(cand.signals),
-                "laid_off": cand.primary_signal.payload.get("laid_off_count"),
-                "state": cand.primary_signal.payload.get("state"),
-            })
-        else:
-            stats["disqualified"] += 1
+        repo.save_candidate(cand)          # persist verdict + signals
+        stats[q.to_status()] = stats.get(q.to_status(), 0) + 1
 
         print(f"\n  {idx:>3}  {cand.company_name}")
         print(f"       {verdict_icon(q.qualified, q.needs_human_review)}  "
-              f"seg={q.segment or '—':<14} sub={q.sub_segment or '—':<16} "
-              f"type={q.company_type:<9} conf={q.confidence:.2f} "
+              f"status={q.to_status():<13} seg={q.segment or '—':<14} "
+              f"sub={q.sub_segment or '—':<16} conf={q.confidence:.2f} "
               f"signals={len(cand.signals)}")
         if q.evidence_url:
             print(f"       {DIM}↳ {q.evidence_url}{RESET}")
@@ -144,16 +132,13 @@ async def main(args: argparse.Namespace) -> None:
             print(f"       {DIM}{q.reasoning}{RESET}")
 
     banner("Summary")
-    print(f"  Unique companies:    {idx}")
-    print(f"  {GREEN}qualified:           {stats['qualified']}{RESET}")
-    print(f"  {YELLOW}needs review:        {stats['needs_review']}{RESET}")
-    print(f"  {RED}disqualified:        {stats['disqualified']}{RESET}")
-
-    if qualified_rows:
-        out = Path("data/test_qualified_warn.json")
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(qualified_rows, indent=2, default=str))
-        print(f"\n  → wrote {len(qualified_rows)} qualified companies to {out}")
+    print(f"  Companies this run:  {idx}")
+    print(f"  {GREEN}qualified:           {stats.get('qualified', 0)}{RESET}")
+    print(f"  {YELLOW}needs review:        {stats.get('needs_review', 0)}{RESET}")
+    print(f"  {RED}disqualified:        {stats.get('disqualified', 0)}{RESET}")
+    print(f"  {RED}errors:              {stats.get('error', 0)}{RESET}")
+    print("\n  Persisted to: data/discovery_store.json")
+    print(f"  {DIM}Re-run to confirm already-decided companies are skipped.{RESET}")
 
 
 if __name__ == "__main__":
@@ -167,6 +152,8 @@ if __name__ == "__main__":
                    help="Fetch + dedup only — no LLM, no cost")
     p.add_argument("--cache", action="store_true",
                    help="Use cached WARN rows (no browser)")
+    p.add_argument("--no-skip", action="store_true",
+                   help="Re-qualify companies already decided in prior runs")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="Print reasoning for every company, not just qualified")
     p.add_argument("--debug", action="store_true", help="DEBUG logging")

@@ -1,8 +1,13 @@
-# ABM Account Scorer (V1)
+# Magical ABM
 
-CLI tool that runs Galyna's exact ABM scoring frameworks against any company.
+Two parts:
 
-Replaces the manual Claude-in-browser workflow with a single command. Uses Claude Opus 4.7 with adaptive thinking and live web search.
+1. **CLI Account Scorer** (`scorer.py`) — runs Galyna's ABM scoring frameworks
+   against a named company. Uses Claude Opus with live web search.
+2. **Auto Search** (`auto_search/`) — discovery pipeline that finds healthcare
+   companies showing distress/intent signals (starting with layoffs),
+   qualifies them against the ICP, and dedupes them into a review list.
+   See [`auto_search/README.md`](auto_search/README.md).
 
 ---
 
@@ -11,17 +16,26 @@ Replaces the manual Claude-in-browser workflow with a single command. Uses Claud
 ```bash
 cd /Users/sunnydsouza/projects/abm-scorer
 
-# 1. Create virtual environment
+# 1. Virtual environment
 python3 -m venv venv
 source venv/bin/activate
 
-# 2. Install dependencies
+# 2. Dependencies
 pip install -r requirements.txt
 
-# 3. Set API key
-cp .env.example .env
-# Edit .env and paste your real ANTHROPIC_API_KEY
-export ANTHROPIC_API_KEY="sk-ant-..."   # or use direnv / dotenv
+# 3. Browser for the Auto Search connector (warntracker is client-rendered)
+playwright install chromium
+
+# 4. Secrets
+cp .env.example .env        # then edit .env with your real ANTHROPIC_API_KEY
+```
+
+Dev tooling (lint + tests):
+
+```bash
+pip install -e ".[dev]"
+ruff check .
+pytest
 ```
 
 ---
@@ -79,11 +93,12 @@ For 100 accounts: ~$15-$40.
 
 ---
 
-## V1 limitations
+## CLI scorer limitations
 
-- Single company per run (no batch mode yet — V1 keeps it simple)
+- Single company per run (no batch mode in the CLI)
 - Output is markdown only (not pushed to Notion / Salesforce yet)
 - Web search has a 5-search-per-request default cap
-- No deduplication or storage layer — every run is fresh
 
-These get added in V2 once the scoring quality is validated.
+Deduplication + storage now live in the **Auto Search** module
+(`auto_search/`), not the CLI. The CLI remains a deliberately simple
+one-shot tool for ad-hoc scoring.

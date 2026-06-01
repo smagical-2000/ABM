@@ -24,11 +24,11 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-from auto_search.pipeline import CompanyCandidate
+from auto_search.models import CompanyCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +84,7 @@ class JsonFileRepository:
     def save_candidate(self, candidate: CompanyCandidate) -> str:
         key = candidate.company_key
         q = candidate.qualification
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
 
         existing = self._store.get(key)
         if existing is None:
@@ -96,10 +96,12 @@ class JsonFileRepository:
             }
             self._store[key] = existing
 
-        # Upsert the verdict (newest qualification wins).
+        # Upsert the verdict (newest qualification wins). to_status() keeps
+        # operational errors out of the genuine review/disqualified queues.
         existing.update({
             "display_name": candidate.company_name,
-            "icp_status": _icp_status(q.qualified, q.needs_human_review),
+            "domain": q.domain,                 # for domain-first promotion match
+            "icp_status": q.to_status(),
             "segment": q.segment,
             "sub_segment": q.sub_segment,
             "company_type": q.company_type,
@@ -135,9 +137,14 @@ class JsonFileRepository:
         self._flush()
         return key
 
+    # Statuses that count as "already decided" — re-seeing the company
+    # should NOT re-trigger a Claude call. `error` is intentionally absent:
+    # an operational failure should be retried on the next run.
+    _DECIDED_STATUSES = frozenset({"qualified", "needs_review", "disqualified"})
+
     def already_qualified(self, company_key: str) -> bool:
         row = self._store.get(company_key)
-        return bool(row) and row.get("icp_status", "pending") != "pending"
+        return bool(row) and row.get("icp_status") in self._DECIDED_STATUSES
 
     # -- internals --
 
@@ -147,22 +154,27 @@ class JsonFileRepository:
         try:
             return json.loads(self._path.read_text())
         except json.JSONDecodeError:
-            logger.warning("corrupt store at %s — starting empty", self._path)
+            # Never silently wipe data: preserve the corrupt file for forensics
+            # before starting fresh, so a bad write can't erase real history.
+            backup = self._path.with_suffix(self._path.suffix + ".corrupt")
+            try:
+                self._path.replace(backup)
+                logger.error("corrupt store at %s — moved to %s, starting empty",
+                             self._path, backup)
+            except OSError:
+                logger.error("corrupt store at %s — starting empty", self._path)
             return {}
 
     def _flush(self) -> None:
+        """Write atomically: dump to a temp file then rename, so a crash
+        mid-write can't truncate the real store into corrupt JSON."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(self._store, indent=2, default=str))
+        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+        tmp.write_text(json.dumps(self._store, indent=2, default=str))
+        tmp.replace(self._path)
 
 
 # ── helpers ───────────────────────────────────────────────────────────
-
-
-def _icp_status(qualified: bool, needs_review: bool) -> str:
-    """Collapse the two booleans into the schema's single status enum."""
-    if needs_review:
-        return "needs_review"
-    return "qualified" if qualified else "disqualified"
 
 
 def _signal_summary(sig) -> str:

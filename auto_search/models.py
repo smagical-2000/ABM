@@ -2,8 +2,8 @@
 
 Everything here is source-agnostic: a RawSignal looks the same whether it
 came from warntracker, a funding feed, or a leadership-change feed. Keeping
-these definitions in one place is what lets connectors and the qualifier
-stay decoupled.
+these definitions in one place is what lets connectors, the qualifier, the
+pipeline, and the repository stay decoupled (no import cycles).
 """
 
 from __future__ import annotations
@@ -18,22 +18,50 @@ from auto_search.normalize import normalize_company_name, parse_int_loose
 # ── shared constants ──────────────────────────────────────────────────
 
 # Minimum headcount for a layoff to be worth evaluating. Below this, the
-# event is too small to imply the kind of operational pain we sell into.
-# Lives here (not in a connector) so the connector's structural filter and
-# the qualifier's defence-in-depth check can never drift apart.
+# event is too small to imply the operational pain we sell into. Lives here
+# (not in a connector) so the connector's structural filter and the
+# qualifier's defence-in-depth check can never drift apart.
 MIN_LAID_OFF = 10
 
-# ── enums ─────────────────────────────────────────────────────────────
+# ── segments — ONE canonical vocabulary ───────────────────────────────
+#
+# The discovery module speaks `specialty | payer | health_system`. The
+# legacy CLI scorer (scorer.py) and Galyna's frameworks speak
+# `specialties | payer | hs`. These MUST be translated at the boundary or
+# promotion will load the wrong scoring framework. SEGMENT_TO_SCORER is that
+# single, audited mapping — never hand-translate segments anywhere else.
 
 Segment = Literal["specialty", "payer", "health_system"]
+
+SEGMENT_TO_SCORER: dict[Segment, str] = {
+    "specialty": "specialties",      # scorer.py --segment specialties
+    "payer": "payer",                # scorer.py --segment payer
+    "health_system": "hs",           # scorer.py --segment hs
+}
+
+
+def to_scorer_segment(segment: Segment) -> str:
+    """Translate a discovery segment to the CLI scorer's segment id.
+
+    Used at the promotion boundary so `scorer.py --segment <x>` always gets
+    the value it expects. Raises on unknown input rather than silently
+    scoring with the wrong framework.
+    """
+    try:
+        return SEGMENT_TO_SCORER[segment]
+    except KeyError as exc:
+        raise ValueError(f"unknown discovery segment: {segment!r}") from exc
+
 
 CompanyType = Literal[
     "provider", "payer", "vendor", "tech", "pharma", "device",
     "biotech", "government", "consumer", "other", "unknown",
 ]
 
-# Machine verdict status — used by the DB layer to drive the review queue.
-IcpStatus = Literal["pending", "qualified", "needs_review", "disqualified"]
+# Machine verdict status — drives the review queue and keeps genuine
+# disqualifications ("Apple Inc.") separate from operational failures
+# ("website unreachable"). The DB CHECK constraint mirrors these values.
+IcpStatus = Literal["pending", "qualified", "needs_review", "disqualified", "error"]
 
 DecidedBy = Literal["rules", "llm", "rules+llm"]
 
@@ -60,10 +88,10 @@ class RawSignal(BaseModel):
 
     @property
     def company_key(self) -> str:
-        """Canonical dedup key — the same for every signal about a company.
+        """Canonical dedup key — identical for every signal about a company.
 
         This is what the pipeline groups on so one company is qualified
-        once, no matter how many raw signals mention it.
+        once, regardless of how many raw signals mention it.
         """
         return normalize_company_name(self.company_name_raw)
 
@@ -74,6 +102,10 @@ class QualificationResult(BaseModel):
     Produced by Claude after researching the company's website with the
     web_search tool. `evidence_url` is the page the verdict leaned on —
     essential for a human reviewer to sanity-check a borderline call.
+
+    `is_error` distinguishes an operational failure (parse error, LLM
+    timeout, unreachable site) from a genuine low-confidence verdict on a
+    real company. Both want human eyes, but they're different queues.
     """
 
     qualified: bool
@@ -84,7 +116,13 @@ class QualificationResult(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     reasoning: str
     evidence_url: str | None = None
+    # Company's primary domain (e.g. "orthoindy.com"). Captured now so the
+    # eventual promotion step can match domain-first against the accounts
+    # table — the locked dedup rule for the main platform — instead of
+    # re-researching the company later.
+    domain: str | None = None
     needs_human_review: bool = False
+    is_error: bool = False
     decided_by: DecidedBy = "llm"
 
     @field_validator("approximate_employees", mode="before")
@@ -96,3 +134,38 @@ class QualificationResult(BaseModel):
         validation and wrongly force the whole verdict into needs_review.
         """
         return parse_int_loose(v)
+
+    def to_status(self) -> IcpStatus:
+        """Map this verdict to the single status enum used by storage + UI.
+
+        Order matters: errors first (so failures never masquerade as
+        qualified or as ordinary review items), then the qualified/review/
+        disqualified split.
+        """
+        if self.is_error:
+            return "error"
+        if self.qualified and not self.needs_human_review:
+            return "qualified"
+        if self.needs_human_review:
+            return "needs_review"
+        return "disqualified"
+
+
+class CompanyCandidate(BaseModel):
+    """One unique company plus every signal seen for it and its verdict.
+
+    This is the unit the pipeline emits and the repository persists: a
+    deduped company, its provenance (all signals), and the qualifier's
+    decision. Lives in models.py (not pipeline.py) so the repository can
+    import it without creating a pipeline→repository→pipeline cycle.
+    """
+
+    company_key: str                 # normalized dedup key
+    company_name: str                # display name (from strongest signal)
+    signals: list[RawSignal]         # every raw signal for this company
+    qualification: QualificationResult
+
+    @property
+    def primary_signal(self) -> RawSignal:
+        """The strongest signal — the representative for the company."""
+        return max(self.signals, key=lambda s: s.signal_strength)

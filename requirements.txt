@@ -1,5 +1,12 @@
+# Runtime dependencies.
+# After `pip install -r requirements.txt`, run ONCE to fetch the browser
+# used by the warntracker connector:
+#     playwright install chromium
+#
+# Versions are lower-bounded; pin exact versions in a lockfile before
+# deploying to Railway for reproducible builds.
+
 anthropic>=0.92.0
 python-dotenv>=1.0.0
 pydantic>=2.0.0
-httpx>=0.27.0
 playwright>=1.44.0

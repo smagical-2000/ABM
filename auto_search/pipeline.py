@@ -19,13 +19,11 @@ from __future__ import annotations
 
 import logging
 from collections import OrderedDict
+from collections.abc import AsyncIterator, Callable
 from datetime import datetime
-from typing import AsyncIterator, Callable
-
-from pydantic import BaseModel
 
 from auto_search.connectors.base import SignalConnector
-from auto_search.models import QualificationResult, RawSignal
+from auto_search.models import CompanyCandidate, RawSignal
 from auto_search.qualifier import qualify
 
 logger = logging.getLogger(__name__)
@@ -36,37 +34,19 @@ logger = logging.getLogger(__name__)
 AlreadyQualified = Callable[[str], bool]
 
 
-class CompanyCandidate(BaseModel):
-    """One unique company plus all signals seen for it and its verdict.
-
-    This is the unit the pipeline emits and the DB persists: a deduped
-    company, its provenance (every signal), and the qualifier's decision.
-    """
-
-    company_key: str                 # normalized dedup key
-    company_name: str                # display name (from first signal seen)
-    signals: list[RawSignal]         # every raw signal for this company
-    qualification: QualificationResult
-
-    @property
-    def primary_signal(self) -> RawSignal:
-        """The strongest signal — used as the representative for the company."""
-        return max(self.signals, key=lambda s: s.signal_strength)
-
-
 async def collect_unique_companies(
     connector: SignalConnector,
     since: datetime,
     *,
     limit: int | None = None,
-) -> "OrderedDict[str, list[RawSignal]]":
+) -> OrderedDict[str, list[RawSignal]]:
     """Pull signals and group them by company, preserving first-seen order.
 
     Returns an ordered map of company_key -> [signals]. Grouping here means
     the qualifier never sees the same company twice. `limit` caps the number
     of UNIQUE companies (not raw signals) — useful for cheap test runs.
     """
-    groups: "OrderedDict[str, list[RawSignal]]" = OrderedDict()
+    groups: OrderedDict[str, list[RawSignal]] = OrderedDict()
 
     async for signal in connector.pull(since=since):
         key = signal.company_key
@@ -96,7 +76,7 @@ async def run(
     since: datetime,
     *,
     limit: int | None = None,
-    skip_already_qualified: "AlreadyQualified | None" = None,
+    skip_already_qualified: AlreadyQualified | None = None,
 ) -> AsyncIterator[CompanyCandidate]:
     """Run the full discovery pipeline, yielding one candidate per company.
 

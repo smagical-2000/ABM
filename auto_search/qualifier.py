@@ -24,7 +24,7 @@ import os
 import random
 import re
 import textwrap
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -151,6 +151,7 @@ ICP_SYSTEM_PROMPT = textwrap.dedent("""
       "confidence": <float 0.0–1.0>,
       "reasoning": "<2-3 sentences with specific evidence from the website>",
       "evidence_url": "<the URL that most informed your decision>",
+      "domain": "<company's primary domain, e.g. orthoindy.com, or null>",
       "needs_human_review": <true if confidence < 0.7 or can't access website>
     }
 
@@ -264,6 +265,7 @@ async def qualify_with_llm(signal: RawSignal) -> QualificationResult:
             confidence=0.0,
             reasoning=f"LLM returned non-JSON output: {e}",
             needs_human_review=True,
+            is_error=True,
             decided_by="llm",
         )
     else:
@@ -280,6 +282,7 @@ async def qualify_with_llm(signal: RawSignal) -> QualificationResult:
                 confidence=0.0,
                 reasoning=f"LLM verdict did not match schema: {e}",
                 needs_human_review=True,
+                is_error=True,
                 decided_by="llm",
             )
 
@@ -337,6 +340,7 @@ async def qualify(signal: RawSignal) -> QualificationResult:
             confidence=0.0,
             reasoning=f"LLM bad request: {e}",
             needs_human_review=True,
+            is_error=True,
             decided_by="rules+llm",
         )
     except Exception as e:    # noqa: BLE001 — never crash the pipeline
@@ -346,6 +350,7 @@ async def qualify(signal: RawSignal) -> QualificationResult:
             confidence=0.0,
             reasoning=f"LLM call failed: {type(e).__name__}: {e}",
             needs_human_review=True,
+            is_error=True,
             decided_by="rules+llm",
         )
 
@@ -462,7 +467,7 @@ def _write_trace(
     """
     try:
         _TRACE_DIR.mkdir(parents=True, exist_ok=True)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         day_dir = _TRACE_DIR / now.date().isoformat()
         day_dir.mkdir(exist_ok=True)
 

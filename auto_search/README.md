@@ -1,112 +1,106 @@
-# Auto Search Module
+# Auto Search — discovery pipeline
 
-System A — **pre-account discovery**. Ingests intent signals from external
-sources, applies a two-stage ICP gate, and surfaces qualified candidate
-companies for Galyna's review.
+Finds healthcare companies showing distress/intent signals (starting with
+layoffs), qualifies them against Magical's ICP using Claude + live website
+research, and produces a deduped list of qualified accounts for human review.
 
-> Auto Search **never** auto-creates accounts. Galyna promotes from a
-> review queue. This is the only bridge to the main platform.
+This is **System A (discovery)** — front-of-funnel. It never runs campaigns
+and never touches engagement scoring (System B). The only bridge to the rest
+of the platform is *promotion*: a human turning a qualified company into an
+`accounts` row.
 
----
-
-## Layout
-
-```
-auto_search/
-├── __init__.py
-├── models.py                   # Pydantic: RawSignal, QualificationResult
-├── qualifier.py                # ICP gate: rules → LLM → calibrated verdict
-└── connectors/
-    ├── base.py                 # SignalConnector protocol
-    └── layoffs_fyi.py          # First connector
-```
-
-Adding a new source = **one new file in `connectors/`** that satisfies the
-`SignalConnector` protocol. No other file changes.
-
----
-
-## Pipeline
+## Flow
 
 ```
-   ┌──────────────┐    ┌──────────────────┐    ┌──────────────────┐
-   │ Connector    │───►│ Stage 1: Rules   │───►│ Stage 2: LLM     │
-   │ (CSV / API)  │    │ (free, instant)  │    │ (~$0.01/call)    │
-   └──────────────┘    └──────────────────┘    └──────────────────┘
-        │                       │                       │
-        ▼                       ▼                       ▼
-  RawSignal yielded      ~80% noise killed      QualificationResult
-                         here for $0            with confidence + reasoning
+ Connector            Pipeline                 Qualifier            Repository
+ ─────────            ────────                 ─────────            ──────────
+ warntracker.com  →   pull + group by      →   Claude visits    →  persist
+ (Playwright)         company (dedup)          the company's        verdict +
+                      ↓                         website, classifies  signals
+                      skip already-            vs ICP, returns
+                      qualified (x-run)         structured JSON
 ```
 
-### Stage 1 — Rules
+**One Claude call per company, ever:**
+- *within a run* — signals are grouped by normalized company name
+- *across runs* — `repo.already_qualified()` skips already-decided companies
 
-Hard, deterministic disqualifiers:
+## Modules
 
-| Rule | Reason |
+| File | Responsibility |
 |---|---|
-| Industry must contain healthcare keyword | Pure tech / non-healthcare filtered |
-| Industry must NOT contain `biotech`, `pharma`, `dental`, `veterinary` | Out-of-ICP segments |
-| Country empty or US | Geo filter |
-| Laid off ≥ 10 (when known) | Scale floor |
+| `normalize.py` | **Single source of truth** for company-name dedup keys + loose int parsing |
+| `models.py` | `RawSignal`, `QualificationResult`, shared constants |
+| `connectors/base.py` | `SignalConnector` protocol — the contract every source implements |
+| `connectors/warntracker.py` | WARN-notice source (Playwright → `/api/sample_warn_listings`) |
+| `qualifier.py` | Website-based ICP evaluation via Claude + `web_search`; writes traces |
+| `pipeline.py` | Orchestration: pull → dedup → qualify → `CompanyCandidate` |
+| `db/schema.sql` | Target Postgres schema (3 tables, dedup via UNIQUE constraints) |
+| `db/repository.py` | Storage interface + JSON-file impl (runs without Postgres) |
 
-### Stage 2 — LLM (Claude)
+## Why website-based qualification (not keyword rules)
 
-Runs only for survivors of Stage 1. The ICP prompt is in `qualifier.py`
-under `ICP_SYSTEM_PROMPT`. Returns structured JSON:
+Industry labels on layoff trackers are unreliable — "Healthcare" might be a
+wellness app, "Other" might be a hospital system. So the qualifier ignores
+the label and has Claude visit the company's actual website to classify it.
+The only pre-filters are *structural* (date window, ≥10 laid off).
+
+ICP definition lives in `qualifier.py` under `ICP_SYSTEM_PROMPT`. Verdict:
 
 ```jsonc
 {
   "qualified": true,
   "segment": "health_system",
   "sub_segment": "community_hospital",
+  "company_type": "provider",
+  "approximate_employees": 1200,
   "confidence": 0.86,
-  "reasoning": "Mid-size community hospital, 1200 employees, US-based...",
+  "reasoning": "Mid-size community hospital in Ohio, ~1,200 staff…",
+  "evidence_url": "https://example.org/about",
   "needs_human_review": false
 }
 ```
 
-**Calibration rule:** if `confidence < 0.7`, the result is forced into
-`needs_human_review`. LLM confidence is not blindly trusted.
+Calibration: `confidence < 0.70` is forced into `needs_human_review` —
+LLM confidence is not blindly trusted.
 
----
+## Storage: what we keep, what we don't
 
-## Dedup Strategy
+**Keep** (lean): the qualified company + verdict + reasoning + evidence URL,
+plus the signals that surfaced it (the "why").
 
-Each `RawSignal` has a `source_external_id` that is **deterministic**
-across runs — same input row → same ID. Downstream this maps to a Postgres
-`UNIQUE (source, source_external_id)` constraint, so re-running the
-connector over the same window is a no-op.
+**Don't keep**: the full WARN dataset, disqualified-company essays, or raw
+Claude traces (those go to `data/qualifier_traces/` as files, not the DB).
 
-For Layoffs.fyi (no native IDs), we compose the ID:
+Dedup is enforced by **database UNIQUE constraints**, not app code:
+- `discovery_signals (source, source_external_id)` — same event never twice
+- `discovery_companies (normalized_name)` — one row per company
 
-```
-source_external_id = f"{slug(company)}::{observed_date}"
-```
+## Adding a new signal source
 
----
-
-## Adding a New Connector
-
-1. Create `auto_search/connectors/<source>.py`
-2. Implement the `SignalConnector` protocol from `connectors/base.py`
-3. Yield `RawSignal` objects
-4. Apply cheap pre-filters at extract-time to reduce downstream LLM cost
-5. Add a `test_<source>_pipeline.py` to `scripts/` that mirrors the
-   layoffs test pattern
-
----
+1. Create `connectors/<source>.py` implementing `SignalConnector`
+   (one `pull(since)` yielding `RawSignal`).
+2. Done — `pipeline.run()` works with any connector unchanged.
 
 ## Testing
 
 ```bash
-# 1. Drop CSV in data/layoffs.csv (downloaded from layoffs.fyi)
-# 2. Add LAYOFFS_CSV_PATH and ANTHROPIC_API_KEY to .env
-# 3. Run:
-python scripts/test_layoffs_pipeline.py --rules-only     # free
-python scripts/test_layoffs_pipeline.py --limit 20 -v    # ~$0.20 in LLM
+# Fetch + dedup only — no LLM, no cost (--cache uses saved rows, no browser)
+python scripts/test_warntracker_pipeline.py --no-qualify --cache
+
+# Full pipeline on N unique companies
+python scripts/test_warntracker_pipeline.py --limit 10 -v
+
+# One company by name (prompt tuning)
+python scripts/test_qualifier_one.py --custom "Advanced Specialty Hospitals of Toledo"
 ```
 
-Output prints rule-killed rows separately from LLM-evaluated rows, and
-dumps qualified candidates to `data/test_qualified_layoffs.json` for
-sharing with Galyna.
+## Status
+
+- [x] Connector (warntracker, Playwright)
+- [x] Website-based qualifier (Claude + web_search)
+- [x] Dedup (within-run grouping + across-run skip)
+- [x] Storage interface + JSON impl
+- [ ] Postgres repository (deferred until Railway DB is connected)
+- [ ] Daily cron wiring (Arq)
+- [ ] More connectors: funding, ACO contracts, M&A, leadership changes

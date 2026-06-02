@@ -45,6 +45,7 @@ from dotenv import load_dotenv
 
 from auto_search import pipeline
 from auto_search.connectors.acquisitions import AcquisitionsConnector
+from auto_search.connectors.funding import FundingConnector
 from auto_search.connectors.leadership_changes import LeadershipChangesConnector
 from auto_search.connectors.warntracker import WarnTrackerConnector
 from auto_search.db import get_repository
@@ -60,6 +61,7 @@ CONNECTORS = {
     "layoffs": lambda limit: WarnTrackerConnector(),
     "leadership": lambda limit: LeadershipChangesConnector(max_pages=1, per_page=limit),
     "acquisitions": lambda limit: AcquisitionsConnector(max_pages=1, per_page=limit),
+    "funding": lambda limit: FundingConnector(max_pages=1, per_page=limit),
 }
 
 

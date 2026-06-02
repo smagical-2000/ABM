@@ -115,6 +115,11 @@ class RawSignal(BaseModel):
             amt = p.get("deal_amount_usd")
             amt_s = f" (${amt:,})" if isinstance(amt, int) else ""
             return f"Acquired by {acq}{amt_s}" if acq else "acquisition"
+        if self.signal_type == "funding_round":
+            rnd = (p.get("round_type") or "funding").title()
+            amt = p.get("amount_usd")
+            amt_s = f"${amt:,} " if isinstance(amt, int) else ""
+            return f"Raised {amt_s}{rnd}".strip()
         return self.signal_type
 
 

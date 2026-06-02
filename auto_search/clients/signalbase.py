@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 # One actor per signal feed.
 JOB_CHANGES_ACTOR = "signalbase~signalbase-job-changes"
 ACQUISITIONS_ACTOR = "signalbase~signalbase-acquisitions"
+FUNDING_ACTOR = "signalbase~signalbase-funding"
 
 _RUN_SYNC = "https://api.apify.com/v2/acts/{actor}/run-sync"
 
@@ -120,6 +121,35 @@ class AcquisitionRecord(_BaseRecord):
         return None if v is None else str(v)
 
 
+class FundingRecord(_BaseRecord):
+    """A SignalBase funding-round signal (subset we use).
+
+    The company is the one that RAISED — fresh capital is a buying signal
+    (budget to spend, often scaling = revenue-cycle pain).
+    """
+
+    signalId: str | None = None
+    occurredAt: str | None = None           # ISO ts — recency
+    announcedDate: str | None = None
+    companyName: str | None = None
+    companyWebsite: str | None = None
+    companyLinkedin: str | None = None
+    companyIndustry: str | None = None
+    companySubcategory: str | None = None
+    companyCountry: str | None = None
+    companyEmployeeCount: int | None = None
+    companyDescription: str | None = None
+    # round
+    roundType: str | None = None            # "series a", "seed", …
+    roundFlavor: str | None = None          # "bridge" | "extension" | …
+    amount: int | None = None               # whole USD (converted at ingest)
+    currency: str | None = None
+    confidenceScore: float | None = None
+    verificationStatus: str | None = None
+    investors: list[dict] | None = None
+    sources: list[dict] | None = None
+
+
 # ── client ────────────────────────────────────────────────────────────
 
 
@@ -191,6 +221,34 @@ class SignalBaseClient:
             ACQUISITIONS_ACTOR, filters, per_page=per_page, max_pages=max_pages
         ):
             rec = _parse_or_skip(AcquisitionRecord, raw)
+            if rec is not None:
+                yield rec
+
+    async def iter_funding(
+        self,
+        *,
+        categories: str | None = None,
+        countries: str = "US",
+        date_preset: str | None = None,
+        amount_min: int | None = None,
+        per_page: int = DEFAULT_PER_PAGE,
+        max_pages: int = 1,
+    ) -> AsyncIterator[FundingRecord]:
+        """Yield funding-round records newest-first.
+
+        `categories` filters by the raising company's industry server-side;
+        `amount_min` drops trivially small rounds at the source.
+        """
+        filters = _compact({
+            "categories": categories,
+            "countries": countries,
+            "date_preset": date_preset,
+            "amount_min": amount_min,
+        })
+        async for raw in self._iter_raw(
+            FUNDING_ACTOR, filters, per_page=per_page, max_pages=max_pages
+        ):
+            rec = _parse_or_skip(FundingRecord, raw)
             if rec is not None:
                 yield rec
 

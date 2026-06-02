@@ -48,7 +48,11 @@ function App() {
   const toastId = useRef(0);
 
   // ── auto-scoring ──────────────────────────────────────────────────────────
-  const [autoEnabled, setAutoEnabled] = useState(false); // off by default — promotes are real now
+  // OFF by default. Promote currently persists review_status='promoted' to the
+  // DB but does NOT create an accounts row or run scoring (it returns a stub
+  // account id). Keep auto-bulk-promote off until real promotion + domain-first
+  // matching exist, or the daily timer could promote dozens unreviewed.
+  const [autoEnabled, setAutoEnabled] = useState(false);
   const [scoreHour, setScoreHour] = useState(15);
   const [deadline, setDeadline] = useState(() => window.nextDeadline(15, Date.now()));
   const [now, setNow] = useState(Date.now());

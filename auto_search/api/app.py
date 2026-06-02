@@ -30,6 +30,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from auto_search.api.auth import install_basic_auth
 from auto_search.db import get_repository
 from auto_search.services import DiscoveryStats, PanelCompany, ReviewService
 
@@ -74,6 +75,11 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # HTTP Basic auth — enabled iff BASIC_AUTH_USER/PASS are set (so a deployed
+    # instance is gated but localhost isn't). /api/health stays open for the
+    # platform healthcheck. Added after CORS so it runs outermost (first).
+    install_basic_auth(app, exempt_paths=("/api/health",))
 
     def svc(app: FastAPI) -> ReviewService:
         return app.state.service

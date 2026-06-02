@@ -14,11 +14,23 @@ rationale. Listed so reviewers know they're acknowledged, not missed.
   domain-first matching**, or it will create duplicate accounts / fail to
   merge with Definitive imports.
 
-## Deferred until Railway / workers
+## Shipped since the original review
 
-- **PostgresRepository.** `db/repository.py` ships a JSON-file impl behind the
-  `DiscoveryRepository` protocol. The Postgres impl against `schema.sql` lands
-  when Railway Postgres is connected — a single call-site swap.
+- **PostgresRepository — DONE.** `db/postgres_repository.py` implements the
+  `DiscoveryRepository` protocol (psycopg3, sync, pooled) against `schema.sql`,
+  with idempotent `ensure_schema()` on boot. `get_repository()` selects it when
+  `DATABASE_URL` is set, else the JSON-file repo. No call-site changes.
+- **HTTP API auth — DONE.** `api/auth.py` adds Basic auth, enabled iff
+  `BASIC_AUTH_USER`/`PASS` are set (so localhost stays open, deploys are gated);
+  `/api/health` is exempt for the platform healthcheck.
+
+## Deferred until accounts table / workers
+
+- **Real promotion.** `ReviewService.promote()` records `review_status=
+  'promoted'` and returns a STUB account id — it does NOT create an `accounts`
+  row or run scoring yet. Needs the accounts table + **domain-first matching**
+  (Q1) before it's wired, or it will create duplicate accounts. The UI's
+  auto-bulk-promote timer is OFF by default for the same reason.
 - **MTD cost guardrails.** The architecture calls for a hard stop at $500
   MTD on LLM spend. The test script *estimates* per-run cost but nothing
   enforces a monthly ceiling yet. Needs a shared cost ledger + pre-call check

@@ -37,6 +37,15 @@ class Band:
 
 
 @dataclass(frozen=True)
+class Pillar:
+    """A board-facing rollup of one or more dimensions into the three pillars
+    every framework reports: Firmographic, Technographic, Business Intent."""
+    key: str               # firmographic | technographic | intent
+    label: str
+    dims: tuple[str, ...]  # dimension keys that sum into this pillar
+
+
+@dataclass(frozen=True)
 class Framework:
     key: str
     label: str
@@ -44,11 +53,20 @@ class Framework:
     max_total: int
     dimensions: tuple[Dimension, ...]
     bands: tuple[Band, ...]              # evaluated high->low; first match wins
+    pillars: tuple[Pillar, ...]          # 3-pillar board rollup
     intro: str                          # one-line rubric framing for the prompt
     auto_tier_out: str | None = field(default=None)  # dim key that forces Tier 4 at 0
 
     def dimension(self, key: str) -> Dimension | None:
         return next((d for d in self.dimensions if d.key == key), None)
+
+
+# Specialty and payer map their three dimensions 1:1 onto the three pillars.
+_PASSTHROUGH_PILLARS = (
+    Pillar("firmographic", "Firmographic", ("firmographic",)),
+    Pillar("technographic", "Technographic", ("technographic",)),
+    Pillar("intent", "Business Intent", ("intent",)),
+)
 
 
 # ── the three rubrics ─────────────────────────────────────────────────
@@ -88,10 +106,15 @@ _HEALTH_SYSTEM = Framework(
                   "New CIO, CFO, COO, or CEO in the last 12 months = 1; else 0."),
     ),
     bands=(
-        Band("high", "Tier 1", 22),
-        Band("medium", "Tier 2", 18),
-        Band("low", "Tier 3", 15),
-        Band("out", "Tier 4", 0),
+        Band("high", "Tier 1", 22),       # 22-27 immediate ABM pursuit
+        Band("medium", "Tier 2", 16),      # 16-21 active targeted outreach
+        Band("low", "Tier 3", 10),         # 10-15 monitor for triggers
+        Band("out", "Tier 4", 0),          # <10 or NPR > $3.5B deprioritize
+    ),
+    pillars=(
+        Pillar("firmographic", "Firmographic", ("npr",)),
+        Pillar("technographic", "Technographic", ("emr", "ai_readiness")),
+        Pillar("intent", "Business Intent", ("competitor", "pain", "leadership")),
     ),
 )
 
@@ -120,6 +143,7 @@ _SPECIALTY = Framework(
         Band("medium", "Medium Fit", 18),
         Band("low", "Low Fit", 0),
     ),
+    pillars=_PASSTHROUGH_PILLARS,
 )
 
 _PAYER = Framework(
@@ -148,6 +172,7 @@ _PAYER = Framework(
         Band("medium", "Tier 2", 18),
         Band("low", "Tier 3", 0),
     ),
+    pillars=_PASSTHROUGH_PILLARS,
 )
 
 FRAMEWORKS: dict[str, Framework] = {
@@ -202,6 +227,10 @@ def framework_public(framework: Framework) -> dict:
         ],
         "bands": [
             {"band": b.band, "label": b.label, "min": b.min} for b in framework.bands
+        ],
+        "pillars": [
+            {"key": p.key, "label": p.label, "dims": list(p.dims)}
+            for p in framework.pillars
         ],
     }
 

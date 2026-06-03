@@ -44,6 +44,13 @@ def client(tmp_path, monkeypatch):
     monkeypatch.delenv("BASIC_AUTH_PASS", raising=False)
     monkeypatch.setattr(_app_module, "get_repository",
                         lambda: JsonFileRepository(store))
+    # Isolate the scoring store and neutralize the background scorer — these API
+    # tests cover routing/workflow, not the (LLM) scoring pass.
+    from auto_search.db.scoring_repository import ScoringJsonRepository
+    monkeypatch.setattr(_app_module, "get_scoring_repository",
+                        lambda: ScoringJsonRepository(tmp_path / "scoring.json"))
+    monkeypatch.setattr(_app_module, "_schedule_scoring",
+                        lambda app, account_id: None)
     from auto_search.api.app import create_app
     with TestClient(create_app()) as c:
         yield c
@@ -74,8 +81,12 @@ class TestWorkflow:
     def test_promote_then_gone_from_panel(self, client):
         r = client.post("/api/company/acmehealth/promote")
         assert r.status_code == 200
-        assert r.json()["account_id"] == "stub-account::acmehealth"
+        # promote now creates a scoring account (was a stub id)
+        assert r.json()["account_id"] == "acc_acmehealth"
         assert client.get("/api/panel").json() == []
+        # and the account is now in the scoring phase
+        scored = client.get("/api/scored").json()
+        assert any(a["account_id"] == "acc_acmehealth" for a in scored)
 
     def test_promote_404(self, client):
         assert client.post("/api/company/nope/promote").status_code == 404

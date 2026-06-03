@@ -27,10 +27,10 @@ class TestFrameworks:
 
     def test_tier_bands(self):
         hs = FRAMEWORKS["health_system"]
-        assert resolve_tier(hs, 25).label == "Tier 1"
-        assert resolve_tier(hs, 19).label == "Tier 2"
-        assert resolve_tier(hs, 16).label == "Tier 3"
-        assert resolve_tier(hs, 5).label == "Tier 4"
+        assert resolve_tier(hs, 25).label == "Tier 1"   # 22-27
+        assert resolve_tier(hs, 16).label == "Tier 2"   # 16-21
+        assert resolve_tier(hs, 11).label == "Tier 3"   # 10-15 (matches MUSC 11/27)
+        assert resolve_tier(hs, 9).label == "Tier 4"    # < 10
 
     def test_health_system_auto_tier_4_when_npr_zero(self):
         hs = FRAMEWORKS["health_system"]
@@ -43,6 +43,15 @@ class TestFrameworks:
         assert pub["health_system"]["max_total"] == 27
         assert len(pub["health_system"]["dimensions"]) == 6
         assert pub["specialty"]["max_total"] == 30
+
+    def test_health_system_pillar_rollup(self):
+        # Per the rubric: Technographic = EMR + Tech Readiness; Business Intent =
+        # Competitors + Pain + Leadership.
+        pillars = {p["key"]: p["dims"] for p in
+                   frameworks.all_frameworks_public()["health_system"]["pillars"]}
+        assert pillars["firmographic"] == ["npr"]
+        assert pillars["technographic"] == ["emr", "ai_readiness"]
+        assert pillars["intent"] == ["competitor", "pain", "leadership"]
 
 
 # ── models ────────────────────────────────────────────────────────────
@@ -204,3 +213,64 @@ class TestImports:
         mapped_cols = {m.col for m in res.mapping}
         assert "Hospital Name" in mapped_cols and "Net Patient Revenue" in mapped_cols
         assert "Firm Type" in res.unmatched_columns
+
+
+# ── service (engine + QA monkeypatched) ───────────────────────────────
+
+
+async def _fake_hs_score(account):
+    return ScoreResult(
+        account_id=account.account_id, framework="health_system",
+        framework_version="hs-2026.2", max_total=27, total=0,
+        tier_band="x", tier_label="x", recommendation="ok",
+        dimensions=[Dimension(key=k, label=k, score=s, max=m) for k, s, m in [
+            ("npr", 10, 10), ("emr", 5, 5), ("competitor", 3, 4),
+            ("pain", 4, 5), ("ai_readiness", 1, 2), ("leadership", 1, 1)]],
+    ).clamp()
+
+
+@pytest.mark.asyncio
+async def test_service_enqueue_score_persist(monkeypatch, tmp_path):
+    from auto_search.db.scoring_repository import ScoringJsonRepository
+    from auto_search.scoring import service as svc_mod
+    from auto_search.scoring.service import ScoringService
+
+    svc = ScoringService(ScoringJsonRepository(path=str(tmp_path / "s.json")))
+    row = svc.enqueue_discovery({
+        "company_key": "beaconhealth", "name": "Beacon Health",
+        "segment": "health_system", "domain": "beaconhealth.org",
+        "approximate_employees": 4200,
+        "signals": [{"signal_type": "leadership_change", "summary": "New CFO"}],
+    }, state="scoring")
+    assert row["account_id"] == "acc_beaconhealth" and row["state"] == "scoring"
+
+    async def fake_qa(account, score, fw):
+        return QAResult(status="verified", notes="ok")
+    monkeypatch.setattr(svc_mod.engine, "score_account", _fake_hs_score)
+    monkeypatch.setattr(svc_mod.qa, "qa_account", fake_qa)
+
+    scored = await svc.run_scoring("acc_beaconhealth")
+    assert scored["state"] == "scored" and scored["total"] == 24
+    assert scored["tier"]["label"] == "Tier 1"        # re-resolved at save time
+    assert len(scored["dimensions"]) == 6 and scored["qa"]["status"] == "verified"
+    assert scored["source"] == "discovery"
+    assert svc.active() == []
+
+
+@pytest.mark.asyncio
+async def test_service_marks_error_on_failure(monkeypatch, tmp_path):
+    from auto_search.db.scoring_repository import ScoringJsonRepository
+    from auto_search.scoring import service as svc_mod
+    from auto_search.scoring.engine import ScoringError
+    from auto_search.scoring.service import ScoringService
+
+    svc = ScoringService(ScoringJsonRepository(path=str(tmp_path / "s.json")))
+    svc.enqueue_discovery({"company_key": "x", "name": "X", "segment": "payer"},
+                          state="scoring")
+
+    async def boom(account):
+        raise ScoringError("LLM down")
+    monkeypatch.setattr(svc_mod.engine, "score_account", boom)
+
+    out = await svc.run_scoring("acc_x")
+    assert out["state"] == "error" and "LLM down" in (out["error"] or "")

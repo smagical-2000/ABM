@@ -116,6 +116,12 @@ def _system_prompt(fw: Framework) -> str:
         DIMENSIONS (key | label (0-max): guidance):
         {dims}
 
+        Be specific and evidence-rich in every summary: cite revenue figures,
+        named EHR / RCM / automation vendors (e.g. Epic, MEDITECH, Notable,
+        AssortHealth, ThoughtfulAI, UiPath), headcounts and location counts,
+        named leaders and titles, and dates where you find them. Vague summaries
+        are not acceptable.
+
         Then write a 2-3 sentence recommendation: the fit, the wedge, and the
         play.
 
@@ -123,7 +129,7 @@ def _system_prompt(fw: Framework) -> str:
         {{
           "dimensions": [
             {{ "key": "<dimension key>", "score": <number 0..max>,
-               "summary": "<one specific sentence citing evidence>",
+               "summary": "<1-2 specific sentences citing concrete evidence>",
                "flags": ["inferred" | "unknown"]  // omit or [] when confident
             }}
           ],

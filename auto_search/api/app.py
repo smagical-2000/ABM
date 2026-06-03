@@ -19,19 +19,24 @@ startup and the Postgres pool is closed on shutdown.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from auto_search.api.auth import install_basic_auth
 from auto_search.db import get_repository
+from auto_search.db.scoring_repository import get_scoring_repository
+from auto_search.scoring import imports as csv_imports
+from auto_search.scoring.frameworks import all_frameworks_public
+from auto_search.scoring.service import ScoringService
 from auto_search.services import DiscoveryStats, PanelCompany, ReviewService
 
 load_dotenv(override=True)
@@ -44,24 +49,90 @@ class RejectBody(BaseModel):
     reason: str
 
 
+def _schedule_scoring(app: FastAPI, account_id: str) -> None:
+    """Run a score in the background, callable from sync or async handlers.
+
+    Sync handlers run in a threadpool with no running loop, so we hand the
+    coroutine to the main loop captured at startup; async handlers schedule it
+    on their own loop. Either way the HTTP response returns immediately and the
+    UI shows the live 'Scoring…' state.
+    """
+    coro = app.state.scoring.run_scoring(account_id)
+    try:
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(coro)
+    except RuntimeError:
+        loop = getattr(app.state, "loop", None)
+        if loop is None:
+            coro.close()
+            return
+        task = asyncio.run_coroutine_threadsafe(coro, loop)
+    app.state.scoring_tasks.add(task)
+    task.add_done_callback(lambda t: app.state.scoring_tasks.discard(t))
+
+
+def _parse_upload(raw: bytes) -> csv_imports.ImportResult:
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1")
+    try:
+        return csv_imports.parse_csv(text)
+    except csv_imports.ImportError_ as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+
+
+def _preview_payload(app: FastAPI, result: csv_imports.ImportResult) -> dict:
+    """Schema + mapping + first rows + dedupe, for the import wizard's review."""
+    rows = []
+    for a in result.accounts[:12]:
+        known = app.state.scoring.exists(a.account_id)
+        fact = next(iter(a.firmographics.values()), None)
+        rows.append({
+            "name": a.name,
+            "fact": fact,
+            "emr": (a.firmographics.get("EHR Inpatient")
+                    or a.firmographics.get("Ambulatory EMR")),
+            "dedupe": "known" if known else "new",
+        })
+    new = sum(1 for a in result.accounts if not app.state.scoring.exists(a.account_id))
+    return {
+        "schema_label": result.schema_label,
+        "segment": result.segment,
+        "rows_total": result.rows_total,
+        "mapping": [{"col": m.col, "fact": m.fact} for m in result.mapping],
+        "unmatched_columns": result.unmatched_columns,
+        "preview": rows,
+        "new_count": new,
+        "known_count": len(result.accounts) - new,
+    }
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Build the service once; the repo (Postgres pool or JSON file) lives for
     # the app's lifetime. Stored on app.state so handlers reuse it.
     repo = get_repository()
+    scoring_repo = get_scoring_repository()
     # Fresh deploy self-initialises its tables (idempotent).
-    ensure = getattr(repo, "ensure_schema", None)
-    if callable(ensure):
-        ensure()
+    for r in (repo, scoring_repo):
+        ensure = getattr(r, "ensure_schema", None)
+        if callable(ensure):
+            ensure()
     app.state.service = ReviewService(repo)
+    app.state.scoring = ScoringService(scoring_repo)
     app.state.repo = repo
-    logger.info("discovery API ready (repo=%s)", type(repo).__name__)
+    app.state.scoring_repo = scoring_repo
+    app.state.scoring_tasks = set()           # keep background score tasks alive
+    app.state.loop = asyncio.get_running_loop()
+    logger.info("discovery + scoring API ready (repo=%s)", type(repo).__name__)
     try:
         yield
     finally:
-        close = getattr(repo, "close", None)
-        if callable(close):
-            close()
+        for r in (repo, scoring_repo):
+            close = getattr(r, "close", None)
+            if callable(close):
+                close()
 
 
 def create_app() -> FastAPI:
@@ -151,11 +222,23 @@ def create_app() -> FastAPI:
 
     @app.post("/api/company/{key}/promote")
     def promote(key: str):
+        """Promote a qualified company into scoring.
+
+        Marks it promoted in Discovery (so it leaves the panel), creates the
+        scoring account carrying its signals, and kicks off scoring in the
+        background. The UI shows it arrive in Scored with a live 'Scoring…'
+        state.
+        """
+        company = svc(app).get_company(key)
+        if company is None:
+            raise HTTPException(status_code=404, detail="company not found")
         try:
-            account_id = svc(app).promote(key)
+            svc(app).promote(key)
         except KeyError:
             raise HTTPException(status_code=404, detail="company not found") from None
-        return {"account_id": account_id}
+        row = app.state.scoring.enqueue_discovery(company.model_dump(), state="scoring")
+        _schedule_scoring(app, row["account_id"])
+        return {"account_id": row["account_id"], "state": row["state"]}
 
     @app.post("/api/company/{key}/reject")
     def reject(key: str, body: RejectBody):
@@ -181,6 +264,66 @@ def create_app() -> FastAPI:
         except KeyError:
             raise HTTPException(status_code=404, detail="company not found") from None
         return {"ok": True}
+
+    # ── scoring ────────────────────────────────────────────────────────
+
+    @app.get("/api/scoring/frameworks")
+    def scoring_frameworks():
+        """Rubric definitions (dimensions, bands, pillar rollup) — the single
+        source the UI reads so its score bars and tiers can't drift."""
+        return all_frameworks_public()
+
+    @app.get("/api/scored")
+    def list_scored():
+        """Every account in the scoring phase (queued / scoring / scored / error).
+        The dashboard filters client-side."""
+        return app.state.scoring.list_scored()
+
+    @app.get("/api/scoring/activity")
+    def scoring_activity():
+        """In-flight accounts (queued / scoring) — drives the live shimmer."""
+        return {"active": app.state.scoring.active()}
+
+    @app.get("/api/account/{account_id}")
+    def get_account(account_id: str):
+        account = app.state.scoring.get(account_id)
+        if account is None:
+            raise HTTPException(status_code=404, detail="account not found")
+        return account
+
+    @app.post("/api/account/{account_id}/score")
+    def score_account(account_id: str):
+        """Score or re-score an account now. Flips it to 'scoring' and kicks the
+        background pass; the UI polls activity until it resolves."""
+        if not app.state.scoring.exists(account_id):
+            raise HTTPException(status_code=404, detail="account not found")
+        app.state.scoring_repo.set_state(account_id, "scoring")
+        _schedule_scoring(app, account_id)
+        return app.state.scoring.get(account_id)
+
+    @app.post("/api/scoring/import/preview")
+    async def import_preview(request: Request):
+        """Parse a CSV (raw request body) and report the schema + column mapping
+        + dedupe, without persisting — the wizard's review step."""
+        result = _parse_upload(await request.body())
+        return _preview_payload(app, result)
+
+    @app.post("/api/scoring/import")
+    async def import_commit(request: Request):
+        """Parse the CSV body, enqueue the new accounts, and start scoring each.
+        Already-known accounts are skipped."""
+        result = _parse_upload(await request.body())
+        fresh = [a for a in result.accounts if not app.state.scoring.exists(a.account_id)]
+        app.state.scoring.enqueue_csv(fresh, state="scoring")
+        for a in fresh:
+            _schedule_scoring(app, a.account_id)
+        return {
+            "schema_label": result.schema_label,
+            "segment": result.segment,
+            "imported": len(fresh),
+            "skipped_known": len(result.accounts) - len(fresh),
+            "accounts": [app.state.scoring.get(a.account_id) for a in fresh],
+        }
 
     @app.get("/api/health")
     def health():

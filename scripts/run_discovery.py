@@ -120,20 +120,67 @@ async def run_connector(
         return counts
 
     # Real run: dedup → qualify → persist. Skip companies already decided.
-    async for cand in pipeline.run(
-        connector, since, limit=limit,
-        skip_already_qualified=repo.already_qualified,
-        prefilter=prefilter,
-    ):
-        repo.save_candidate(cand)
-        status = cand.qualification.to_status()
-        counts[status] = counts.get(status, 0) + 1
-        q = cand.qualification
-        print(f"  {verdict_icon(status)}  {BOLD}{cand.company_name[:38]:38}{RESET}"
-              f"  seg={q.segment or '—':<13} conf={q.confidence:.2f}")
-        if status == "qualified" and q.reasoning:
-            print(f"     {DIM}{q.reasoning[:100]}{RESET}")
+    # Heartbeat a connector_runs row so the UI shows a live "processing" marker
+    # and rows appear to stream in as they qualify.
+    run_id = _start_run(repo, connector.source_name)
+    evaluated = 0
+    err: str | None = None
+    try:
+        async for cand in pipeline.run(
+            connector, since, limit=limit,
+            skip_already_qualified=repo.already_qualified,
+            prefilter=prefilter,
+        ):
+            repo.save_candidate(cand)
+            evaluated += 1
+            status = cand.qualification.to_status()
+            counts[status] = counts.get(status, 0) + 1
+            _update_run(repo, run_id, new_companies=evaluated,
+                        companies_qualified=counts["qualified"])
+            q = cand.qualification
+            print(f"  {verdict_icon(status)}  {BOLD}{cand.company_name[:38]:38}{RESET}"
+                  f"  seg={q.segment or '—':<13} conf={q.confidence:.2f}")
+            if status == "qualified" and q.reasoning:
+                print(f"     {DIM}{q.reasoning[:100]}{RESET}")
+    except Exception as e:  # noqa: BLE001 — mark the run failed, then re-raise
+        err = f"{type(e).__name__}: {e}"
+        raise
+    finally:
+        _finish_run(repo, run_id, "failed" if err else "success", err)
     return counts
+
+
+# ── run-heartbeat helpers (no-op if the repo doesn't track runs) ───────
+
+def _start_run(repo, source: str):
+    fn = getattr(repo, "start_run", None)
+    try:
+        return fn(source) if fn else None
+    except Exception as e:  # noqa: BLE001 — telemetry must never break a run
+        logging.getLogger(__name__).debug("start_run failed: %s", e)
+        return None
+
+
+def _update_run(repo, run_id, **counts: int) -> None:
+    if run_id is None:
+        return
+    fn = getattr(repo, "update_run", None)
+    if fn:
+        try:
+            fn(run_id, **counts)
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger(__name__).debug("update_run failed: %s", e)
+
+
+def _finish_run(repo, run_id, status: str, error: str | None = None) -> None:
+    if run_id is None:
+        return
+    fn = getattr(repo, "finish_run", None)
+    if fn:
+        try:
+            fn(run_id, status=status, error=error)
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger(__name__).debug("finish_run failed: %s", e)
 
 
 def show_panel(repo) -> None:

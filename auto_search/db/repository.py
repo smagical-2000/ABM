@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
@@ -82,6 +82,26 @@ class DiscoveryRepository(Protocol):
         Returns the updated row, or None if the company isn't stored. Stamps
         reviewed_at; stores rejection reason; stamps promoted_at on promote.
         """
+        ...
+
+    # -- run heartbeat (powers the live "processing" marker) --
+
+    def start_run(self, source: str) -> int:
+        """Open a 'running' row for a discovery run; returns its id."""
+        ...
+
+    def update_run(self, run_id: int, **counts: int) -> None:
+        """Update live counts on a running row (absolute values)."""
+        ...
+
+    def finish_run(
+        self, run_id: int, *, status: str = "success", error: str | None = None,
+    ) -> None:
+        """Close a run row (status success/failed + finished_at)."""
+        ...
+
+    def active_runs(self, *, max_age_minutes: int = 15) -> list[dict]:
+        """Recently-started runs still in progress (drives the UI marker)."""
         ...
 
 
@@ -215,6 +235,84 @@ class JsonFileRepository:
             row["rejection_reason"] = reason
         self._flush()
         return row
+
+    # -- run heartbeat (file-backed so the API process sees the runner's runs) --
+
+    def _runs_path(self) -> Path:
+        return self._path.with_name("discovery_runs.json")
+
+    def _load_runs(self) -> list[dict]:
+        p = self._runs_path()
+        if not p.exists():
+            return []
+        try:
+            return json.loads(p.read_text())
+        except json.JSONDecodeError:
+            return []
+
+    def _flush_runs(self, runs: list[dict]) -> None:
+        p = self._runs_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(json.dumps(runs, indent=2, default=str))
+        tmp.replace(p)
+
+    def start_run(self, source: str) -> int:
+        runs = self._load_runs()
+        run_id = max((r["id"] for r in runs), default=0) + 1
+        runs.append({
+            "id": run_id, "source": source, "status": "running",
+            "started_at": datetime.now(UTC).isoformat(), "finished_at": None,
+            "rows_fetched": 0, "new_companies": 0, "signals_added": 0,
+            "companies_qualified": 0, "error_message": None,
+        })
+        self._flush_runs(runs[-200:])  # cap history
+        return run_id
+
+    def update_run(self, run_id: int, **counts: int) -> None:
+        runs = self._load_runs()
+        for r in runs:
+            if r["id"] == run_id:
+                for c in ("rows_fetched", "new_companies", "signals_added",
+                          "companies_qualified"):
+                    if counts.get(c) is not None:
+                        r[c] = counts[c]
+        self._flush_runs(runs)
+
+    def finish_run(
+        self, run_id: int, *, status: str = "success", error: str | None = None,
+    ) -> None:
+        runs = self._load_runs()
+        for r in runs:
+            if r["id"] == run_id:
+                r["status"] = status
+                r["error_message"] = error
+                r["finished_at"] = datetime.now(UTC).isoformat()
+        self._flush_runs(runs)
+
+    def active_runs(self, *, max_age_minutes: int = 15) -> list[dict]:
+        cutoff = datetime.now(UTC) - timedelta(minutes=max_age_minutes)
+        now = datetime.now(UTC)
+        out: list[dict] = []
+        for r in self._load_runs():
+            if r.get("status") != "running":
+                continue
+            try:
+                started = datetime.fromisoformat(r["started_at"])
+            except (ValueError, KeyError):
+                continue
+            if started < cutoff:
+                continue
+            out.append({
+                "source": r["source"], "started_at": r["started_at"],
+                "rows_fetched": r.get("rows_fetched", 0),
+                "new_companies": r.get("new_companies", 0),
+                "signals_added": r.get("signals_added", 0),
+                "companies_qualified": r.get("companies_qualified", 0),
+                "elapsed_seconds": int((now - started).total_seconds()),
+            })
+        out.sort(key=lambda x: x["started_at"], reverse=True)
+        return out
 
     # -- internals --
 

@@ -234,6 +234,60 @@ class PostgresRepository:
         counts["total"] = sum(counts.values())
         return counts
 
+    # ── run heartbeat (powers the live "processing" marker) ──────────────
+
+    def start_run(self, source: str) -> int:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "INSERT INTO connector_runs (source, status) "
+                "VALUES (%s, 'running') RETURNING id",
+                (source,),
+            ).fetchone()
+        return row["id"]
+
+    def update_run(self, run_id: int, **counts: int) -> None:
+        """Set any of rows_fetched/new_companies/signals_added/
+        companies_qualified on the running row (absolute values)."""
+        cols = ("rows_fetched", "new_companies", "signals_added",
+                "companies_qualified")
+        sets = {c: counts[c] for c in cols if counts.get(c) is not None}
+        if not sets:
+            return
+        assignments = ", ".join(f"{c} = %({c})s" for c in sets)
+        with self._pool.connection() as conn:
+            conn.execute(
+                f"UPDATE connector_runs SET {assignments} WHERE id = %(id)s",
+                {**sets, "id": run_id},
+            )
+
+    def finish_run(
+        self, run_id: int, *, status: str = "success", error: str | None = None,
+    ) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE connector_runs SET status = %s, error_message = %s, "
+                "finished_at = now() WHERE id = %s",
+                (status, error, run_id),
+            )
+
+    def active_runs(self, *, max_age_minutes: int = 15) -> list[dict]:
+        """Runs still 'running' and started recently — a crashed run's row is
+        ignored after max_age_minutes so the marker can't get stuck on."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                """SELECT source, started_at, rows_fetched, new_companies,
+                          signals_added, companies_qualified,
+                          EXTRACT(EPOCH FROM (now() - started_at))::int AS elapsed_seconds
+                     FROM connector_runs
+                    WHERE status = 'running'
+                      AND started_at > now() - make_interval(mins => %s)
+                    ORDER BY started_at DESC""",
+                (max_age_minutes,),
+            ).fetchall()
+        for r in rows:
+            r["started_at"] = _iso(r["started_at"])
+        return rows
+
 
 # ── row mapping (match JsonFileRepository's dict shape exactly) ────────
 

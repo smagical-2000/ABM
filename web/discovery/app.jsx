@@ -34,6 +34,35 @@ function TabButton({ active, onClick, label, count, accent }) {
   );
 }
 
+// ── ActivityBanner — live "processing" marker shown while a run is in flight ─
+function ActivityBanner({ runs }) {
+  const qualified = runs.reduce((n, r) => n + (r.companies_qualified || 0), 0);
+  const evaluated = runs.reduce((n, r) => n + (r.new_companies || 0), 0);
+  const sources = [...new Set(runs.map((r) => r.source))].join(', ');
+  return (
+    <div className="border-b border-indigo-100 bg-gradient-to-r from-indigo-50 to-violet-50/50">
+      <div className="mx-auto flex max-w-6xl items-center gap-3 px-8 py-2.5">
+        <span className="relative flex h-2.5 w-2.5">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-indigo-400 opacity-75"></span>
+          <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-indigo-500"></span>
+        </span>
+        <span className="text-[13px] font-medium text-indigo-700">
+          Discovering — {sources}
+        </span>
+        <span className="text-indigo-300">·</span>
+        <span className="text-[13px] tabular-nums text-indigo-600">
+          {evaluated > 0
+            ? `${qualified} qualified of ${evaluated} evaluated`
+            : 'scanning sources…'}
+        </span>
+        <span className="ml-auto hidden items-center gap-1.5 text-[12px] text-indigo-400 sm:flex">
+          <Icons.refresh className="h-3.5 w-3.5 animate-spin" />updating live
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [loading, setLoading] = useState(true);
   const [companies, setCompanies] = useState([]);
@@ -60,8 +89,11 @@ function App() {
   const stateRef = useRef({ companies: [], leaving: {} });
   stateRef.current = { companies, leaving };
 
-  // ── initial load: fetch real data from the API ──────────────────────────────
-  async function loadAll() {
+  // ── data load: fetch real data from the API ─────────────────────────────────
+  // `soft` = a background refresh (polling while a run is live); it must not
+  // flash the skeleton or toast on transient errors.
+  async function loadAll(soft = false) {
+    if (!soft) setLoading(true);
     try {
       const [qualified, needsReview, s] = await Promise.all([
         window.API.panel({ status: 'qualified' }),
@@ -75,12 +107,38 @@ function App() {
       setCompanies(tagged);
       setStats(s);
     } catch (e) {
-      pushToast(`Couldn't load: ${e.message}`, 'danger');
+      if (!soft) pushToast(`Couldn't load: ${e.message}`, 'danger');
     } finally {
-      setLoading(false);
+      if (!soft) setLoading(false);
     }
   }
   useEffect(() => { loadAll(); }, []);
+
+  // ── live activity: poll for in-progress runs, stream new rows in ────────────
+  const [activity, setActivity] = useState([]);
+  const wasActiveRef = useRef(false);
+  useEffect(() => {
+    let alive = true;
+    async function poll() {
+      try {
+        const a = await window.API.activity();
+        if (!alive) return;
+        const active = (a && a.active) || [];
+        setActivity(active);
+        if (active.length > 0) {
+          wasActiveRef.current = true;
+          loadAll(true);                       // new companies appear as they qualify
+        } else if (wasActiveRef.current) {
+          wasActiveRef.current = false;
+          loadAll(true);
+          pushToast('Discovery run complete', 'success');
+        }
+      } catch (_) { /* ignore transient poll errors */ }
+    }
+    poll();
+    const id = setInterval(poll, 4000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
 
   function pushToast(message, tone = 'success') {
     const id = ++toastId.current;
@@ -187,7 +245,16 @@ function App() {
             <span className="text-[15px] text-zinc-500">Discovery</span>
           </div>
           <div className="flex items-center gap-3">
-            <span className="hidden text-[12px] text-zinc-400 lg:inline">Live · {stats.total} surfaced</span>
+            <span className="hidden text-[12px] lg:inline">
+              {activity.length > 0 ? (
+                <span className="inline-flex items-center gap-1.5 font-medium text-indigo-600">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-500"></span>
+                  Processing…
+                </span>
+              ) : (
+                <span className="text-zinc-400">Live · {stats.total} surfaced</span>
+              )}
+            </span>
             <div className="relative">
               <AutoScorePill enabled={autoEnabled} remainingMs={remainingMs} active={autoOpen} onClick={() => setAutoOpen((o) => !o)} />
               {autoOpen && (
@@ -202,6 +269,8 @@ function App() {
           </div>
         </div>
       </header>
+
+      {activity.length > 0 && <ActivityBanner runs={activity} />}
 
       <main className="mx-auto max-w-6xl px-8 py-8">
         <div className="mb-6">

@@ -102,6 +102,18 @@ def create_app() -> FastAPI:
             statuses=statuses, segment=segment, signal_type=signal_type
         )
 
+    @app.get("/api/activity")
+    def get_activity():
+        """In-progress discovery runs — drives the live 'processing' marker.
+
+        Returns {active: [{source, companies_qualified, new_companies,
+        elapsed_seconds, ...}]}. Empty when nothing is running. Defensive: a
+        repo without run tracking just reports idle.
+        """
+        repo = app.state.repo
+        active = repo.active_runs() if hasattr(repo, "active_runs") else []
+        return {"active": active}
+
     @app.get("/api/company/{key}", response_model=PanelCompany)
     def get_company(key: str):
         company = svc(app).get_company(key)

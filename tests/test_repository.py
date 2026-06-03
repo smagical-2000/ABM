@@ -113,3 +113,50 @@ def test_stats_counts_by_status(tmp_path):
     repo.save_candidate(_candidate_named("bravo", "Bravo", status="disqualified"))
     s = repo.stats()
     assert s["qualified"] == 1 and s["disqualified"] == 1 and s["total"] == 2
+
+
+# ── run heartbeat (live 'processing' marker) ──────────────────────────
+
+
+def test_run_lifecycle_active_then_finished(tmp_path):
+    repo = JsonFileRepository(tmp_path / "store.json")
+    assert repo.active_runs() == []
+
+    rid = repo.start_run("jobs")
+    active = repo.active_runs()
+    assert len(active) == 1
+    assert active[0]["source"] == "jobs"
+    assert active[0]["companies_qualified"] == 0
+    assert "elapsed_seconds" in active[0]
+
+    repo.update_run(rid, new_companies=6, companies_qualified=3)
+    active = repo.active_runs()
+    assert active[0]["new_companies"] == 6 and active[0]["companies_qualified"] == 3
+
+    repo.finish_run(rid, status="success")
+    assert repo.active_runs() == []
+
+
+def test_runs_visible_across_instances(tmp_path):
+    # The API process must see the runner process's run (separate instances,
+    # one shared file).
+    path = tmp_path / "store.json"
+    rid = JsonFileRepository(path).start_run("jobs")
+    JsonFileRepository(path).update_run(rid, companies_qualified=2)
+    api = JsonFileRepository(path)
+    assert api.active_runs()[0]["companies_qualified"] == 2
+
+
+def test_failed_run_records_error_and_is_inactive(tmp_path):
+    repo = JsonFileRepository(tmp_path / "store.json")
+    rid = repo.start_run("funding")
+    repo.finish_run(rid, status="failed", error="boom")
+    assert repo.active_runs() == []
+    last = repo._load_runs()[-1]
+    assert last["status"] == "failed" and last["error_message"] == "boom"
+
+
+def test_runs_stored_separately_from_company_store(tmp_path):
+    repo = JsonFileRepository(tmp_path / "store.json")
+    repo.start_run("jobs")
+    assert (tmp_path / "discovery_runs.json").exists()

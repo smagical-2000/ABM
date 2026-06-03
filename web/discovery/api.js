@@ -23,6 +23,7 @@ async function http(path, opts) {
 
 window.API = {
   stats: () => http('/api/stats'),
+  activity: () => http('/api/activity'),
   panel: ({ status = 'qualified', segment, signal_type } = {}) => {
     const q = new URLSearchParams({ status });
     if (segment && segment !== 'all') q.set('segment', segment);

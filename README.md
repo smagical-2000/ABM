@@ -111,16 +111,6 @@ Prompts live in `prompts/` — edit those files to tweak scoring criteria, not t
 
 ---
 
-## Costs
-
-Each call uses ~5K-15K input tokens and ~3K-8K output tokens including thinking.
-
-Rough cost per scored account: **$0.15 – $0.40** at Opus 4.7 pricing ($5/M input, $25/M output).
-
-For 100 accounts: ~$15-$40.
-
----
-
 ## CLI scorer limitations
 
 - Single company per run (no batch mode in the CLI)

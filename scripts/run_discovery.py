@@ -46,6 +46,7 @@ from dotenv import load_dotenv
 from auto_search import pipeline
 from auto_search.connectors.acquisitions import AcquisitionsConnector
 from auto_search.connectors.funding import FundingConnector
+from auto_search.connectors.job_postings import JobPostingsConnector
 from auto_search.connectors.leadership_changes import LeadershipChangesConnector
 from auto_search.connectors.warntracker import WarnTrackerConnector
 from auto_search.db import get_repository
@@ -57,11 +58,14 @@ BOLD, GREEN, YELLOW, RED, DIM, CYAN, RESET = (
 )
 
 # Connector registry — add a new source here and it joins the run for free.
+# `limit` is the per-source cost knob: records/page for SignalBase, rows/title
+# for Indeed.
 CONNECTORS = {
     "layoffs": lambda limit: WarnTrackerConnector(),
     "leadership": lambda limit: LeadershipChangesConnector(max_pages=1, per_page=limit),
     "acquisitions": lambda limit: AcquisitionsConnector(max_pages=1, per_page=limit),
     "funding": lambda limit: FundingConnector(max_pages=1, per_page=limit),
+    "jobs": lambda limit: JobPostingsConnector(max_rows=limit),
 }
 
 
@@ -150,10 +154,19 @@ async def main(args: argparse.Namespace) -> None:
         return
 
     since = datetime.now(UTC) - timedelta(days=args.days)
-    selected = [args.only] if args.only else list(CONNECTORS)
+    if args.sources:
+        selected = [s.strip() for s in args.sources.split(",") if s.strip()]
+    elif args.only:
+        selected = [args.only]
+    else:
+        selected = list(CONNECTORS)
+    unknown = [s for s in selected if s not in CONNECTORS]
+    if unknown:
+        print(f"{RED}unknown source(s): {unknown}. valid: {list(CONNECTORS)}{RESET}")
+        return
 
     print(f"\n{BOLD}Discovery run{RESET}  since {since.date()} ({args.days}d), "
-          f"limit {args.limit}/source, "
+          f"limit {args.limit}/source, sources={selected}, "
           f"{'QUALIFY' if not args.no_qualify else 'dry run (no Claude)'}")
     if not args.no_qualify:
         print(f"  {YELLOW}Cost: SignalBase per record + ~$0.10–0.15 Claude "
@@ -161,11 +174,17 @@ async def main(args: argparse.Namespace) -> None:
 
     totals: dict[str, int] = {}
     for name in selected:
-        connector = CONNECTORS[name](args.limit)
-        counts = await run_connector(
-            name, connector, since, repo,
-            limit=args.limit, qualify=not args.no_qualify,
-        )
+        try:
+            connector = CONNECTORS[name](args.limit)
+            counts = await run_connector(
+                name, connector, since, repo,
+                limit=args.limit, qualify=not args.no_qualify,
+            )
+        except Exception as e:  # noqa: BLE001 — one source must not kill the cron
+            logging.getLogger(__name__).error(
+                "connector %s failed: %s", name, e, exc_info=args.debug)
+            print(f"  {RED}⚠️  {name} failed: {type(e).__name__}: {e}{RESET}")
+            continue
         for k, v in counts.items():
             totals[k] = totals.get(k, 0) + v
 
@@ -187,7 +206,10 @@ if __name__ == "__main__":
     p.add_argument("--limit", type=int, default=5,
                    help="Max records/companies per source (cost knob, default 5)")
     p.add_argument("--only", choices=list(CONNECTORS),
-                   help="Run a single source instead of all three")
+                   help="Run a single source")
+    p.add_argument("--sources",
+                   help="Comma-separated sources to run (e.g. "
+                        "'leadership,acquisitions,funding'). Default: all.")
     p.add_argument("--no-qualify", action="store_true",
                    help="Dry run: discover + dedup only, no Claude qualification")
     p.add_argument("--panel", action="store_true",

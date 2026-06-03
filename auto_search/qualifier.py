@@ -59,8 +59,11 @@ ICP_SYSTEM_PROMPT = textwrap.dedent("""
     cycle management (RCM) platform sold to US healthcare organizations.
 
     A buying signal has surfaced this company — it may be a layoff, a
-    leadership change (new CFO/CMO/etc.), an acquisition, or another event.
-    The signal type and details are in the user message. Your job: determine
+    leadership change (new CFO/CMO/etc.), an acquisition, a job posting
+    (hiring revenue-cycle staff), or another event. Note: an RCM job posting
+    is only a buying signal if the EMPLOYER is a provider/payer — a billing/
+    coding outsourcer or staffing firm hiring the same role is a vendor, NOT
+    ICP. The signal type and details are in the user message. Your job: determine
     whether the company fits Magical's Ideal Customer Profile (ICP). Use the
     web_search tool to research the company's actual website and operations —
     judge the COMPANY, not the signal; do NOT guess from the name alone.

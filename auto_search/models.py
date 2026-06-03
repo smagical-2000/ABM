@@ -120,6 +120,10 @@ class RawSignal(BaseModel):
             amt = p.get("amount_usd")
             amt_s = f"${amt:,} " if isinstance(amt, int) else ""
             return f"Raised {amt_s}{rnd}".strip()
+        if self.signal_type == "job_posting":
+            title = p.get("job_title") or p.get("role") or "role"
+            where = p.get("location") or ""
+            return f"Hiring: {title}{f' — {where}' if where else ''}".strip()
         return self.signal_type
 
 

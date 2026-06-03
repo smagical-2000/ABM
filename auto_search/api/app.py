@@ -81,6 +81,21 @@ def create_app() -> FastAPI:
     # platform healthcheck. Added after CORS so it runs outermost (first).
     install_basic_auth(app, exempt_paths=("/api/health",))
 
+    @app.middleware("http")
+    async def ui_no_cache(request, call_next):
+        """Force revalidation of the UI assets.
+
+        The Discovery UI loads app.jsx / panel.jsx / … and transpiles them in
+        the browser with no cache-busting query string. Without this, a browser
+        serves the previously-cached JSX after a deploy, so changes appear to
+        "not reflect" until a hard refresh. no-cache makes the browser
+        revalidate every load, so a deploy always shows up.
+        """
+        response = await call_next(request)
+        if not request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
+
     def svc(app: FastAPI) -> ReviewService:
         return app.state.service
 

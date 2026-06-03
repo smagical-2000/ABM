@@ -39,6 +39,8 @@ const Icons = {
   clock: (p) => ic(<><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3.5 2" /></>, p),
   zap: (p) => ic(<path d="M13 2 4 14h7l-1 8 9-12h-7z" />, p),
   info: (p) => ic(<><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 8h.01" /></>, p),
+  job: (p) => ic(<><rect x="3" y="7" width="18" height="13" rx="2" /><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /><path d="M3 12h18" /></>, p),
+  dollar: (p) => ic(<><path d="M12 2v20" /><path d="M17 6.5C17 4.6 14.8 3.5 12 3.5S7 4.6 7 6.5 9.2 9.5 12 9.5s5 1.1 5 3-2.2 3-5 3-5-1.1-5-3" /></>, p),
 };
 window.Icons = Icons;
 
@@ -46,8 +48,25 @@ const SIGNAL_META = {
   layoff: { label: 'Layoff', icon: Icons.layoff, chip: 'bg-rose-50 text-rose-700 ring-rose-100', dot: 'bg-rose-400' },
   leadership_change: { label: 'Leadership', icon: Icons.leadership, chip: 'bg-sky-50 text-sky-700 ring-sky-100', dot: 'bg-sky-400' },
   acquisition: { label: 'Acquisition', icon: Icons.acquisition, chip: 'bg-amber-50 text-amber-700 ring-amber-100', dot: 'bg-amber-400' },
+  funding_round: { label: 'Funding', icon: Icons.dollar, chip: 'bg-cyan-50 text-cyan-700 ring-cyan-100', dot: 'bg-cyan-400' },
+  job_posting: { label: 'Hiring', icon: Icons.job, chip: 'bg-emerald-50 text-emerald-700 ring-emerald-100', dot: 'bg-emerald-400' },
 };
 window.SIGNAL_META = SIGNAL_META;
+
+// Group job_posting signals by role for the "3 Coder jobs" presentation.
+// Returns [{ role, items }] sorted by volume (count = RCM pain intensity).
+function groupRoleItems(jobSignals) {
+  const m = new Map();
+  jobSignals.forEach((s) => {
+    const r = s.role || 'RCM';
+    if (!m.has(r)) m.set(r, []);
+    m.get(r).push(s);
+  });
+  return [...m.entries()]
+    .map(([role, items]) => ({ role, items }))
+    .sort((a, b) => b.items.length - a.items.length);
+}
+window.groupRoleItems = groupRoleItems;
 
 const SEGMENT_META = {
   health_system: { label: 'Health System', cls: 'bg-blue-50 text-blue-700 ring-blue-100', dot: 'bg-blue-400' },
@@ -117,6 +136,34 @@ function SignalChip({ signal }) {
   );
 }
 window.SignalChip = SignalChip;
+
+// ── JobRoleChip — count-led hiring chip, e.g. "3 Coder jobs" ─────────────────
+function JobRoleChip({ role, count }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-md bg-emerald-50 px-2 py-1 text-[12px] font-medium text-emerald-700 ring-1 ring-inset ring-emerald-100">
+      <Icons.job className="h-3.5 w-3.5 shrink-0 opacity-80" />
+      <span className="tabular-nums font-semibold">{count}</span>
+      <span className="truncate max-w-[150px]">{role} {count === 1 ? 'job' : 'jobs'}</span>
+    </span>
+  );
+}
+window.JobRoleChip = JobRoleChip;
+
+// ── SignalChips — render a company's signals, grouping job postings by role ──
+// Non-job signals stay one-chip-each; job postings collapse to per-role counts
+// so a company hiring eight coders reads "8 Coder jobs", not eight rows.
+function SignalChips({ signals }) {
+  const jobs = signals.filter((s) => s.signal_type === 'job_posting');
+  const others = signals.filter((s) => s.signal_type !== 'job_posting');
+  const roles = groupRoleItems(jobs);
+  return (
+    <>
+      {others.map((s, i) => <SignalChip key={`o${i}`} signal={s} />)}
+      {roles.map((r, i) => <JobRoleChip key={`j${i}`} role={r.role} count={r.items.length} />)}
+    </>
+  );
+}
+window.SignalChips = SignalChips;
 
 // ── StatTile ────────────────────────────────────────────────────────────────
 function StatTile({ value, label, emphasized }) {

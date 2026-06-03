@@ -9,14 +9,16 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from auto_search.clients.apify_jobs import IndeedJob
+from auto_search.clients.apify_jobs import IndeedJob, LinkedInJob
 from auto_search.connectors.job_postings import (
     JobPostingsConnector,
     _domain_from_url,
     _indeed_domain,
     _job_to_signal,
+    _linkedin_to_signal,
     _looks_rcm,
     _since_to_from_days,
+    _split_loc,
 )
 
 SINCE = datetime(2026, 6, 1, tzinfo=UTC)
@@ -178,3 +180,85 @@ async def test_connector_volume_is_count_of_signals():
     assert len(out) == 3
     assert {s.company_key for s in out} == {out[0].company_key}
     assert all(s.payload["role"] == "Coder" for s in out)
+
+
+# ── LinkedIn mapping + cross-board merge ──────────────────────────────
+
+
+def _lijob(**over) -> LinkedInJob:
+    base = dict(
+        id="li-1",
+        title="Medical Coder",
+        companyName="Acme Health",
+        url="https://www.linkedin.com/jobs/view/li-1",
+        location="Dallas, TX",
+        postedDate="2026-06-02",
+        postedTimeAgo="1 day ago",
+        applicationsCount="12 applicants",
+        description="Hands-on inpatient coding role.",
+    )
+    base.update(over)
+    return LinkedInJob(**base)
+
+
+class TestLinkedIn:
+    def test_split_loc(self):
+        assert _split_loc("Dallas, TX") == ("Dallas", "TX")
+        assert _split_loc("Remote") == ("Remote", None)
+        assert _split_loc("") == (None, None)
+        assert _split_loc("New York, NY 10001") == ("New York", "NY")
+
+    def test_linkedin_maps(self):
+        sig, reason = _linkedin_to_signal(_lijob(), "Coder", 0.78, SINCE, "li-1")
+        assert sig is not None, reason
+        assert sig.source == "linkedin"
+        assert sig.signal_type == "job_posting"
+        assert sig.company_name_raw == "Acme Health"
+        assert sig.payload["city"] == "Dallas"
+        assert sig.payload["state"] == "TX"
+        assert sig.payload["source_board"] == "linkedin"
+        assert sig.payload["description"] == "Hands-on inpatient coding role."
+
+    def test_linkedin_off_topic_dropped(self):
+        sig, reason = _linkedin_to_signal(
+            _lijob(title="Software Engineer"), "Coder", 0.78, SINCE, "x")
+        assert sig is None and reason == "not_rcm_title"
+
+
+class FakeBothClient:
+    def __init__(self, indeed_by_q, linkedin_by_q):
+        self.indeed_by_q = indeed_by_q
+        self.linkedin_by_q = linkedin_by_q
+
+    async def search_indeed(self, query, **kwargs):
+        return list(self.indeed_by_q.get(query, []))
+
+    async def search_linkedin(self, title, **kwargs):
+        return list(self.linkedin_by_q.get(title, []))
+
+
+@pytest.mark.asyncio
+async def test_cross_board_dedup_keeps_unique_drops_crosslisted():
+    # Same coder req at Acme appears on BOTH boards → counted once.
+    # A different LinkedIn-only company adds yield → kept.
+    indeed_coder = _job(jobKey="ik-1", title="Medical Coder", companyName="Acme Health",
+                        location={"city": "Dallas", "countryCode": "US",
+                                  "formattedAddressShort": "Dallas, TX"})
+    li_same = _lijob(id="li-1", title="Medical Coder", companyName="Acme Health",
+                     location="Dallas, TX")
+    li_other = _lijob(id="li-2", title="Medical Coder", companyName="Beacon Clinic",
+                      location="Austin, TX")
+    fake = FakeBothClient(
+        indeed_by_q={'"medical coder"': [indeed_coder]},
+        linkedin_by_q={"medical coder": [li_same, li_other]},
+    )
+    conn = JobPostingsConnector(
+        client=fake, titles=[('"medical coder"', "Coder", 0.78)], max_rows=5)
+
+    out = [s async for s in conn.pull(since=SINCE)]
+    companies = {s.company_key for s in out}
+    # Acme counted once (cross-listed), Beacon added from LinkedIn.
+    assert len(out) == 2
+    assert len(companies) == 2
+    boards = {s.payload["source_board"] for s in out}
+    assert boards == {"indeed", "linkedin"}

@@ -48,7 +48,7 @@ function CompanyRow({ company, leaving, onOpen, onPromote, onDefer, onReject }) 
             <SegmentBadge segment={company.segment} />
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
-            {company.signals.map((s, i) => <SignalChip key={i} signal={s} />)}
+            <SignalChips signals={company.signals} />
           </div>
           <div className="mt-2 flex items-center gap-1.5 text-[12px] text-zinc-400">
             <span>{company.signal_count} {company.signal_count === 1 ? 'signal' : 'signals'}</span>

@@ -97,6 +97,40 @@ async def call_with_web_search(
             backoff *= _BACKOFF_MULT
 
 
+async def call_plain(
+    *,
+    system: str,
+    user_message: str,
+    max_tokens: int,
+    model: str | None = None,
+) -> Any:
+    """Call Claude with NO tools (no web_search), retrying transient failures.
+
+    For cheap, self-contained classification where the model already has all
+    the context it needs in the prompt (e.g. judging a job posting from its
+    title + description). Much cheaper/faster than the web_search path.
+    """
+    backoff = _INITIAL_BACKOFF_S
+    for attempt in range(_MAX_RETRIES):
+        try:
+            return await get_client().messages.create(
+                model=model or DEFAULT_MODEL,
+                max_tokens=max_tokens,
+                system=system,
+                messages=[{"role": "user", "content": user_message}],
+            )
+        except _RETRYABLE as e:
+            if attempt == _MAX_RETRIES - 1:
+                raise
+            sleep_for = backoff + random.uniform(0, backoff * 0.25)
+            logger.warning(
+                "Claude transient error (%s) attempt %d/%d — sleeping %.1fs",
+                type(e).__name__, attempt + 1, _MAX_RETRIES, sleep_for,
+            )
+            await asyncio.sleep(sleep_for)
+            backoff *= _BACKOFF_MULT
+
+
 def extract_text(response: Any) -> str:
     """Concatenate the text blocks of a Claude response.
 

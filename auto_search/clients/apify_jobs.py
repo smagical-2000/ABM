@@ -24,7 +24,7 @@ import os
 from typing import Any
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,11 @@ _LINKEDIN_DATE = {1: "r86400", 7: "r604800", 30: "r2592000"}  # 24h / week / mon
 
 class _BaseJob(BaseModel):
     """Build from a raw dict, ignoring unknown fields (schemas drift)."""
+
+    # These actors are loosely typed — LinkedIn returns `id` as an int, Indeed
+    # returns numeric-ish strings. Coerce numbers into our str fields so one
+    # surprise int doesn't drop a whole (paid) row.
+    model_config = ConfigDict(coerce_numbers_to_str=True)
 
     @classmethod
     def from_api(cls, raw: dict[str, Any]):
@@ -73,6 +78,7 @@ class IndeedJob(_BaseJob):
     isRemote: str | bool | None = None
     emails: list[str] | None = None
     expired: bool | None = None
+    descriptionText: str | None = None     # plain-text JD — feeds job qualifier
 
 
 class LinkedInJob(_BaseJob):
@@ -90,6 +96,7 @@ class LinkedInJob(_BaseJob):
     postedDate: str | None = None          # 'YYYY-MM-DD'
     postedTimeAgo: str | None = None
     applicationsCount: str | None = None
+    description: str | None = None         # plain-text JD — feeds job qualifier
 
 
 # ── client ────────────────────────────────────────────────────────────

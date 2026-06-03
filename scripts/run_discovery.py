@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dotenv import load_dotenv
 
-from auto_search import pipeline
+from auto_search import job_qualifier, pipeline
 from auto_search.connectors.acquisitions import AcquisitionsConnector
 from auto_search.connectors.funding import FundingConnector
 from auto_search.connectors.job_postings import JobPostingsConnector
@@ -99,8 +99,13 @@ async def run_connector(
     *,
     limit: int,
     qualify: bool,
+    prefilter=None,
 ) -> dict[str, int]:
-    """Run one connector through the pipeline and persist results."""
+    """Run one connector through the pipeline and persist results.
+
+    `prefilter` (e.g. the job-level qualifier) runs over pulled signals before
+    grouping. It costs Claude, so it's only applied on real (qualifying) runs.
+    """
     banner(f"{name.upper()}  ({connector.source_name})")
     counts = {"qualified": 0, "needs_review": 0, "disqualified": 0, "error": 0}
 
@@ -118,6 +123,7 @@ async def run_connector(
     async for cand in pipeline.run(
         connector, since, limit=limit,
         skip_already_qualified=repo.already_qualified,
+        prefilter=prefilter,
     ):
         repo.save_candidate(cand)
         status = cand.qualification.to_status()
@@ -176,9 +182,17 @@ async def main(args: argparse.Namespace) -> None:
     for name in selected:
         try:
             connector = CONNECTORS[name](args.limit)
+            # The jobs source gets the cheap job-level qualifier as a pre-filter
+            # (title + JD) so only genuine RCM postings reach company scoring.
+            prefilter = (
+                job_qualifier.filter_job_signals
+                if name == "jobs" and not args.no_job_filter
+                else None
+            )
             counts = await run_connector(
                 name, connector, since, repo,
                 limit=args.limit, qualify=not args.no_qualify,
+                prefilter=prefilter,
             )
         except Exception as e:  # noqa: BLE001 — one source must not kill the cron
             logging.getLogger(__name__).error(
@@ -212,6 +226,9 @@ if __name__ == "__main__":
                         "'leadership,acquisitions,funding'). Default: all.")
     p.add_argument("--no-qualify", action="store_true",
                    help="Dry run: discover + dedup only, no Claude qualification")
+    p.add_argument("--no-job-filter", action="store_true",
+                   help="Skip the job-level qualifier for the jobs source "
+                        "(send every RCM-titled posting straight to company scoring)")
     p.add_argument("--panel", action="store_true",
                    help="Show the current qualified-company panel and exit")
     p.add_argument("--debug", action="store_true")

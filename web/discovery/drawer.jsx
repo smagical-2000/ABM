@@ -17,6 +17,48 @@ function SectionLabel({ children }) {
   );
 }
 
+// ── JobHiringBlock — open RCM roles grouped by role, each posting linked ─────
+// Volume is the headline (count = pain intensity); each opening links out.
+function JobHiringBlock({ jobs }) {
+  const groups = groupRoleItems(jobs);
+  return (
+    <div className="mt-7">
+      <SectionLabel>Open RCM roles · {jobs.length}</SectionLabel>
+      <div className="space-y-2.5">
+        {groups.map((g, i) => (
+          <div key={i} className="rounded-xl border border-emerald-100 bg-emerald-50/40 px-3.5 py-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-[13px] font-semibold text-emerald-800">
+                <Icons.job className="h-4 w-4" />{g.role}
+              </div>
+              <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold tabular-nums text-emerald-700">
+                {g.items.length} {g.items.length === 1 ? 'opening' : 'openings'}
+              </span>
+            </div>
+            <ul className="mt-2 space-y-1.5">
+              {g.items.map((s, j) => (
+                <li key={j} className="flex items-center justify-between gap-2 text-[12px]">
+                  <span className="min-w-0 truncate text-zinc-700">{s.title || s.summary}</span>
+                  <span className="flex shrink-0 items-center gap-1.5 text-zinc-400">
+                    {s.location && <span className="max-w-[110px] truncate">{s.location}</span>}
+                    {s.age && <span className="whitespace-nowrap">· {s.age}</span>}
+                    {s.url && (
+                      <a href={s.url} target="_blank" rel="noreferrer"
+                        className="text-zinc-400 transition-colors hover:text-indigo-600">
+                        <Icons.ext className="h-3.5 w-3.5" />
+                      </a>
+                    )}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function CompanyDrawer({ company, onClose, onPromote, onDefer, onReject }) {
   const open = !!company;
   return (
@@ -96,31 +138,47 @@ function CompanyDrawer({ company, onClose, onPromote, onDefer, onReject }) {
                 </div>
               </div>
 
-              {/* Why discovered */}
-              <div className="mt-7">
-                <SectionLabel>Why discovered · {company.signal_count} {company.signal_count === 1 ? 'signal' : 'signals'}</SectionLabel>
-                <ol className="relative ml-1 space-y-4 border-l border-zinc-150 pl-5">
-                  {company.signals.map((s, i) => {
-                    const m = SIGNAL_META[s.signal_type] || {};
-                    const Icon = m.icon || Icons.sparkle;
-                    return (
-                      <li key={i} className="relative">
-                        <span className={`absolute -left-[27px] top-0.5 flex h-5 w-5 items-center justify-center rounded-full ring-4 ring-white ${m.chip || 'bg-zinc-100 text-zinc-500'}`}>
-                          <Icon className="h-3 w-3" />
-                        </span>
-                        <div className="text-[14px] font-medium text-zinc-800">{s.summary}</div>
-                        <div className="mt-0.5 flex items-center gap-1.5 text-[12px] text-zinc-400">
-                          <span className="capitalize">{(m.label || s.signal_type).toLowerCase()}</span>
-                          <span className="text-zinc-300">·</span>
-                          <span>{shortDate(s.observed_at)}</span>
-                          <span className="text-zinc-300">·</span>
-                          <span>strength {s.strength.toFixed(2)}</span>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ol>
-              </div>
+              {/* Why discovered — non-job signals as a timeline; job postings
+                  collapse into the role-grouped hiring block below. */}
+              {(() => {
+                const jobs = company.signals.filter((s) => s.signal_type === 'job_posting');
+                const others = company.signals.filter((s) => s.signal_type !== 'job_posting');
+                return (
+                  <>
+                    {others.length > 0 && (
+                      <div className="mt-7">
+                        <SectionLabel>Why discovered · {others.length} {others.length === 1 ? 'signal' : 'signals'}</SectionLabel>
+                        <ol className="relative ml-1 space-y-4 border-l border-zinc-150 pl-5">
+                          {others.map((s, i) => {
+                            const m = SIGNAL_META[s.signal_type] || {};
+                            const Icon = m.icon || Icons.sparkle;
+                            return (
+                              <li key={i} className="relative">
+                                <span className={`absolute -left-[27px] top-0.5 flex h-5 w-5 items-center justify-center rounded-full ring-4 ring-white ${m.chip || 'bg-zinc-100 text-zinc-500'}`}>
+                                  <Icon className="h-3 w-3" />
+                                </span>
+                                <div className="text-[14px] font-medium text-zinc-800">{s.summary}</div>
+                                <div className="mt-0.5 flex items-center gap-1.5 text-[12px] text-zinc-400">
+                                  <span className="capitalize">{(m.label || s.signal_type).toLowerCase()}</span>
+                                  <span className="text-zinc-300">·</span>
+                                  <span>{shortDate(s.observed_at)}</span>
+                                  {typeof s.strength === 'number' && (
+                                    <>
+                                      <span className="text-zinc-300">·</span>
+                                      <span>strength {s.strength.toFixed(2)}</span>
+                                    </>
+                                  )}
+                                </div>
+                              </li>
+                            );
+                          })}
+                        </ol>
+                      </div>
+                    )}
+                    {jobs.length > 0 && <JobHiringBlock jobs={jobs} />}
+                  </>
+                );
+              })()}
             </div>
 
             {/* Action bar */}

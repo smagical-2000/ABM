@@ -29,13 +29,24 @@ logger = logging.getLogger(__name__)
 
 
 class PanelSignal(BaseModel):
-    """One reason a company is in the panel — the 'why discovered' row."""
+    """One reason a company is in the panel — the 'why discovered' row.
+
+    The `role`/`title`/`url`/`location`/`age` fields are populated for
+    job_posting signals so the UI can group postings by role ("3 Coder jobs")
+    and link each opening; they're null for other signal types.
+    """
 
     source: str
     signal_type: str
     summary: str | None = None
     observed_at: str | None = None
     strength: float | None = None
+    # job_posting extras (null otherwise)
+    role: str | None = None
+    title: str | None = None
+    url: str | None = None
+    location: str | None = None
+    age: str | None = None
 
 
 class PanelCompany(BaseModel):
@@ -161,6 +172,11 @@ def _to_panel_company(row: dict) -> PanelCompany:
             summary=s.get("summary"),
             observed_at=s.get("observed_at"),
             strength=s.get("signal_strength"),
+            role=(p := s.get("payload") or {}).get("role"),
+            title=p.get("job_title"),
+            url=p.get("job_url"),
+            location=p.get("location"),
+            age=p.get("age"),
         )
         for s in row.get("signals", [])
     ]

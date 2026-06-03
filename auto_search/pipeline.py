@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
 
 from auto_search.connectors.base import SignalConnector
@@ -33,22 +33,35 @@ logger = logging.getLogger(__name__)
 # depends on a function shape, not on the repository class (looser coupling).
 AlreadyQualified = Callable[[str], bool]
 
+# An optional async filter over the full pulled-signal list, applied BEFORE
+# grouping. Used by the jobs flow to inject the cheap job-level qualifier
+# (drop postings that aren't the RCM role we want) so the expensive company
+# qualifier only ever runs on companies with a real signal. Shape, not class.
+SignalPrefilter = Callable[[list[RawSignal]], Awaitable[list[RawSignal]]]
+
 
 async def collect_unique_companies(
     connector: SignalConnector,
     since: datetime,
     *,
     limit: int | None = None,
+    prefilter: SignalPrefilter | None = None,
 ) -> OrderedDict[str, list[RawSignal]]:
     """Pull signals and group them by company, preserving first-seen order.
 
     Returns an ordered map of company_key -> [signals]. Grouping here means
     the qualifier never sees the same company twice. `limit` caps the number
     of UNIQUE companies (not raw signals) — useful for cheap test runs.
-    """
-    groups: OrderedDict[str, list[RawSignal]] = OrderedDict()
 
-    async for signal in connector.pull(since=since):
+    `prefilter` (optional) runs over ALL pulled signals before grouping — the
+    seam for the job-level qualifier. It must be order-preserving.
+    """
+    signals = [s async for s in connector.pull(since=since)]
+    if prefilter is not None:
+        signals = await prefilter(signals)
+
+    groups: OrderedDict[str, list[RawSignal]] = OrderedDict()
+    for signal in signals:
         key = signal.company_key
         if not key:
             logger.debug("skipping signal with empty company key: %r",
@@ -77,22 +90,25 @@ async def run(
     *,
     limit: int | None = None,
     skip_already_qualified: AlreadyQualified | None = None,
+    prefilter: SignalPrefilter | None = None,
 ) -> AsyncIterator[CompanyCandidate]:
     """Run the full discovery pipeline, yielding one candidate per company.
 
     Steps:
-      1. Pull + group signals by company (within-run dedup).
-      2. Optionally skip companies already decided in a PRIOR run
+      1. Pull signals; optionally `prefilter` them (e.g. the job qualifier).
+      2. Group by company (within-run dedup).
+      3. Optionally skip companies already decided in a PRIOR run
          (cross-run dedup) — pass a repo's `already_qualified` here.
-      3. Qualify each remaining company once (website research via Claude).
-      4. Yield a CompanyCandidate (company + signals + verdict).
+      4. Qualify each remaining company once (website research via Claude).
+      5. Yield a CompanyCandidate (company + signals + verdict).
 
     The two dedup layers together guarantee one Claude call per company,
     ever: grouping handles repeats within a run, `skip_already_qualified`
     handles repeats across runs. Callers persist/display the candidates;
     the pipeline has no opinion on storage.
     """
-    groups = await collect_unique_companies(connector, since, limit=limit)
+    groups = await collect_unique_companies(
+        connector, since, limit=limit, prefilter=prefilter)
 
     skipped = 0
     for key, signals in groups.items():

@@ -128,14 +128,16 @@ function App() {
   async function loadAll(soft = false) {
     if (!soft) setLoading(true);
     try {
-      const [qualified, needsReview, s] = await Promise.all([
+      const [qualified, needsReview, deferred, s] = await Promise.all([
         window.API.panel({ status: 'qualified' }),
         window.API.panel({ status: 'needs_review' }),
+        window.API.panel({ status: 'deferred' }),
         window.API.stats(),
       ]);
       const tagged = [
         ...qualified.map((c) => ({ ...c, bucket: 'qualified' })),
         ...needsReview.map((c) => ({ ...c, bucket: 'needs_review' })),
+        ...deferred.map((c) => ({ ...c, bucket: 'deferred' })),
       ].sort((a, b) => new Date(b.first_seen_at) - new Date(a.first_seen_at));
       setCompanies(tagged);
       setStats(s);
@@ -233,6 +235,24 @@ function App() {
       pushToast(`Deferred ${c ? c.name : 'company'}`, 'muted');
     } catch (e) { pushToast(`Defer failed: ${e.message}`, 'danger'); }
   }
+  // Restore: deferred → pending. Collapse it out of the Deferred tab, then
+  // re-fetch so it reappears under Qualified with correct counts.
+  async function handleRestore(key) {
+    const c = companies.find((x) => x.company_key === key);
+    if (openKey === key) setOpenKey(null);
+    setLeaving((l) => ({ ...l, [key]: true }));
+    try {
+      await window.API.restore(key);
+      pushToast(`Restored ${c ? c.name : 'company'} to queue`, 'success');
+      setTimeout(() => {
+        loadAll(true);
+        setLeaving((l) => { const n = { ...l }; delete n[key]; return n; });
+      }, 320);
+    } catch (e) {
+      setLeaving((l) => { const n = { ...l }; delete n[key]; return n; });
+      pushToast(`Restore failed: ${e.message}`, 'danger');
+    }
+  }
   async function handleReject(key, reason) {
     const c = companies.find((x) => x.company_key === key);
     if (openKey === key) setOpenKey(null);
@@ -283,6 +303,7 @@ function App() {
   const visibleCount = filtered.filter((c) => !leaving[c.company_key]).length;
   const qualifiedCount = companies.filter((c) => c.bucket === 'qualified' && !leaving[c.company_key]).length;
   const needsCount = companies.filter((c) => c.bucket === 'needs_review' && !leaving[c.company_key]).length;
+  const deferredCount = companies.filter((c) => c.bucket === 'deferred' && !leaving[c.company_key]).length;
   const remainingMs = deadline - now;
   const queuedCount = qualifiedCount;
   const urgent = autoEnabled && remainingMs <= 10 * 60 * 1000 && queuedCount > 0;
@@ -347,6 +368,7 @@ function App() {
           <div className="flex items-center gap-1 border-b border-zinc-100 px-4 pt-1.5">
             <TabButton active={tab === 'qualified'} onClick={() => setTab('qualified')} label="Qualified" count={qualifiedCount} accent="indigo" />
             <TabButton active={tab === 'needs_review'} onClick={() => setTab('needs_review')} label="Needs review" count={needsCount} accent="amber" />
+            <TabButton active={tab === 'deferred'} onClick={() => setTab('deferred')} label="Deferred" count={deferredCount} accent="indigo" />
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-100 px-6 py-3.5">
@@ -380,7 +402,8 @@ function App() {
                 onOpen={() => setOpenKey(c.company_key)}
                 onPromote={() => handlePromote(c.company_key)}
                 onDefer={() => handleDefer(c.company_key)}
-                onReject={() => setRejectFor(c)} />
+                onReject={() => setRejectFor(c)}
+                onRestore={() => handleRestore(c.company_key)} />
             ))
           )}
         </div>
@@ -391,7 +414,8 @@ function App() {
       </main>
 
       <CompanyDrawer company={openCompany} onClose={() => setOpenKey(null)}
-        onPromote={() => handlePromote(openKey)} onDefer={() => handleDefer(openKey)} onReject={() => setRejectFor(openCompany)} />
+        onPromote={() => handlePromote(openKey)} onDefer={() => handleDefer(openKey)} onReject={() => setRejectFor(openCompany)}
+        onRestore={() => handleRestore(openKey)} />
 
       {rejectFor && (
         <RejectReasonModal company={rejectFor} onCancel={() => setRejectFor(null)}

@@ -181,18 +181,21 @@ window.StatTile = StatTile;
 // ── EmptyState ──────────────────────────────────────────────────────────────
 function EmptyState({ onRun, variant }) {
   const needs = variant === 'needs_review';
+  const deferred = variant === 'deferred';
+  const title = needs ? 'Nothing to review' : deferred ? 'Nothing deferred' : "You're all caught up";
+  const body = needs
+    ? 'No ambiguous companies right now. Anything the AI can’t confidently classify will land here for your call.'
+    : deferred
+    ? 'Companies you defer are snoozed here — open one and hit Restore to move it back into the queue.'
+    : 'Nothing in the queue. Discovery runs on a schedule and will surface new qualified companies as they appear.';
   return (
     <div className="flex flex-col items-center justify-center py-24 text-center">
       <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-zinc-100 text-zinc-400">
         <Icons.inbox className="h-7 w-7" />
       </div>
-      <h3 className="mt-5 text-[15px] font-semibold text-zinc-900">{needs ? 'Nothing to review' : "You're all caught up"}</h3>
-      <p className="mt-1.5 max-w-xs text-[13px] text-zinc-500">
-        {needs
-          ? 'No ambiguous companies right now. Anything the AI can’t confidently classify will land here for your call.'
-          : 'Nothing in the queue. Discovery runs on a schedule and will surface new qualified companies as they appear.'}
-      </p>
-      {!needs && (
+      <h3 className="mt-5 text-[15px] font-semibold text-zinc-900">{title}</h3>
+      <p className="mt-1.5 max-w-xs text-[13px] text-zinc-500">{body}</p>
+      {!needs && !deferred && (
         <button onClick={onRun}
           className="mt-5 inline-flex items-center gap-2 rounded-lg bg-zinc-900 px-3.5 py-2 text-[13px] font-medium text-white transition-colors hover:bg-zinc-800">
           <Icons.refresh className="h-4 w-4" />Run discovery

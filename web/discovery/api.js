@@ -33,6 +33,7 @@ window.API = {
   company: (key) => http(`/api/company/${encodeURIComponent(key)}`),
   promote: (key) => http(`/api/company/${encodeURIComponent(key)}/promote`, { method: 'POST' }),
   defer: (key) => http(`/api/company/${encodeURIComponent(key)}/defer`, { method: 'POST' }),
+  restore: (key) => http(`/api/company/${encodeURIComponent(key)}/restore`, { method: 'POST' }),
   reject: (key, reason) =>
     http(`/api/company/${encodeURIComponent(key)}/reject`, {
       method: 'POST',

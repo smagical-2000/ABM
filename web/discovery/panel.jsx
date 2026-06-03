@@ -28,13 +28,24 @@ function RejectButton({ onClick, size = 'sm' }) {
     </button>
   );
 }
+function RestoreButton({ onClick, size = 'sm' }) {
+  const pad = size === 'lg' ? 'px-4 py-2.5 text-[13px]' : 'px-3 py-1.5 text-[12px]';
+  return (
+    <button onClick={onClick}
+      className={`inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 ${pad} font-medium text-white shadow-sm transition-colors hover:bg-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300`}>
+      <Icons.refresh className="h-3.5 w-3.5" />Restore
+    </button>
+  );
+}
 window.PromoteButton = PromoteButton;
 window.DeferButton = DeferButton;
 window.RejectButton = RejectButton;
+window.RestoreButton = RestoreButton;
 
 // ── CompanyRow ──────────────────────────────────────────────────────────────
-function CompanyRow({ company, leaving, onOpen, onPromote, onDefer, onReject }) {
+function CompanyRow({ company, leaving, onOpen, onPromote, onDefer, onReject, onRestore }) {
   const stop = (fn) => (e) => { e.stopPropagation(); fn(); };
+  const deferred = company.bucket === 'deferred';
   return (
     <div
       onClick={onOpen}
@@ -71,11 +82,17 @@ function CompanyRow({ company, leaving, onOpen, onPromote, onDefer, onReject }) 
 
         {/* Right: actions */}
         <div className="flex shrink-0 items-center gap-1.5">
-          <div className="flex items-center gap-1.5 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
-            <RejectButton onClick={stop(onReject)} />
-            <DeferButton onClick={stop(onDefer)} />
-          </div>
-          <PromoteButton onClick={stop(onPromote)} />
+          {deferred ? (
+            <RestoreButton onClick={stop(onRestore)} />
+          ) : (
+            <>
+              <div className="flex items-center gap-1.5 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+                <RejectButton onClick={stop(onReject)} />
+                <DeferButton onClick={stop(onDefer)} />
+              </div>
+              <PromoteButton onClick={stop(onPromote)} />
+            </>
+          )}
           <span className="ml-1 text-zinc-300 transition-colors group-hover:text-zinc-500">
             <Icons.arrowRight className="h-4 w-4" />
           </span>

@@ -96,7 +96,15 @@ def create_app() -> FastAPI:
         segment: str | None = None,
         signal_type: str | None = None,
     ):
-        # status is the machine verdict tab: 'qualified' (default) or 'needs_review'.
+        # `status` selects the tab:
+        #   qualified (default) / needs_review → pending queue for that verdict
+        #   deferred                          → snoozed companies (restorable)
+        if status == "deferred":
+            return svc(app).list_panel(
+                statuses=("qualified", "needs_review"),
+                review_status="deferred",
+                segment=segment, signal_type=signal_type,
+            )
         statuses = ("needs_review",) if status == "needs_review" else ("qualified",)
         return svc(app).list_panel(
             statuses=statuses, segment=segment, signal_type=signal_type
@@ -146,6 +154,15 @@ def create_app() -> FastAPI:
     def defer(key: str):
         try:
             svc(app).defer(key)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="company not found") from None
+        return {"ok": True}
+
+    @app.post("/api/company/{key}/restore")
+    def restore(key: str):
+        """Move a deferred company back to the pending queue."""
+        try:
+            svc(app).restore(key)
         except KeyError:
             raise HTTPException(status_code=404, detail="company not found") from None
         return {"ok": True}

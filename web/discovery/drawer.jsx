@@ -67,7 +67,7 @@ function JobHiringBlock({ jobs }) {
   );
 }
 
-function CompanyDrawer({ company, onClose, onPromote, onDefer, onReject }) {
+function CompanyDrawer({ company, onClose, onPromote, onDefer, onReject, onRestore }) {
   const open = !!company;
   return (
     <div className={`fixed inset-0 z-40 ${open ? '' : 'pointer-events-none'}`}>
@@ -191,14 +191,24 @@ function CompanyDrawer({ company, onClose, onPromote, onDefer, onReject }) {
 
             {/* Action bar */}
             <div className="shrink-0 border-t border-zinc-100 bg-white px-6 py-4">
-              <div className="flex items-center gap-2">
-                <button onClick={onPromote}
-                  className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2.5 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300">
-                  <Icons.arrowUp className="h-4 w-4" />Promote to scoring
-                </button>
-                <DeferButton onClick={onDefer} size="lg" />
-                <RejectButton onClick={onReject} size="lg" />
-              </div>
+              {company.bucket === 'deferred' ? (
+                <div className="flex items-center gap-2">
+                  <button onClick={onRestore}
+                    className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2.5 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300">
+                    <Icons.refresh className="h-4 w-4" />Restore to queue
+                  </button>
+                  <RejectButton onClick={onReject} size="lg" />
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <button onClick={onPromote}
+                    className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2.5 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300">
+                    <Icons.arrowUp className="h-4 w-4" />Promote to scoring
+                  </button>
+                  <DeferButton onClick={onDefer} size="lg" />
+                  <RejectButton onClick={onReject} size="lg" />
+                </div>
+              )}
             </div>
           </>
         )}

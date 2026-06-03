@@ -94,19 +94,20 @@ class ReviewService:
         self,
         *,
         statuses: tuple[str, ...] = ("qualified",),
+        review_status: str = "pending",
         segment: str | None = None,
         signal_type: str | None = None,
     ) -> list[PanelCompany]:
-        """Companies of the given verdict status(es) still awaiting a decision.
+        """Companies of the given verdict status(es) and human review state.
 
-        Defaults to `qualified`; pass `("needs_review",)` for that tab. Only
-        review_status='pending' rows surface — promoted / rejected / deferred
-        drop out. Optional filters narrow by segment or signal type.
+        Defaults to the qualified + still-`pending` queue. Pass
+        `review_status="deferred"` for the Deferred view (snoozed companies a
+        reviewer can restore). Optional filters narrow by segment / signal type.
         """
         rows = self._repo.panel(statuses=statuses)
         out: list[PanelCompany] = []
         for row in rows:
-            if row.get("review_status", "pending") != "pending":
+            if row.get("review_status", "pending") != review_status:
                 continue
             if segment and row.get("segment") != segment:
                 continue
@@ -114,6 +115,15 @@ class ReviewService:
                 continue
             out.append(_to_panel_company(row))
         return out
+
+    def list_deferred(self) -> list[PanelCompany]:
+        """Snoozed companies (review_status='deferred') a reviewer can restore.
+
+        Spans qualified + needs_review verdicts since either can be deferred.
+        """
+        return self.list_panel(
+            statuses=("qualified", "needs_review"), review_status="deferred"
+        )
 
     def get_company(self, company_key: str) -> PanelCompany | None:
         row = self._repo.get(company_key)
@@ -154,6 +164,11 @@ class ReviewService:
 
     def defer(self, company_key: str) -> None:
         if self._repo.set_review(company_key, "deferred") is None:
+            raise KeyError(f"company not found: {company_key!r}")
+
+    def restore(self, company_key: str) -> None:
+        """Move a deferred (or any non-pending) company back to the queue."""
+        if self._repo.set_review(company_key, "pending") is None:
             raise KeyError(f"company not found: {company_key!r}")
 
 

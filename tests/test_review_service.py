@@ -89,6 +89,32 @@ class TestWorkflow:
             svc.promote("does-not-exist")
 
 
+class TestDeferredAndRestore:
+    def test_deferred_appears_in_deferred_view_not_main_panel(self, svc):
+        svc.defer("alpha")
+        # gone from the main (pending) panel…
+        assert "Alpha Health" not in {c.name for c in svc.list_panel()}
+        # …but visible in the deferred view (the fix: no longer a black hole)
+        assert {c.name for c in svc.list_deferred()} == {"Alpha Health"}
+
+    def test_restore_moves_back_to_pending_queue(self, svc):
+        svc.defer("alpha")
+        svc.restore("alpha")
+        assert svc.get_company("alpha").review_status == "pending"
+        assert "Alpha Health" in {c.name for c in svc.list_panel()}      # back in queue
+        assert svc.list_deferred() == []                                 # no longer deferred
+
+    def test_deferred_view_excludes_other_states(self, svc):
+        svc.defer("alpha")
+        svc.reject("charlie", reason="too small")
+        # only deferred shows in the deferred view, not rejected/disqualified
+        assert {c.name for c in svc.list_deferred()} == {"Alpha Health"}
+
+    def test_restore_unknown_raises(self, svc):
+        with pytest.raises(KeyError):
+            svc.restore("does-not-exist")
+
+
 class TestStats:
     def test_counts_and_panel_pending(self, svc):
         s = svc.stats()

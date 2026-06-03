@@ -288,6 +288,25 @@ class PostgresRepository:
             r["started_at"] = _iso(r["started_at"])
         return rows
 
+    def recent_decisions(self, *, limit: int = 12) -> list[dict]:
+        """Most recently decided companies (any verdict) — drives the live
+        per-account activity feed. Includes disqualified so the feed shows
+        every action taken, not just the wins."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                """SELECT display_name, icp_status, segment, qualified_at
+                     FROM discovery_companies
+                    WHERE qualified_at IS NOT NULL
+                    ORDER BY qualified_at DESC
+                    LIMIT %s""",
+                (limit,),
+            ).fetchall()
+        return [
+            {"name": r["display_name"], "status": r["icp_status"],
+             "segment": r.get("segment"), "at": _iso(r["qualified_at"])}
+            for r in rows
+        ]
+
 
 # ── row mapping (match JsonFileRepository's dict shape exactly) ────────
 

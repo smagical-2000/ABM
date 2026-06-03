@@ -104,6 +104,10 @@ class DiscoveryRepository(Protocol):
         """Recently-started runs still in progress (drives the UI marker)."""
         ...
 
+    def recent_decisions(self, *, limit: int = 12) -> list[dict]:
+        """Most recently decided companies (any verdict) for the live feed."""
+        ...
+
 
 # ── JSON-file implementation (works now, zero infra) ──────────────────
 
@@ -313,6 +317,15 @@ class JsonFileRepository:
             })
         out.sort(key=lambda x: x["started_at"], reverse=True)
         return out
+
+    def recent_decisions(self, *, limit: int = 12) -> list[dict]:
+        rows = [r for r in self._store.values() if r.get("qualified_at")]
+        rows.sort(key=lambda r: r.get("qualified_at") or "", reverse=True)
+        return [
+            {"name": r.get("display_name"), "status": r.get("icp_status"),
+             "segment": r.get("segment"), "at": r.get("qualified_at")}
+            for r in rows[:limit]
+        ]
 
     # -- internals --
 

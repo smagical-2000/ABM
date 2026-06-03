@@ -38,13 +38,21 @@ function JobHiringBlock({ jobs }) {
             <ul className="mt-2 space-y-1.5">
               {g.items.map((s, j) => (
                 <li key={j} className="flex items-center justify-between gap-2 text-[12px]">
-                  <span className="min-w-0 truncate text-zinc-700">{s.title || s.summary}</span>
+                  {s.url ? (
+                    <a href={s.url} target="_blank" rel="noreferrer"
+                      className="min-w-0 truncate font-medium text-zinc-700 underline-offset-2 hover:text-indigo-600 hover:underline">
+                      {s.title || s.summary}
+                    </a>
+                  ) : (
+                    <span className="min-w-0 truncate text-zinc-700">{s.title || s.summary}</span>
+                  )}
                   <span className="flex shrink-0 items-center gap-1.5 text-zinc-400">
                     {s.location && <span className="max-w-[110px] truncate">{s.location}</span>}
                     {s.age && <span className="whitespace-nowrap">· {s.age}</span>}
                     {s.url && (
                       <a href={s.url} target="_blank" rel="noreferrer"
-                        className="text-zinc-400 transition-colors hover:text-indigo-600">
+                        className="shrink-0 text-zinc-400 transition-colors hover:text-indigo-600"
+                        title="View job posting">
                         <Icons.ext className="h-3.5 w-3.5" />
                       </a>
                     )}

@@ -104,15 +104,18 @@ def create_app() -> FastAPI:
 
     @app.get("/api/activity")
     def get_activity():
-        """In-progress discovery runs — drives the live 'processing' marker.
+        """Powers the live marker + per-account feed.
 
-        Returns {active: [{source, companies_qualified, new_companies,
-        elapsed_seconds, ...}]}. Empty when nothing is running. Defensive: a
-        repo without run tracking just reports idle.
+        Returns:
+          active: in-progress runs (drives the "Discovering…" banner)
+          recent: most-recently decided companies, newest first (drives the
+                  fading corner feed: "✅ Acme — qualified", "❌ Foo — ...")
+        Defensive: a repo without run tracking just reports idle/empty.
         """
         repo = app.state.repo
         active = repo.active_runs() if hasattr(repo, "active_runs") else []
-        return {"active": active}
+        recent = repo.recent_decisions() if hasattr(repo, "recent_decisions") else []
+        return {"active": active, "recent": recent}
 
     @app.get("/api/company/{key}", response_model=PanelCompany)
     def get_company(key: str):

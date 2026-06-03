@@ -34,6 +34,39 @@ function TabButton({ active, onClick, label, count, accent }) {
   );
 }
 
+// ── per-account decision ticker (fading corner feed) ────────────────────────
+const DECISION_META = {
+  qualified:    { label: 'Qualified',    icon: '✓', cls: 'text-emerald-600', bg: 'bg-emerald-50', ring: 'ring-emerald-200' },
+  disqualified: { label: 'Disqualified', icon: '✕', cls: 'text-zinc-400',    bg: 'bg-zinc-50',    ring: 'ring-zinc-200' },
+  needs_review: { label: 'Needs review', icon: '~', cls: 'text-amber-600',   bg: 'bg-amber-50',   ring: 'ring-amber-200' },
+  error:        { label: 'Errored',      icon: '!', cls: 'text-rose-500',    bg: 'bg-rose-50',    ring: 'ring-rose-200' },
+};
+
+function ActivityFeedItem({ item }) {
+  const [shown, setShown] = useState(false);
+  useEffect(() => { const t = setTimeout(() => setShown(true), 20); return () => clearTimeout(t); }, []);
+  const m = DECISION_META[item.status] || DECISION_META.disqualified;
+  const visible = shown && !item.leaving;
+  return (
+    <div className={`flex items-center gap-2.5 rounded-xl border border-zinc-200/70 bg-white/95 px-3 py-2 shadow-lg shadow-zinc-900/5 backdrop-blur transition-all duration-500 ${visible ? 'translate-x-0 opacity-100' : '-translate-x-3 opacity-0'}`}>
+      <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[12px] font-bold ${m.bg} ${m.cls} ring-1 ring-inset ${m.ring}`}>{m.icon}</span>
+      <div className="min-w-0">
+        <div className="max-w-[200px] truncate text-[12.5px] font-medium text-zinc-800">{item.name}</div>
+        <div className={`text-[11px] ${m.cls}`}>{m.label}{item.segment ? ` · ${item.segment.replace('_', ' ')}` : ''}</div>
+      </div>
+    </div>
+  );
+}
+
+function ActivityFeed({ items }) {
+  if (!items.length) return null;
+  return (
+    <div className="pointer-events-none fixed bottom-5 left-5 z-40 flex flex-col gap-2">
+      {items.map((it) => <ActivityFeedItem key={it.id} item={it} />)}
+    </div>
+  );
+}
+
 // ── ActivityBanner — live "processing" marker shown while a run is in flight ─
 function ActivityBanner({ runs }) {
   const qualified = runs.reduce((n, r) => n + (r.companies_qualified || 0), 0);
@@ -114,9 +147,20 @@ function App() {
   }
   useEffect(() => { loadAll(); }, []);
 
-  // ── live activity: poll for in-progress runs, stream new rows in ────────────
+  // ── live activity: poll for in-progress runs + per-account decisions ─────────
   const [activity, setActivity] = useState([]);
+  const [feed, setFeed] = useState([]);            // fading corner ticker
   const wasActiveRef = useRef(false);
+  const lastSeenRef = useRef(null);                // newest decision ts already shown
+  const feedIdRef = useRef(0);
+
+  function pushFeedItem(entry) {
+    const id = ++feedIdRef.current;
+    setFeed((f) => [...f, { id, leaving: false, ...entry }].slice(-5));
+    setTimeout(() => setFeed((f) => f.map((x) => (x.id === id ? { ...x, leaving: true } : x))), 5200);
+    setTimeout(() => setFeed((f) => f.filter((x) => x.id !== id)), 5700);
+  }
+
   useEffect(() => {
     let alive = true;
     async function poll() {
@@ -124,10 +168,24 @@ function App() {
         const a = await window.API.activity();
         if (!alive) return;
         const active = (a && a.active) || [];
+        const recent = (a && a.recent) || [];     // newest first
         setActivity(active);
+
+        // Emit a fading ticker entry for each company decided since last poll.
+        if (lastSeenRef.current === null) {
+          lastSeenRef.current = recent.length ? recent[0].at : '';   // seed, don't spam history
+        } else {
+          const fresh = [];
+          for (const r of recent) { if (r.at > lastSeenRef.current) fresh.push(r); else break; }
+          if (fresh.length) {
+            lastSeenRef.current = fresh[0].at;
+            fresh.reverse().forEach(pushFeedItem);  // oldest → newest so they stack in order
+          }
+        }
+
         if (active.length > 0) {
           wasActiveRef.current = true;
-          loadAll(true);                       // new companies appear as they qualify
+          loadAll(true);                            // companies appear as they qualify
         } else if (wasActiveRef.current) {
           wasActiveRef.current = false;
           loadAll(true);
@@ -296,7 +354,7 @@ function App() {
               <Dropdown label="Segment" value={segment} onChange={setSegment}
                 options={[{ value: 'all', label: 'All' }, { value: 'health_system', label: 'Health System' }, { value: 'specialty', label: 'Specialty' }, { value: 'payer', label: 'Payer' }]} />
               <Dropdown label="Signal" value={signalType} onChange={setSignalType}
-                options={[{ value: 'all', label: 'All' }, { value: 'layoff', label: 'Layoff' }, { value: 'leadership_change', label: 'Leadership change' }, { value: 'acquisition', label: 'Acquisition' }]} />
+                options={[{ value: 'all', label: 'All' }, { value: 'job_posting', label: 'Hiring' }, { value: 'layoff', label: 'Layoff' }, { value: 'leadership_change', label: 'Leadership change' }, { value: 'acquisition', label: 'Acquisition' }, { value: 'funding_round', label: 'Funding' }]} />
             </div>
             <span className="text-[13px] text-zinc-400">
               {loading ? 'Loading…' : `${visibleCount} ${visibleCount === 1 ? 'company' : 'companies'}`}
@@ -341,6 +399,7 @@ function App() {
       )}
 
       <ToastStack toasts={toasts} />
+      <ActivityFeed items={feed} />
     </div>
   );
 }

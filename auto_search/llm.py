@@ -33,11 +33,16 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 _WEB_SEARCH_TOOL_TYPE = "web_search_20260209"
 
-# Transient errors worth retrying with exponential backoff.
-_RETRYABLE = (RateLimitError, APIConnectionError, APITimeoutError, InternalServerError)
-_MAX_RETRIES = 4
+# Retry policy. Rate-limit (429) errors are handled differently from other
+# transient errors: on a 429 we WAIT OUT the per-minute window (honoring the
+# server's Retry-After header when present) and keep retrying, so a
+# qualification resolves to a real answer instead of erroring. Other transient
+# errors use a shorter exponential backoff.
+_TRANSIENT = (APIConnectionError, APITimeoutError, InternalServerError)
+_MAX_RETRIES = 8
 _INITIAL_BACKOFF_S = 1.0
 _BACKOFF_MULT = 2.0
+_RATE_LIMIT_MAX_WAIT_S = 90.0
 
 _client: AsyncAnthropic | None = None
 
@@ -57,6 +62,52 @@ def get_client() -> AsyncAnthropic:
     return _client
 
 
+def _retry_after_seconds(err: Exception) -> float | None:
+    """Seconds to wait from a 429's Retry-After header, if the SDK exposed it."""
+    resp = getattr(err, "response", None)
+    if resp is None:
+        return None
+    try:
+        ra = resp.headers.get("retry-after")
+        return float(ra) if ra else None
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+async def _create_with_retries(make_call):
+    """Run an Anthropic create() call, retrying on rate-limit + transient errors.
+
+    A 429 is waited out (Retry-After header, else a long capped backoff) and
+    retried, so the call keeps going until it gets a real answer rather than
+    abandoning the company as an error. Non-retryable errors propagate.
+    """
+    backoff = _INITIAL_BACKOFF_S
+    for attempt in range(_MAX_RETRIES):
+        try:
+            return await make_call()
+        except RateLimitError as e:
+            if attempt == _MAX_RETRIES - 1:
+                raise
+            wait = _retry_after_seconds(e) or min(backoff * 4, _RATE_LIMIT_MAX_WAIT_S)
+            wait += random.uniform(0, 1.5)
+            logger.warning(
+                "Claude rate limited — waiting %.0fs then retrying (%d/%d)",
+                wait, attempt + 1, _MAX_RETRIES,
+            )
+            await asyncio.sleep(wait)
+            backoff *= _BACKOFF_MULT
+        except _TRANSIENT as e:
+            if attempt == _MAX_RETRIES - 1:
+                raise
+            wait = backoff + random.uniform(0, backoff * 0.25)
+            logger.warning(
+                "Claude transient error (%s) — retrying in %.1fs (%d/%d)",
+                type(e).__name__, wait, attempt + 1, _MAX_RETRIES,
+            )
+            await asyncio.sleep(wait)
+            backoff *= _BACKOFF_MULT
+
+
 async def call_with_web_search(
     *,
     system: str,
@@ -65,36 +116,23 @@ async def call_with_web_search(
     max_tokens: int,
     model: str | None = None,
 ) -> Any:
-    """Call Claude with the web_search tool, retrying transient failures.
+    """Call Claude with the web_search tool, retrying transient + rate limits.
 
     Returns the raw Anthropic response (multi-block: text + tool-use +
     tool-result). Use extract_text() / extract_web_searches() to read it.
     Non-retryable errors (e.g. BadRequest) propagate to the caller.
     """
-    backoff = _INITIAL_BACKOFF_S
-    for attempt in range(_MAX_RETRIES):
-        try:
-            return await get_client().messages.create(
-                model=model or DEFAULT_MODEL,
-                max_tokens=max_tokens,
-                system=system,
-                tools=[{
-                    "type": _WEB_SEARCH_TOOL_TYPE,
-                    "name": "web_search",
-                    "max_uses": max_searches,
-                }],
-                messages=[{"role": "user", "content": user_message}],
-            )
-        except _RETRYABLE as e:
-            if attempt == _MAX_RETRIES - 1:
-                raise
-            sleep_for = backoff + random.uniform(0, backoff * 0.25)
-            logger.warning(
-                "Claude transient error (%s) attempt %d/%d — sleeping %.1fs",
-                type(e).__name__, attempt + 1, _MAX_RETRIES, sleep_for,
-            )
-            await asyncio.sleep(sleep_for)
-            backoff *= _BACKOFF_MULT
+    return await _create_with_retries(lambda: get_client().messages.create(
+        model=model or DEFAULT_MODEL,
+        max_tokens=max_tokens,
+        system=system,
+        tools=[{
+            "type": _WEB_SEARCH_TOOL_TYPE,
+            "name": "web_search",
+            "max_uses": max_searches,
+        }],
+        messages=[{"role": "user", "content": user_message}],
+    ))
 
 
 async def call_plain(
@@ -110,25 +148,12 @@ async def call_plain(
     the context it needs in the prompt (e.g. judging a job posting from its
     title + description). Much cheaper/faster than the web_search path.
     """
-    backoff = _INITIAL_BACKOFF_S
-    for attempt in range(_MAX_RETRIES):
-        try:
-            return await get_client().messages.create(
-                model=model or DEFAULT_MODEL,
-                max_tokens=max_tokens,
-                system=system,
-                messages=[{"role": "user", "content": user_message}],
-            )
-        except _RETRYABLE as e:
-            if attempt == _MAX_RETRIES - 1:
-                raise
-            sleep_for = backoff + random.uniform(0, backoff * 0.25)
-            logger.warning(
-                "Claude transient error (%s) attempt %d/%d — sleeping %.1fs",
-                type(e).__name__, attempt + 1, _MAX_RETRIES, sleep_for,
-            )
-            await asyncio.sleep(sleep_for)
-            backoff *= _BACKOFF_MULT
+    return await _create_with_retries(lambda: get_client().messages.create(
+        model=model or DEFAULT_MODEL,
+        max_tokens=max_tokens,
+        system=system,
+        messages=[{"role": "user", "content": user_message}],
+    ))
 
 
 def extract_text(response: Any) -> str:

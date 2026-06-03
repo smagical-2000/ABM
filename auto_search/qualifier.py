@@ -36,7 +36,10 @@ load_dotenv(override=True)
 logger = logging.getLogger(__name__)
 
 _MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
-_WEB_SEARCH_MAX_USES = 6        # cap searches per evaluation (cost guardrail)
+_WEB_SEARCH_MAX_USES = 3        # cap searches/eval. Each search turn re-feeds
+                               # prior results, so input tokens grow fast; 3
+                               # keeps one eval under the per-minute token limit
+                               # (see KNOWN_ISSUES) while still finding the site.
 _MAX_TOKENS          = 1200
 _CONFIDENCE_FLOOR    = 0.70
 

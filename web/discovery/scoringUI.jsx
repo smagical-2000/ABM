@@ -236,7 +236,8 @@ window.PillarMeters = PillarMeters;
 // runs, so this is an honest estimate (elapsed vs a typical run), not a fake
 // exact percentage. Two phases: researching & scoring, then independent QA.
 function ScoringProgress({ account }) {
-  const EST = 50; // typical seconds for score + QA on the enterprise key
+  const EST = 50;     // typical seconds for score + QA
+  const STALL = 180;  // past ~3x typical, stop pretending it is on schedule
   const start = account.scoring_started_at ? new Date(account.scoring_started_at).getTime() : null;
   const [elapsed, setElapsed] = React.useState(account.elapsed_seconds || 0);
   React.useEffect(() => {
@@ -246,16 +247,23 @@ function ScoringProgress({ account }) {
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
   }, [start]);
-  const pct = Math.round(Math.min(0.96, elapsed / EST) * 100);
+  const stalled = elapsed > STALL;
+  const pct = stalled ? 100 : Math.round(Math.min(0.96, elapsed / EST) * 100);
   const verifying = account.phase === 'verifying';
+  const mmss = (s) => { const m = Math.floor(s / 60); return m ? `${m}m ${s % 60}s` : `${s}s`; };
   return (
     <div className="hidden w-[210px] shrink-0 lg:block">
       <div className="flex items-center justify-between text-[11px]">
-        <span className="font-medium text-indigo-600">{verifying ? 'Verifying · independent QA' : 'Researching & scoring'}</span>
-        <span className="tabular-nums text-zinc-400">{elapsed}s<span className="text-zinc-300"> / ~{EST}s</span></span>
+        <span className={`font-medium ${stalled ? 'text-amber-600' : 'text-indigo-600'}`}>
+          {stalled ? 'Taking longer than usual' : (verifying ? 'Verifying · independent QA' : 'Researching & scoring')}
+        </span>
+        <span className="tabular-nums text-zinc-400">
+          {stalled ? mmss(elapsed) : <>{elapsed}s<span className="text-zinc-300"> / ~{EST}s</span></>}
+        </span>
       </div>
       <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-zinc-100">
-        <div className="h-full rounded-full bg-indigo-400" style={{ width: `${pct}%`, transition: 'width 1s linear' }} />
+        <div className={`h-full rounded-full ${stalled ? 'animate-pulse bg-amber-400' : 'bg-indigo-400'}`}
+          style={{ width: `${pct}%`, transition: 'width 1s linear' }} />
       </div>
     </div>
   );

@@ -311,6 +311,32 @@ def test_repo_queued_and_cost_summary(tmp_path):
     assert s["avg_cost"] == 0.21
 
 
+def test_repo_recovers_orphaned_scoring(tmp_path):
+    """A score whose background task died (e.g. a service restart) must not tick
+    'scoring' forever: it is swept back to the queue, re-scoreable on demand."""
+    from datetime import UTC, datetime, timedelta
+
+    from auto_search.db.scoring_repository import ScoringJsonRepository
+
+    repo = ScoringJsonRepository(path=str(tmp_path / "s.json"))
+    for aid in ("acc_a", "acc_b"):
+        repo.upsert_account(Account(
+            account_id=aid, name=aid.upper(), segment="payer",
+            framework="payer", source="discovery"), state="scoring")
+    # acc_a just started; acc_b has been 'scoring' for an hour (orphaned).
+    repo._store["acc_b"]["updated_at"] = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    repo._flush()
+
+    # Threshold sweep returns only the stalled one to the queue.
+    assert repo.recover_orphaned_scoring(1800) == 1
+    assert repo.get("acc_b")["state"] == "queued" and repo.get("acc_b")["phase"] is None
+    assert repo.get("acc_a")["state"] == "scoring"
+    # Boot sweep (default 0) returns everything still in-flight to the queue.
+    assert repo.recover_orphaned_scoring() == 1
+    assert repo.get("acc_a")["state"] == "queued"
+    assert repo.recover_orphaned_scoring() == 0          # idempotent once cleared
+
+
 @pytest.mark.asyncio
 async def test_service_csv_skips_qa(monkeypatch, tmp_path):
     """CSV imports trust the Definitive facts, so QA is skipped (cost saving)."""

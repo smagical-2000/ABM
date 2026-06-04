@@ -151,6 +151,24 @@ class TestCostControls:
         out = client.post("/api/scoring/score-queued", json={"limit": 1}).json()
         assert out["started"] == 1 and out["busy"] is True
 
+    def test_activity_poll_reaps_stalled_scoring(self, client):
+        """A score orphaned by a dead task self-heals: polling activity sweeps a
+        long-stalled 'scoring' row back to the queue so it never sticks."""
+        from datetime import UTC, datetime, timedelta
+
+        from auto_search.scoring.models import Account
+
+        repo = client.app.state.scoring_repo
+        repo.upsert_account(Account(
+            account_id="acc_stuck", name="Stuck Health", segment="payer",
+            framework="payer", source="discovery"), state="scoring")
+        repo._store["acc_stuck"]["updated_at"] = (
+            datetime.now(UTC) - timedelta(hours=2)).isoformat()
+        repo._flush()
+
+        assert client.get("/api/scoring/activity").json()["active"] == []
+        assert repo.get("acc_stuck")["state"] == "queued"
+
 
 class TestStaticMount:
     def test_serves_ui_index(self, client):

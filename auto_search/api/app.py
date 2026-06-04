@@ -34,7 +34,10 @@ from pydantic import BaseModel
 
 from auto_search.api.auth import install_basic_auth
 from auto_search.db import get_repository
-from auto_search.db.scoring_repository import get_scoring_repository
+from auto_search.db.scoring_repository import (
+    STALE_SCORING_SECONDS,
+    get_scoring_repository,
+)
 from auto_search.scoring import imports as csv_imports
 from auto_search.scoring.frameworks import all_frameworks_public
 from auto_search.scoring.service import ScoringService
@@ -166,6 +169,12 @@ async def lifespan(app: FastAPI):
     app.state.scoring_tasks = set()           # keep background score tasks alive
     app.state.batch_running = False           # one queued batch at a time
     app.state.loop = asyncio.get_running_loop()
+    # No scoring task can be alive at boot, so anything still marked 'scoring'
+    # was orphaned by the previous shutdown — return it to the queue so it does
+    # not tick "scoring" forever, and is re-scoreable on demand.
+    orphaned = scoring_repo.recover_orphaned_scoring()
+    if orphaned:
+        logger.warning("recovered %d orphaned 'scoring' account(s) -> queued", orphaned)
     logger.info("discovery + scoring API ready (repo=%s)", type(repo).__name__)
     try:
         yield
@@ -322,7 +331,12 @@ def create_app() -> FastAPI:
 
     @app.get("/api/scoring/activity")
     def scoring_activity():
-        """In-flight accounts (queued / scoring) — drives the live shimmer."""
+        """Actively-scoring accounts — drives the live shimmer. Also self-heals:
+        any score stalled past the threshold (a dead task) is swept back to the
+        queue here, so the UI never shows a forever-scoring row."""
+        reaped = app.state.scoring_repo.recover_orphaned_scoring(STALE_SCORING_SECONDS)
+        if reaped:
+            logger.warning("swept %d stalled 'scoring' account(s) -> queued", reaped)
         return {"active": app.state.scoring.active()}
 
     @app.get("/api/account/{account_id}")

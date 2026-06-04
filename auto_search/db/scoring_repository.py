@@ -28,6 +28,12 @@ logger = logging.getLogger(__name__)
 # so a 1000-row import must not look like 1000 accounts mid-score.
 _ACTIVE_STATES = ("scoring",)
 
+# A score (plus QA) takes ~1 minute; even a heavily rate-limited run is bounded
+# at a few minutes per call. An account sitting in 'scoring' far longer than that
+# was orphaned (its background task died, usually a service restart) and would
+# otherwise tick "scoring" forever, so it is swept back to the queue.
+STALE_SCORING_SECONDS = 1800   # 30 minutes
+
 
 # ── interface ─────────────────────────────────────────────────────────
 
@@ -44,6 +50,7 @@ class ScoringRepository(Protocol):
     def queued(self) -> list[dict]: ...
     def exists(self, account_id: str) -> bool: ...
     def cost_summary(self) -> dict: ...
+    def recover_orphaned_scoring(self, older_than_seconds: int = 0) -> int: ...
 
 
 # ── shared row shaping ────────────────────────────────────────────────
@@ -297,6 +304,19 @@ class ScoringPostgresRepository:
         return _cost_summary(row["total_cost"], row["month_cost"],
                              row["scored_count"], row["queued_count"])
 
+    def recover_orphaned_scoring(self, older_than_seconds: int = 0) -> int:
+        """Return stuck 'scoring' accounts to the queue. With the default 0 this
+        resets every in-flight row (call at startup, when no task is alive); a
+        positive threshold only sweeps rows stalled longer than that."""
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "UPDATE scored_accounts SET state='queued', phase=NULL, "
+                "updated_at=now() WHERE state='scoring' "
+                "AND updated_at <= now() - make_interval(secs => %s)",
+                (older_than_seconds,),
+            )
+            return cur.rowcount or 0
+
 
 # ── JSON file (local/dev) ─────────────────────────────────────────────
 
@@ -391,6 +411,21 @@ class ScoringJsonRepository:
             elif state == "queued":
                 queued += 1
         return _cost_summary(total, month, scored, queued)
+
+    def recover_orphaned_scoring(self, older_than_seconds: int = 0) -> int:
+        n = 0
+        for row in self._store.values():
+            if row.get("state") != "scoring":
+                continue
+            elapsed = _elapsed(row.get("updated_at"))
+            if elapsed is None or elapsed >= older_than_seconds:
+                row["state"] = "queued"
+                row["phase"] = None
+                row["updated_at"] = datetime.now(UTC).isoformat()
+                n += 1
+        if n:
+            self._flush()
+        return n
 
     # -- internals --
 

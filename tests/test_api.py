@@ -184,6 +184,28 @@ class TestCostControls:
         assert repo.get("acc_s")["state"] == "queued"
         assert client.get("/api/scoring/stats").json()["scored_count"] == 0
 
+    def test_dossier_requires_scored_then_generates(self, client, monkeypatch):
+        """Dossier generation is refused until an account is scored, then kicks a
+        background pass and flips dossier_state to 'generating'."""
+        from auto_search.scoring.models import Account, Dimension, ScoreResult
+
+        repo = client.app.state.scoring_repo
+        repo.upsert_account(Account(account_id="acc_d", name="D Group",
+                                    segment="specialty", framework="specialty",
+                                    source="discovery"), state="queued")
+        # queued account: refused
+        assert client.post("/api/account/acc_d/dossier").status_code == 409
+
+        repo.save_score("acc_d", ScoreResult(
+            account_id="acc_d", framework="specialty", framework_version="v",
+            dimensions=[Dimension(key="k", label="K", score=8, max=10)],
+            total=8, max_total=10, tier_band="high", tier_label="High Fit"))
+
+        # don't run the real (LLM) generation in a routing test
+        monkeypatch.setattr(_app_module, "_schedule_coro", lambda app, coro: coro.close())
+        out = client.post("/api/account/acc_d/dossier").json()
+        assert out["dossier_state"] == "generating"
+
     def test_activity_poll_reaps_stalled_scoring(self, client):
         """A score orphaned by a dead task self-heals: polling activity sweeps a
         long-stalled 'scoring' row back to the queue so it never sticks."""

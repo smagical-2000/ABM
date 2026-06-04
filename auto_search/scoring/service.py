@@ -14,9 +14,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from auto_search.scoring import engine, qa
+from auto_search.scoring import dossier, engine, qa
 from auto_search.scoring.frameworks import FRAMEWORKS, framework_for_segment, resolve_tier
-from auto_search.scoring.models import Account, QAResult
+from auto_search.scoring.models import Account, Dimension, QAResult, ScoreResult
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +123,37 @@ class ScoringService:
             corrections=[],
         ), 0.0
 
+    # ── dossier (on-demand deep research) ──────────────────────────────
+
+    async def generate_dossier(self, account_id: str) -> dict | None:
+        """Generate the landing-page dossier for a scored account end to end.
+
+        Never raises — a failure lands dossier_state='error' (retryable) rather
+        than crashing the background task. Only scored accounts qualify.
+        """
+        row = self._repo.get(account_id)
+        if row is None or row.get("state") != "scored":
+            return None
+        account = _account_from_row(row)
+        score = _score_from_row(row)
+
+        self._repo.set_dossier_state(account_id, "generating")
+        try:
+            result, _cost = await dossier.generate(account, score)
+        except dossier.DossierError as e:
+            logger.error("dossier failed for %s: %s", account.name, e)
+            self._repo.set_dossier_state(account_id, "error", error=str(e))
+            return self._repo.get(account_id)
+        except Exception as e:  # noqa: BLE001 — any failure is retryable
+            logger.exception("unexpected dossier error for %s", account.name)
+            self._repo.set_dossier_state(account_id, "error",
+                                         error=f"{type(e).__name__}: {e}")
+            return self._repo.get(account_id)
+
+        saved = self._repo.save_dossier(account_id, result)
+        logger.info("dossier ready for %s ($%.3f)", account.name, result.cost_usd)
+        return saved
+
     # ── reads ──────────────────────────────────────────────────────────
 
     def list_scored(self) -> list[dict]:
@@ -185,6 +216,22 @@ def _discovery_known_facts(c: dict[str, Any]) -> dict[str, Any]:
     if c.get("evidence_url"):
         facts["Evidence URL"] = c["evidence_url"]
     return facts
+
+
+def _score_from_row(row: dict[str, Any]) -> ScoreResult:
+    """Reconstruct the score from a stored row, for the dossier's context."""
+    dims = [Dimension(**d) for d in (row.get("dimensions") or [])]
+    return ScoreResult(
+        account_id=row["account_id"],
+        framework=row.get("framework") or "",
+        framework_version="",
+        dimensions=dims,
+        total=row.get("total") or 0,
+        max_total=row.get("max_total") or 0,
+        tier_band=row.get("tier_band") or "low",
+        tier_label=row.get("tier_label") or "",
+        recommendation=row.get("recommendation") or "",
+    )
 
 
 def _account_from_row(row: dict[str, Any]) -> Account:

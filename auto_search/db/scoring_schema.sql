@@ -43,6 +43,14 @@ CREATE TABLE IF NOT EXISTS scored_accounts (
     -- which CSV import this account came in on (filename + time), so a user can
     -- filter + export exactly the batch they uploaded. NULL for discovery.
     import_label          TEXT,
+
+    -- on-demand deep-research landing-page dossier (NULL until generated)
+    dossier               JSONB,
+    dossier_state         TEXT,          -- generating | ready | error
+    dossier_cost          DOUBLE PRECISION NOT NULL DEFAULT 0,
+    dossier_generated_at  TIMESTAMPTZ,
+    dossier_error         TEXT,
+
     error_message         TEXT,
 
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -61,3 +69,8 @@ CREATE INDEX IF NOT EXISTS idx_scored_tier
 ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS phase TEXT;
 ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0;
 ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS import_label TEXT;
+ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS dossier JSONB;
+ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS dossier_state TEXT;
+ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS dossier_cost DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS dossier_generated_at TIMESTAMPTZ;
+ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS dossier_error TEXT;

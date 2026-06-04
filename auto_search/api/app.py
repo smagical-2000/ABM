@@ -364,6 +364,23 @@ def create_app() -> FastAPI:
         _schedule_scoring(app, account_id)
         return app.state.scoring.get(account_id)
 
+    @app.post("/api/account/{account_id}/dossier")
+    def generate_dossier(account_id: str):
+        """Generate the deep-research landing-page dossier for a scored account.
+
+        On demand only (it costs ~$0.50-1.00), one at a time per account. The UI
+        polls GET /api/account/{id} until dossier_state flips to 'ready'."""
+        account = app.state.scoring.get(account_id)
+        if account is None:
+            raise HTTPException(status_code=404, detail="account not found")
+        if account.get("state") != "scored":
+            raise HTTPException(status_code=409, detail="account must be scored first")
+        if account.get("dossier_state") == "generating":
+            return account                            # already in flight
+        app.state.scoring_repo.set_dossier_state(account_id, "generating")
+        _schedule_coro(app, app.state.scoring.generate_dossier(account_id))
+        return app.state.scoring.get(account_id)
+
     @app.post("/api/scoring/import/preview")
     async def import_preview(request: Request):
         """Parse a CSV (raw request body) and report the schema + column mapping

@@ -46,6 +46,9 @@ class ScoringRepository(Protocol):
     def set_state(self, account_id: str, state: str, *, error: str | None = None) -> None: ...
     def set_phase(self, account_id: str, phase: str | None) -> None: ...
     def save_score(self, account_id: str, score: ScoreResult) -> dict | None: ...
+    def set_dossier_state(self, account_id: str, state: str | None,
+                          error: str | None = None) -> None: ...
+    def save_dossier(self, account_id: str, dossier) -> dict | None: ...
     def get(self, account_id: str) -> dict | None: ...
     def list_accounts(self) -> list[dict]: ...
     def active(self) -> list[dict]: ...
@@ -97,6 +100,11 @@ def _row(account: dict) -> dict:
         "model": account.get("model"),
         "cost_usd": _as_float(account.get("cost_usd")),
         "import_label": account.get("import_label"),
+        "dossier": account.get("dossier"),
+        "dossier_state": account.get("dossier_state"),
+        "dossier_cost": _as_float(account.get("dossier_cost")),
+        "dossier_generated_at": _iso(account.get("dossier_generated_at")),
+        "dossier_error": account.get("dossier_error"),
         "error": account.get("error_message"),
         "scored_at": _iso(account.get("scored_at")),
         "created_at": _iso(account.get("created_at")),
@@ -267,6 +275,34 @@ class ScoringPostgresRepository:
             ).fetchone()
         return self.get(account_id) if row else None
 
+    def set_dossier_state(self, account_id: str, state: str | None,
+                          error: str | None = None) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE scored_accounts SET dossier_state=%s, dossier_error=%s "
+                "WHERE account_id=%s",
+                (state, error, account_id),
+            )
+
+    def save_dossier(self, account_id: str, dossier) -> dict | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                UPDATE scored_accounts SET
+                    dossier=%(d)s, dossier_state='ready', dossier_error=NULL,
+                    dossier_cost=%(cost)s, dossier_generated_at=%(at)s
+                 WHERE account_id=%(id)s
+             RETURNING account_id
+                """,
+                {
+                    "id": account_id,
+                    "d": json.dumps(dossier.model_dump(), default=str),
+                    "cost": dossier.cost_usd,
+                    "at": dossier.generated_at or datetime.now(UTC).isoformat(),
+                },
+            ).fetchone()
+        return self.get(account_id) if row else None
+
     def get(self, account_id: str) -> dict | None:
         with self._pool.connection() as conn:
             row = conn.execute(
@@ -310,9 +346,12 @@ class ScoringPostgresRepository:
             row = conn.execute(
                 """
                 SELECT
-                  COALESCE(SUM(cost_usd), 0) AS total_cost,
+                  COALESCE(SUM(cost_usd + dossier_cost), 0) AS total_cost,
                   COALESCE(SUM(cost_usd) FILTER (
-                      WHERE scored_at >= date_trunc('month', now())), 0) AS month_cost,
+                      WHERE scored_at >= date_trunc('month', now())), 0)
+                    + COALESCE(SUM(dossier_cost) FILTER (
+                      WHERE dossier_generated_at >= date_trunc('month', now())), 0)
+                    AS month_cost,
                   COUNT(*) FILTER (WHERE state='scored')  AS scored_count,
                   COUNT(*) FILTER (WHERE state='queued')  AS queued_count
                 FROM scored_accounts
@@ -420,6 +459,26 @@ class ScoringJsonRepository:
         self._flush()
         return _row(row)
 
+    def set_dossier_state(self, account_id: str, state: str | None,
+                          error: str | None = None) -> None:
+        row = self._store.get(account_id)
+        if row:
+            row["dossier_state"] = state
+            row["dossier_error"] = error
+            self._flush()
+
+    def save_dossier(self, account_id: str, dossier) -> dict | None:
+        row = self._store.get(account_id)
+        if not row:
+            return None
+        row["dossier"] = dossier.model_dump()
+        row["dossier_state"] = "ready"
+        row["dossier_error"] = None
+        row["dossier_cost"] = dossier.cost_usd
+        row["dossier_generated_at"] = dossier.generated_at or datetime.now(UTC).isoformat()
+        self._flush()
+        return _row(row)
+
     def get(self, account_id: str) -> dict | None:
         row = self._store.get(account_id)
         return _row(row) if row else None
@@ -449,12 +508,18 @@ class ScoringJsonRepository:
             state = r.get("state")
             if state == "scored":
                 scored += 1
-                c = _as_float(r.get("cost_usd"))
-                total += c
-                if (_iso(r.get("scored_at")) or "") >= month_start:
-                    month += c
             elif state == "queued":
                 queued += 1
+            c = _as_float(r.get("cost_usd"))
+            total += c
+            if (_iso(r.get("scored_at")) or "") >= month_start:
+                month += c
+            # dossier spend counts toward the budget too
+            dc = _as_float(r.get("dossier_cost"))
+            if dc:
+                total += dc
+                if (_iso(r.get("dossier_generated_at")) or "") >= month_start:
+                    month += dc
         return _cost_summary(total, month, scored, queued)
 
     def recover_orphaned_scoring(self, older_than_seconds: int = 0) -> int:

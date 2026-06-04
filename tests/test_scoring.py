@@ -476,6 +476,76 @@ def test_repo_import_labels(tmp_path):
     assert repo.get("disc")["import_label"] is None
 
 
+# ── dossier (landing-page deep research) ──────────────────────────────
+
+
+def test_dossier_parse_shapes_and_guards():
+    from auto_search.scoring import dossier as dmod
+
+    d = dmod._parse({
+        "firmographic_profile": [
+            {"label": "Revenue", "value": "$145M", "confidence": "likely"},
+            {"value": "no label"},                 # dropped (no label)
+        ],
+        "services": [{"label": "Core", "value": "Primary care"}],
+        "intent_signals": [{"signal": "Epic go-live", "detail": "x", "score": 12}],  # clamps
+        "decision_makers": [
+            {"role": "CFO", "contact": "Jane Doe, CFO", "notes": "buyer"},
+            {"notes": "no role"},                  # dropped
+        ],
+        "entry_strategy": {"timing": "HIGH - now", "primary_angles": ["a", "b"],
+                           "cautions": ["c"], "deal_size": "$0.4M-$1M"},
+        "rcm_complexity": [{"label": "EHR System", "value": "Epic"}],
+        "recent_news": [{"headline": "Epic go-live", "detail": "x", "date": "Sept 2025"}],
+        "pain_points": ["denials", "  "],          # blank dropped
+        "messaging_angles": ["Congrats on the Epic cutover"],
+    })
+    assert len(d.firmographic_profile) == 1
+    assert d.firmographic_profile[0].confidence == "likely"
+    assert d.intent_signals[0].score == 10                 # clamped to ceiling
+    assert [m.role for m in d.decision_makers] == ["CFO"]  # role-less dropped
+    assert d.entry_strategy.timing.startswith("HIGH") and d.entry_strategy.primary_angles == ["a", "b"]
+    assert d.pain_points == ["denials"]
+    assert d.messaging_angles == ["Congrats on the Epic cutover"]
+
+
+@pytest.mark.asyncio
+async def test_service_generate_dossier(monkeypatch, tmp_path):
+    """generate_dossier runs the engine on a scored account, stores the result,
+    flips state to 'ready', and counts the cost toward the budget."""
+    from auto_search.db.scoring_repository import ScoringJsonRepository
+    from auto_search.scoring import service as svc_mod
+    from auto_search.scoring.models import Dossier
+    from auto_search.scoring.service import ScoringService
+
+    repo = ScoringJsonRepository(path=str(tmp_path / "s.json"))
+    svc = ScoringService(repo)
+    repo.upsert_account(Account(account_id="acc_x", name="X Group", segment="specialty",
+                                framework="specialty", source="discovery"), state="queued")
+    repo.save_score("acc_x", ScoreResult(
+        account_id="acc_x", framework="specialty", framework_version="v",
+        dimensions=[Dimension(key="k", label="K", score=8, max=10, summary="s")],
+        total=8, max_total=10, tier_band="high", tier_label="High Fit",
+        recommendation="go"))
+
+    async def fake_gen(account, score):
+        assert score.recommendation == "go"               # score context handed in
+        return Dossier(pain_points=["denials"], cost_usd=0.7,
+                       generated_at="2026-06-04T00:00:00+00:00"), 0.7
+    monkeypatch.setattr(svc_mod.dossier, "generate", fake_gen)
+
+    out = await svc.generate_dossier("acc_x")
+    assert out["dossier_state"] == "ready"
+    assert out["dossier"]["pain_points"] == ["denials"]
+    assert out["dossier_cost"] == 0.7
+    assert repo.cost_summary()["total_cost"] >= 0.7       # dossier counts in the meter
+
+    # only scored accounts qualify
+    repo.upsert_account(Account(account_id="acc_q", name="Q", segment="payer",
+                                framework="payer", source="csv"), state="queued")
+    assert await svc.generate_dossier("acc_q") is None
+
+
 # ── cost math (the money the meter reports) ───────────────────────────
 
 

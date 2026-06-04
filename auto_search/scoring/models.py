@@ -110,3 +110,61 @@ class ScoreResult(BaseModel):
             d.score = max(0.0, min(float(d.score), float(d.max)))
         self.total = int(round(sum(d.score for d in self.dimensions)))
         return self
+
+
+# ── Landing-page dossier ──────────────────────────────────────────────
+# A deep-research one-pager generated on demand for an account being pursued.
+# It is layered on top of the score (which supplies the fit + pillars), so these
+# models cover only the researched sections. Confidence mirrors the source
+# document's honesty: "known" facts are cited, "likely" are inferred, "unknown"
+# could not be confirmed.
+
+DossierConfidence = Literal["known", "likely", "unknown"]
+
+
+class FactRow(BaseModel):
+    label: str
+    value: str
+    confidence: DossierConfidence = "known"
+
+
+class IntentSignal(BaseModel):
+    signal: str                  # headline of the signal
+    detail: str = ""
+    score: int = 0               # 0..10, how strong a buying signal
+
+
+class DecisionMaker(BaseModel):
+    role: str
+    contact: str = ""            # name + title (or "Unknown ...")
+    notes: str = ""
+
+
+class NewsItem(BaseModel):
+    headline: str
+    detail: str = ""
+    date: str = ""
+
+
+class EntryStrategy(BaseModel):
+    timing: str = ""             # "HIGH - ...", "MEDIUM - ...", "LOW - ..."
+    primary_angles: list[str] = Field(default_factory=list)
+    cautions: list[str] = Field(default_factory=list)
+    deal_size: str = ""
+
+
+class Dossier(BaseModel):
+    """The researched sections of the landing-page one-pager."""
+
+    firmographic_profile: list[FactRow] = Field(default_factory=list)
+    services: list[FactRow] = Field(default_factory=list)
+    intent_signals: list[IntentSignal] = Field(default_factory=list)
+    decision_makers: list[DecisionMaker] = Field(default_factory=list)
+    entry_strategy: EntryStrategy = Field(default_factory=EntryStrategy)
+    rcm_complexity: list[FactRow] = Field(default_factory=list)
+    recent_news: list[NewsItem] = Field(default_factory=list)
+    pain_points: list[str] = Field(default_factory=list)
+    messaging_angles: list[str] = Field(default_factory=list)
+    model: str = ""
+    generated_at: str | None = None
+    cost_usd: float = 0.0

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Discovery Panel — Magical</title>
+  <title>Discovery &amp; Scoring — Magical</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
@@ -33,6 +33,8 @@
     .animate-fade { animation: fadeIn 0.18s ease-out; }
     @keyframes popIn { from { opacity: 0; transform: scale(0.96) translateY(6px); } to { opacity: 1; transform: scale(1) translateY(0); } }
     .animate-pop { animation: popIn 0.2s cubic-bezier(0.16,1,0.3,1); }
+    @keyframes spinSlow { to { transform: rotate(270deg); } }
+    .animate-spin-slow { animation: spinSlow 1.3s linear infinite; transform-origin: center; }
   </style>
 </head>
 <body class="bg-[#fafafa]">
@@ -43,10 +45,15 @@
   <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
 
   <script src="api.js"></script>
+  <script src="scoringData.js"></script>
   <script type="text/babel" src="ui.jsx"></script>
   <script type="text/babel" src="panel.jsx"></script>
   <script type="text/babel" src="autoscore.jsx"></script>
   <script type="text/babel" src="drawer.jsx"></script>
+  <script type="text/babel" src="scoringUI.jsx"></script>
+  <script type="text/babel" src="scoreDrawer.jsx"></script>
+  <script type="text/babel" src="csvImport.jsx"></script>
+  <script type="text/babel" src="landingPage.jsx"></script>
   <script type="text/babel" src="app.jsx"></script>
 </body>
 </html>

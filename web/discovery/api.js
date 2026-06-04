@@ -39,4 +39,18 @@ window.API = {
       method: 'POST',
       body: JSON.stringify({ reason }),
     }),
+
+  // ── scoring phase ──────────────────────────────────────────────────────────
+  frameworks: () => http('/api/scoring/frameworks'),
+  scored: () => http('/api/scored'),
+  account: (id) => http(`/api/account/${encodeURIComponent(id)}`),
+  scoreAccount: (id) => http(`/api/account/${encodeURIComponent(id)}/score`, { method: 'POST' }),
+  scoringActivity: () => http('/api/scoring/activity'),
+  // CSV import posts the raw file text as the body (no multipart).
+  importPreview: (csvText) => http('/api/scoring/import/preview', {
+    method: 'POST', headers: { 'Content-Type': 'text/csv' }, body: csvText,
+  }),
+  importCommit: (csvText) => http('/api/scoring/import', {
+    method: 'POST', headers: { 'Content-Type': 'text/csv' }, body: csvText,
+  }),
 };

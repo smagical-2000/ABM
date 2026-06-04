@@ -589,7 +589,9 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
     pushToast(`Scoring ${n} queued ${n === 1 ? 'account' : 'accounts'}…`, 'success');
     try {
       const res = await window.API.scoreQueued(limit ? { limit } : {});
-      if (res && res.started === 0) { setBatchKick(false); pushToast('A batch is already running.', 'success'); }
+      if (res && res.budget_blocked) { setBatchKick(false); pushToast('Monthly budget reached — nothing scored. Raise the budget or wait.', 'danger'); }
+      else if (res && res.started === 0) { setBatchKick(false); pushToast('A batch is already running.', 'success'); }
+      else if (res && res.budget_capped) { pushToast(`Scoring ${res.started} that fit the budget (the rest stay queued).`, 'success'); }
     } catch (e) { setBatchKick(false); pushToast(`Couldn't start batch: ${e.message}`, 'danger'); }
     wasActiveRef.current = true;
     load(true);

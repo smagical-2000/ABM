@@ -594,6 +594,54 @@ async def test_service_generate_dossier(monkeypatch, tmp_path):
     assert await svc.generate_dossier("acc_q") is None
 
 
+# ── operational guards (budget, prod, corruption) ─────────────────────
+
+
+class TestBudgetGuard:
+    def test_assert_and_count(self):
+        from auto_search.scoring import budget
+
+        s = {"month_cost": 190, "monthly_budget": 200, "budget_remaining": 10}
+        budget.assert_affordable(s, 5)                     # within budget: ok
+        with pytest.raises(budget.BudgetExceeded):
+            budget.assert_affordable(s, 20)                # would exceed
+        assert budget.affordable_count(s, 0.35) == int(10 // 0.35)
+        assert budget.affordable_count({"budget_remaining": 0}, 0.35) == 0
+        assert budget.affordable_count(s, 0) >= 1          # free op: unbounded
+
+
+def test_is_production_detection(monkeypatch):
+    from auto_search import runtime
+
+    for m in ("APP_ENV", "RAILWAY_ENVIRONMENT", "RAILWAY_ENVIRONMENT_NAME",
+              "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID"):
+        monkeypatch.delenv(m, raising=False)
+    assert runtime.is_production() is False                # bare localhost
+    monkeypatch.setenv("RAILWAY_PROJECT_ID", "p-123")
+    assert runtime.is_production() is True                 # on Railway
+    monkeypatch.setenv("APP_ENV", "dev")                   # explicit dev wins
+    assert runtime.is_production() is False
+
+
+def test_scoring_json_corrupt_is_backed_up_not_wiped(tmp_path):
+    from auto_search.db.scoring_repository import ScoringJsonRepository
+
+    p = tmp_path / "s.json"
+    p.write_text("{ this is not valid json")
+    repo = ScoringJsonRepository(path=str(p))              # _load on init
+    assert repo.list_accounts() == []                     # starts empty
+    assert (tmp_path / "s.json.corrupt").exists()         # but the bad file is preserved
+
+
+def test_production_requires_database_url(monkeypatch):
+    from auto_search.db.scoring_repository import get_scoring_repository
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("APP_ENV", "production")
+    with pytest.raises(RuntimeError, match="DATABASE_URL is required"):
+        get_scoring_repository()
+
+
 # ── cost math (the money the meter reports) ───────────────────────────
 
 

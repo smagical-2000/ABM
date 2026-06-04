@@ -562,6 +562,15 @@ class ScoringJsonRepository:
         try:
             return json.loads(self._path.read_text())
         except json.JSONDecodeError:
+            # Never silently wipe data: preserve the corrupt file before starting
+            # fresh, so a bad write can't erase real scoring history.
+            backup = self._path.with_suffix(self._path.suffix + ".corrupt")
+            try:
+                self._path.replace(backup)
+                logger.error("corrupt scoring store at %s — moved to %s, starting empty",
+                             self._path, backup)
+            except OSError:
+                logger.error("corrupt scoring store at %s — starting empty", self._path)
             return {}
 
     def _flush(self) -> None:
@@ -603,4 +612,11 @@ def _max_total(account: Account) -> int:
 def get_scoring_repository() -> ScoringRepository:
     if os.getenv("DATABASE_URL"):
         return ScoringPostgresRepository()
+    # Fail closed: real (production) data must not silently land in a JSON file.
+    from auto_search.runtime import is_production
+    if is_production():
+        raise RuntimeError(
+            "DATABASE_URL is required in production — refusing to run the scoring "
+            "store on a JSON file where data would not persist or be backed up."
+        )
     return ScoringJsonRepository()

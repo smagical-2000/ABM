@@ -39,6 +39,8 @@ from auto_search.db.scoring_repository import (
     STALE_SCORING_SECONDS,
     get_scoring_repository,
 )
+from auto_search.runtime import is_production
+from auto_search.scoring import budget as budget_guard
 from auto_search.scoring import imports as csv_imports
 from auto_search.scoring.frameworks import all_frameworks_public
 from auto_search.scoring.service import ScoringService
@@ -73,6 +75,9 @@ def _schedule_coro(app: FastAPI, coro) -> None:
     except RuntimeError:
         loop = getattr(app.state, "loop", None)
         if loop is None:
+            # Should never happen once the app has started; loud so dropped paid
+            # work is never silent.
+            logger.error("no event loop to schedule background work — DROPPING it")
             coro.close()
             return
         task = asyncio.run_coroutine_threadsafe(coro, loop)
@@ -80,9 +85,30 @@ def _schedule_coro(app: FastAPI, coro) -> None:
     task.add_done_callback(lambda t: app.state.scoring_tasks.discard(t))
 
 
+def _claim_scoring(app: FastAPI, account_id: str) -> bool:
+    """Claim an account for scoring. Returns False if it is already in flight, so
+    promote + a batch + a manual re-score can't run two paid passes at once
+    (single-process guard; a DB lock would be needed for multiple workers)."""
+    inflight = app.state.scoring_inflight
+    if account_id in inflight:
+        return False
+    inflight.add(account_id)
+    return True
+
+
 def _schedule_scoring(app: FastAPI, account_id: str) -> None:
-    """Background-score one account; the UI shows the live 'Scoring…' state."""
-    _schedule_coro(app, app.state.scoring.run_scoring(account_id))
+    """Background-score one account, guarded so the same account never doubles up."""
+    if not _claim_scoring(app, account_id):
+        logger.info("skip scoring %s — already in flight", account_id)
+        return
+
+    async def _run() -> None:
+        try:
+            await app.state.scoring.run_scoring(account_id)
+        finally:
+            app.state.scoring_inflight.discard(account_id)
+
+    _schedule_coro(app, _run())
 
 
 async def _run_batch(app: FastAPI, account_ids: list[str]) -> None:
@@ -91,16 +117,30 @@ async def _run_batch(app: FastAPI, account_ids: list[str]) -> None:
 
     async def one(account_id: str) -> None:
         async with sem:
+            if not _claim_scoring(app, account_id):
+                return                     # already being scored elsewhere
             try:
                 await app.state.scoring.run_scoring(account_id)
             except Exception:  # noqa: BLE001 — one failure must not stop the batch
                 logger.exception("batch scoring failed for %s", account_id)
+            finally:
+                app.state.scoring_inflight.discard(account_id)
 
     try:
         await asyncio.gather(*(one(a) for a in account_ids))
     finally:
         app.state.batch_running = False
     logger.info("batch complete: %d accounts", len(account_ids))
+
+
+def _assert_budget(app: FastAPI, est: float) -> dict:
+    """Reject a paid request that would exceed the monthly budget (429)."""
+    summary = app.state.scoring_repo.cost_summary()
+    try:
+        budget_guard.assert_affordable(summary, est)
+    except budget_guard.BudgetExceeded as e:
+        raise HTTPException(status_code=429, detail=str(e)) from None
+    return summary
 
 
 async def _json_body(request: Request) -> dict:
@@ -122,15 +162,31 @@ def _import_label(filename: str | None) -> str:
     return f"{name} · {datetime.now(UTC).strftime('%b %d, %H:%M')}"
 
 
+# Upload caps: a CSV import is raw-bodied, so bound it to avoid an OOM body or a
+# runaway queue that a later "Score all" could turn into a big spend.
+_MAX_UPLOAD_BYTES = 5_000_000   # 5 MB
+_MAX_CSV_ROWS = 5_000
+
+
 def _parse_upload(raw: bytes) -> csv_imports.ImportResult:
+    if len(raw) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"CSV too large (limit {_MAX_UPLOAD_BYTES // 1_000_000} MB).")
     try:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
         text = raw.decode("latin-1")
     try:
-        return csv_imports.parse_csv(text)
+        result = csv_imports.parse_csv(text)
     except csv_imports.ImportError_ as e:
         raise HTTPException(status_code=400, detail=str(e)) from None
+    if result.rows_total > _MAX_CSV_ROWS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Too many rows ({result.rows_total}); limit is {_MAX_CSV_ROWS}. "
+                   "Split the file into smaller imports.")
+    return result
 
 
 def _preview_payload(app: FastAPI, result: csv_imports.ImportResult) -> dict:
@@ -175,6 +231,7 @@ async def lifespan(app: FastAPI):
     app.state.repo = repo
     app.state.scoring_repo = scoring_repo
     app.state.scoring_tasks = set()           # keep background score tasks alive
+    app.state.scoring_inflight = set()        # account_ids being scored (dedupe lock)
     app.state.batch_running = False           # one queued batch at a time
     app.state.loop = asyncio.get_running_loop()
     # No scoring task can be alive at boot, so anything still marked 'scoring'
@@ -196,19 +253,34 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(title="Magical Discovery API", lifespan=lifespan)
 
-    # CORS — permissive in dev so a separately-served UI can call the API.
-    # Tighten allow_origins to the real UI origin in production.
+    # CORS — same-origin in production (the UI is served by this app), permissive
+    # in dev so a separately-served UI can call the API. A wildcard origin on a
+    # public, spend-bearing API is a hole, so production never defaults to "*".
+    cors_env = os.getenv("CORS_ORIGINS")
+    if cors_env:
+        allow_origins = cors_env.split(",")
+    elif is_production():
+        allow_origins = []        # same-origin only (browser UI shares the origin)
+    else:
+        allow_origins = ["*"]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
+        allow_origins=allow_origins,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
-    # HTTP Basic auth — enabled iff BASIC_AUTH_USER/PASS are set (so a deployed
-    # instance is gated but localhost isn't). /api/health stays open for the
-    # platform healthcheck. Added after CORS so it runs outermost (first).
-    install_basic_auth(app, exempt_paths=("/api/health",))
+    # HTTP Basic auth — gated by BASIC_AUTH_USER/PASS. In production we FAIL
+    # CLOSED: refuse to start without credentials rather than serve a public,
+    # spend-bearing API. Localhost (no production markers) stays frictionless.
+    # /api/health is exempt for the platform healthcheck; added after CORS so it
+    # runs outermost.
+    auth_enabled = install_basic_auth(app, exempt_paths=("/api/health",))
+    if not auth_enabled and is_production():
+        raise RuntimeError(
+            "Refusing to start in production without auth: set BASIC_AUTH_USER "
+            "and BASIC_AUTH_PASS."
+        )
 
     @app.middleware("http")
     async def ui_no_cache(request, call_next):
@@ -294,9 +366,16 @@ def create_app() -> FastAPI:
             svc(app).promote(key)
         except KeyError:
             raise HTTPException(status_code=404, detail="company not found") from None
-        row = app.state.scoring.enqueue_discovery(company.model_dump(), state="scoring")
-        _schedule_scoring(app, row["account_id"])
-        return {"account_id": row["account_id"], "state": row["state"]}
+        # Budget-aware: auto-score only if there's headroom, else park it as
+        # 'queued' (the promote still succeeds; it just doesn't spend over budget).
+        summary = app.state.scoring_repo.cost_summary()
+        affordable = budget_guard.remaining(summary) >= budget_guard.EST_SCORE_COST
+        row = app.state.scoring.enqueue_discovery(
+            company.model_dump(), state="scoring" if affordable else "queued")
+        if affordable:
+            _schedule_scoring(app, row["account_id"])
+        return {"account_id": row["account_id"], "state": row["state"],
+                "budget_blocked": not affordable}
 
     @app.post("/api/company/{key}/reject")
     def reject(key: str, body: RejectBody):
@@ -360,6 +439,9 @@ def create_app() -> FastAPI:
         background pass; the UI polls activity until it resolves."""
         if not app.state.scoring.exists(account_id):
             raise HTTPException(status_code=404, detail="account not found")
+        _assert_budget(app, budget_guard.EST_SCORE_COST)
+        if account_id in app.state.scoring_inflight:
+            return app.state.scoring.get(account_id)     # already scoring; no double-spend
         app.state.scoring_repo.set_state(account_id, "scoring")
         _schedule_scoring(app, account_id)
         return app.state.scoring.get(account_id)
@@ -377,6 +459,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=409, detail="account must be scored first")
         if account.get("dossier_state") == "generating":
             return account                            # already in flight
+        _assert_budget(app, budget_guard.EST_DOSSIER_COST)
         app.state.scoring_repo.set_dossier_state(account_id, "generating")
         _schedule_coro(app, app.state.scoring.generate_dossier(account_id))
         return app.state.scoring.get(account_id)
@@ -440,15 +523,31 @@ def create_app() -> FastAPI:
                 targets = targets[:limit]
         if not targets:
             return {"started": 0, "busy": False}
+        # Hard budget cap, server-side: never start more than fits the month's
+        # budget, no matter what limit (or none) the caller asked for. This is the
+        # rule the UI's "score within budget" only suggests.
+        requested = len(targets)
+        summary = app.state.scoring_repo.cost_summary()
+        est = summary.get("avg_cost") or budget_guard.EST_SCORE_COST
+        affordable = budget_guard.affordable_count(summary, est)
+        if affordable <= 0:
+            return {"started": 0, "busy": False, "budget_blocked": True, "budget": summary}
+        targets = targets[:affordable]
         app.state.batch_running = True
         _schedule_coro(app, _run_batch(app, targets))
-        return {"started": len(targets), "busy": True}
+        return {"started": len(targets), "busy": True,
+                "budget_capped": len(targets) < requested, "budget": summary}
 
     @app.post("/api/scoring/reset")
-    def scoring_reset():
+    async def scoring_reset(request: Request):
         """Clear every score back to 'queued' (non-destructive) so the table is
-        clean and accounts can be re-scored on demand to re-measure cost. Refused
-        while a batch is mid-run so it can't fight in-flight saves."""
+        clean and accounts can be re-scored on demand to re-measure cost.
+
+        Requires an explicit {"confirm": true} body so a stray call can't wipe
+        every score, and is refused while a batch is mid-run."""
+        body = await _json_body(request)
+        if body.get("confirm") is not True:
+            raise HTTPException(status_code=400, detail="reset requires {\"confirm\": true}")
         if getattr(app.state, "batch_running", False):
             return {"reset": 0, "busy": True}
         n = app.state.scoring_repo.reset_to_queued()

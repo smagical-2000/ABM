@@ -28,4 +28,11 @@ def get_repository() -> DiscoveryRepository:
         # Imported lazily so the JSON path never needs psycopg installed.
         from auto_search.db.postgres_repository import PostgresRepository
         return PostgresRepository()
+    # Fail closed: production must not silently run on a JSON file.
+    from auto_search.runtime import is_production
+    if is_production():
+        raise RuntimeError(
+            "DATABASE_URL is required in production — refusing to run the discovery "
+            "store on a JSON file."
+        )
     return JsonFileRepository()

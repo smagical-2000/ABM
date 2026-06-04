@@ -179,7 +179,8 @@ class TestCostControls:
             total=5, max_total=10, tier_band="medium", tier_label="Medium Fit",
             cost_usd=0.3, scored_at=datetime.now(UTC).isoformat()))
 
-        out = client.post("/api/scoring/reset").json()
+        assert client.post("/api/scoring/reset").status_code == 400   # confirm required
+        out = client.post("/api/scoring/reset", json={"confirm": True}).json()
         assert out["reset"] == 1 and out["busy"] is False
         assert repo.get("acc_s")["state"] == "queued"
         assert client.get("/api/scoring/stats").json()["scored_count"] == 0
@@ -223,6 +224,82 @@ class TestCostControls:
 
         assert client.get("/api/scoring/activity").json()["active"] == []
         assert repo.get("acc_stuck")["state"] == "queued"
+
+
+def _max_out_budget(repo):
+    """Seed a scored account whose cost equals the whole monthly budget."""
+    from datetime import UTC, datetime
+
+    from auto_search.scoring.models import Account, Dimension, ScoreResult
+
+    repo.upsert_account(Account(account_id="acc_big", name="Big", segment="payer",
+                                framework="payer", source="discovery"), state="queued")
+    repo.save_score("acc_big", ScoreResult(
+        account_id="acc_big", framework="payer", framework_version="v",
+        dimensions=[Dimension(key="k", label="k", score=5, max=10)],
+        total=5, max_total=10, tier_band="medium", tier_label="Medium Fit",
+        cost_usd=200.0, scored_at=datetime.now(UTC).isoformat()))
+
+
+class TestBudgetEnforcement:
+    """The budget is a rule the server obeys, not just a dashboard number."""
+
+    def test_score_refused_over_budget(self, client):
+        _max_out_budget(client.app.state.scoring_repo)
+        assert client.post("/api/account/acc_big/score").status_code == 429
+
+    def test_dossier_refused_over_budget(self, client):
+        _max_out_budget(client.app.state.scoring_repo)
+        assert client.post("/api/account/acc_big/dossier").status_code == 429
+
+    def test_batch_blocked_over_budget(self, client, monkeypatch):
+        repo = client.app.state.scoring_repo
+        _max_out_budget(repo)
+        client.post("/api/scoring/import", content=_HS_CSV)   # queue fresh accounts
+
+        async def fake_batch(app, ids):
+            return None
+        monkeypatch.setattr(_app_module, "_run_batch", fake_batch)
+        out = client.post("/api/scoring/score-queued", json={}).json()
+        assert out["started"] == 0 and out["budget_blocked"] is True
+
+    def test_score_skips_when_already_in_flight(self, client):
+        from datetime import UTC, datetime
+
+        from auto_search.scoring.models import Account, Dimension, ScoreResult
+        repo = client.app.state.scoring_repo
+        repo.upsert_account(Account(account_id="acc_if", name="IF", segment="payer",
+                                    framework="payer", source="discovery"), state="queued")
+        repo.save_score("acc_if", ScoreResult(
+            account_id="acc_if", framework="payer", framework_version="v",
+            dimensions=[Dimension(key="k", label="k", score=5, max=10)],
+            total=5, max_total=10, tier_band="medium", tier_label="Medium Fit",
+            scored_at=datetime.now(UTC).isoformat()))
+        client.app.state.scoring_inflight.add("acc_if")       # pretend it's mid-score
+        client.post("/api/account/acc_if/score")
+        assert repo.get("acc_if")["state"] == "scored"        # guard kept it from re-flipping
+
+
+class TestUploadLimits:
+    def test_rejects_oversized_body(self, client):
+        assert client.post("/api/scoring/import", content=b"x" * 5_000_001).status_code == 413
+
+    def test_rejects_too_many_rows(self, client):
+        header = ("Hospital Name,Firm Type,Net Patient Revenue,"
+                  "Electronic Health/Medical Record - Inpatient,# of Staffed Beds,State\n")
+        rows = "".join(f"H{i},Health System,$1,MEDITECH,10,IN\n" for i in range(5001))
+        assert client.post("/api/scoring/import", content=header + rows).status_code == 413
+
+
+class TestFailClosed:
+    def test_production_refuses_to_start_without_auth(self, monkeypatch):
+        from auto_search.api.app import create_app
+
+        monkeypatch.delenv("BASIC_AUTH_USER", raising=False)
+        monkeypatch.delenv("BASIC_AUTH_PASS", raising=False)
+        monkeypatch.setenv("APP_ENV", "production")
+        with pytest.raises(RuntimeError, match="without auth"):
+            create_app()
 
 
 class TestStaticMount:

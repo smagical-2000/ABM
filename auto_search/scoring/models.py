@@ -17,7 +17,10 @@ from auto_search.normalize import parse_int_loose
 
 ScoreState = Literal["queued", "scoring", "scored", "error"]
 AccountSource = Literal["discovery", "csv"]
-QAStatus = Literal["verified", "discrepancy", "unverifiable"]
+# "skipped" = QA was deliberately not run (CSV trusted, or a low-fit account not
+# worth a verification spend). Distinct from "verified" so the UI never implies
+# an account was independently checked when it was not.
+QAStatus = Literal["verified", "discrepancy", "unverifiable", "skipped"]
 DimensionFlag = Literal["inferred", "unknown"]
 
 

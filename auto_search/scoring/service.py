@@ -72,21 +72,9 @@ class ScoringService:
             band = resolve_tier(fw, score.total, [d.model_dump() for d in score.dimensions])
             score.tier_band, score.tier_label = band.band, band.label
 
-            if account.source == "csv":
-                # Definitive Healthcare firmographics are authoritative, so an
-                # independent QA pass would mostly re-verify facts we already
-                # trust. Skip it to save a web_search call per imported account.
-                score.qa = QAResult(
-                    status="verified",
-                    notes="Firmographics taken as authoritative from the Definitive "
-                          "import; independent QA skipped to save cost.",
-                    corrections=[],
-                )
-            else:
-                self._repo.set_phase(account_id, "verifying")
-                qa_result, qa_cost = await qa.qa_account(account, score, fw)
-                score.qa = qa_result
-                score.cost_usd = round(score.cost_usd + qa_cost, 4)
+            qa_result, qa_cost = await self._verify(account_id, account, score, fw)
+            score.qa = qa_result
+            score.cost_usd = round(score.cost_usd + qa_cost, 4)
             saved = self._repo.save_score(account_id, score)
         except Exception as e:  # noqa: BLE001 — never leave an account stuck 'scoring'
             logger.exception("persisting score failed for %s", account.name)
@@ -97,6 +85,40 @@ class ScoringService:
                     account.name, score.tier_label, score.total, score.max_total,
                     score.qa.status if score.qa else "—", score.cost_usd)
         return saved
+
+    async def _verify(self, account_id, account, score, fw) -> tuple[QAResult, float]:
+        """Decide how much independent QA an account earns, then run it.
+
+        Spend the verification budget where it matters, never on accounts no one
+        will demo:
+          - CSV imports: skip (Definitive firmographics are authoritative).
+          - High fit: full independent QA (every checkable fact).
+          - Medium fit: a focused QA (net patient revenue + EMR/RCM vendor only).
+          - Low fit / not a fit: skip (mark 'skipped', re-score on demand if it
+            ever needs to go to leadership).
+        QA never sees the scorer's reasoning, so independence is preserved.
+        """
+        if account.source == "csv":
+            return QAResult(
+                status="skipped",
+                notes="Firmographics taken as authoritative from the Definitive "
+                      "import; independent QA skipped to save cost.",
+                corrections=[],
+            ), 0.0
+
+        band = score.tier_band
+        if band == "high":
+            self._repo.set_phase(account_id, "verifying")
+            return await qa.qa_account(account, score, fw, depth="full")
+        if band == "medium":
+            self._repo.set_phase(account_id, "verifying")
+            return await qa.qa_account(account, score, fw, depth="light")
+        return QAResult(
+            status="skipped",
+            notes=f"{score.tier_label or 'Low-fit'} account; independent QA "
+                  "skipped to save cost. Re-score to verify before routing.",
+            corrections=[],
+        ), 0.0
 
     # ── reads ──────────────────────────────────────────────────────────
 
@@ -119,8 +141,12 @@ class ScoringService:
 def _account_from_discovery(c: dict[str, Any]) -> Account:
     """Build a scoreable Account from a promoted discovery company.
 
-    Discovery has no structured Definitive facts, so firmographics stays light;
-    the signals carry as intent context.
+    Discovery already ran Sonnet + web_search to qualify this company, so carry
+    that research forward as authoritative known facts (company type, the ICP
+    reasoning, the evidence URL). The scorer then spends its search budget only
+    on what discovery did not establish - competitor/RCM vendor, pain, intent -
+    instead of re-researching firmographics. This is the single biggest cost cut
+    on a promoted account, with no quality loss.
     """
     segment = c.get("segment") or "specialty"
     key = c.get("company_key") or c.get("name", "unknown")
@@ -138,8 +164,24 @@ def _account_from_discovery(c: dict[str, Any]) -> Account:
         sub_segment=c.get("sub_segment"),
         approximate_employees=c.get("approximate_employees"),
         discovery_company_key=c.get("company_key"),
+        firmographics=_discovery_known_facts(c),
         discovery_signals=signals,
     )
+
+
+def _discovery_known_facts(c: dict[str, Any]) -> dict[str, Any]:
+    """The qualification research, shaped as authoritative facts for the scorer."""
+    facts: dict[str, Any] = {}
+    ctype = c.get("company_type")
+    if ctype and ctype != "unknown":
+        facts["Company type"] = ctype
+    if c.get("sub_segment"):
+        facts["Sub-segment"] = c["sub_segment"]
+    if c.get("reasoning"):
+        facts["Discovery qualification"] = c["reasoning"]
+    if c.get("evidence_url"):
+        facts["Evidence URL"] = c["evidence_url"]
+    return facts
 
 
 def _account_from_row(row: dict[str, Any]) -> Account:

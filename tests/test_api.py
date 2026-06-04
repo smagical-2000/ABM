@@ -151,6 +151,27 @@ class TestCostControls:
         out = client.post("/api/scoring/score-queued", json={"limit": 1}).json()
         assert out["started"] == 1 and out["busy"] is True
 
+    def test_reset_clears_scores_to_queued(self, client):
+        """Reset returns every scored account to a parked, re-scoreable 'queued'
+        and zeroes the cost meter, non-destructively."""
+        from datetime import UTC, datetime
+
+        from auto_search.scoring.models import Account, Dimension, ScoreResult
+
+        repo = client.app.state.scoring_repo
+        repo.upsert_account(Account(account_id="acc_s", name="S", segment="payer",
+                                    framework="payer", source="discovery"), state="queued")
+        repo.save_score("acc_s", ScoreResult(
+            account_id="acc_s", framework="payer", framework_version="v",
+            dimensions=[Dimension(key="k", label="k", score=5, max=10)],
+            total=5, max_total=10, tier_band="medium", tier_label="Medium Fit",
+            cost_usd=0.3, scored_at=datetime.now(UTC).isoformat()))
+
+        out = client.post("/api/scoring/reset").json()
+        assert out["reset"] == 1 and out["busy"] is False
+        assert repo.get("acc_s")["state"] == "queued"
+        assert client.get("/api/scoring/stats").json()["scored_count"] == 0
+
     def test_activity_poll_reaps_stalled_scoring(self, client):
         """A score orphaned by a dead task self-heals: polling activity sweeps a
         long-stalled 'scoring' row back to the queue so it never sticks."""

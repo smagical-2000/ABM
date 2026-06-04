@@ -51,6 +51,7 @@ class ScoringRepository(Protocol):
     def exists(self, account_id: str) -> bool: ...
     def cost_summary(self) -> dict: ...
     def recover_orphaned_scoring(self, older_than_seconds: int = 0) -> int: ...
+    def reset_to_queued(self) -> int: ...
 
 
 # ── shared row shaping ────────────────────────────────────────────────
@@ -317,6 +318,19 @@ class ScoringPostgresRepository:
             )
             return cur.rowcount or 0
 
+    def reset_to_queued(self) -> int:
+        """Clear every score back to a parked 'queued' account (non-destructive):
+        the accounts stay, but their score, QA, tier and measured cost are wiped
+        so they can be re-scored on demand. Used to re-measure cost from clean."""
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "UPDATE scored_accounts SET state='queued', phase=NULL, "
+                "total=NULL, tier_band=NULL, tier_label=NULL, dimensions=NULL, "
+                "recommendation=NULL, qa=NULL, cost_usd=0, scored_at=NULL, "
+                "error_message=NULL, updated_at=now() WHERE state <> 'queued'"
+            )
+            return cur.rowcount or 0
+
 
 # ── JSON file (local/dev) ─────────────────────────────────────────────
 
@@ -423,6 +437,23 @@ class ScoringJsonRepository:
                 row["phase"] = None
                 row["updated_at"] = datetime.now(UTC).isoformat()
                 n += 1
+        if n:
+            self._flush()
+        return n
+
+    def reset_to_queued(self) -> int:
+        n = 0
+        for row in self._store.values():
+            if row.get("state") == "queued":
+                continue
+            row.update({
+                "state": "queued", "phase": None, "total": None,
+                "tier_band": None, "tier_label": None, "dimensions": None,
+                "recommendation": None, "qa": None, "cost_usd": 0,
+                "scored_at": None, "error_message": None,
+                "updated_at": datetime.now(UTC).isoformat(),
+            })
+            n += 1
         if n:
             self._flush()
         return n

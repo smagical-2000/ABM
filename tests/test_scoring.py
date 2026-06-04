@@ -244,7 +244,8 @@ async def test_service_enqueue_score_persist(monkeypatch, tmp_path):
     }, state="scoring")
     assert row["account_id"] == "acc_beaconhealth" and row["state"] == "scoring"
 
-    async def fake_qa(account, score, fw):
+    async def fake_qa(account, score, fw, *, depth="full"):
+        assert depth == "full"                         # Tier 1 earns the full pass
         return QAResult(status="verified", notes="ok"), 0.012
     monkeypatch.setattr(svc_mod.engine, "score_account", _fake_hs_score)
     monkeypatch.setattr(svc_mod.qa, "qa_account", fake_qa)
@@ -361,9 +362,98 @@ async def test_service_csv_skips_qa(monkeypatch, tmp_path):
 
     scored = await svc.run_scoring("csv_x")
     assert qa_called is False                         # QA skipped for CSV
-    assert scored["qa"]["status"] == "verified"
+    assert scored["qa"]["status"] == "skipped"        # honest: not verified
     assert "skipped" in scored["qa"]["notes"].lower()
     assert scored["state"] == "scored"
+
+
+def test_discovery_known_facts_carry():
+    """A promoted company's qualification research rides into scoring as known
+    facts, so the scorer does not re-research firmographics (the #1 cost cut)."""
+    from auto_search.scoring.service import _account_from_discovery
+
+    acc = _account_from_discovery({
+        "company_key": "unitypoint", "name": "UnityPoint Health",
+        "segment": "health_system", "company_type": "provider",
+        "sub_segment": "IDN", "reasoning": "Large IDN on Epic; strong RCM fit.",
+        "evidence_url": "https://unitypoint.org/about", "domain": "unitypoint.org",
+        "approximate_employees": 32000,
+        "signals": [{"signal_type": "leadership_change", "summary": "New CFO"}],
+    })
+    f = acc.firmographics
+    assert f["Company type"] == "provider" and f["Sub-segment"] == "IDN"
+    assert "Epic" in f["Discovery qualification"]
+    assert f["Evidence URL"].startswith("https://")
+    assert acc.discovery_signals[0]["summary"] == "New CFO"
+
+
+@pytest.mark.asyncio
+async def test_service_qa_depth_by_tier(monkeypatch, tmp_path):
+    """QA spend follows fit: high earns the full pass, medium a focused one, low
+    is skipped (marked 'skipped', not 'verified')."""
+    from auto_search.db.scoring_repository import ScoringJsonRepository
+    from auto_search.scoring import service as svc_mod
+    from auto_search.scoring.service import ScoringService
+
+    svc = ScoringService(ScoringJsonRepository(path=str(tmp_path / "s.json")))
+    depths: list[str] = []
+
+    async def fake_qa(account, score, fw, *, depth="full"):
+        depths.append(depth)
+        return QAResult(status="verified", notes="ok"), 0.02
+    monkeypatch.setattr(svc_mod.qa, "qa_account", fake_qa)
+
+    def hs_score(dims):
+        async def _s(account):
+            return ScoreResult(
+                account_id=account.account_id, framework="health_system",
+                framework_version="v", max_total=27, total=0,
+                tier_band="x", tier_label="x",
+                dimensions=[Dimension(key=k, label=k, score=s, max=m)
+                            for k, s, m in dims]).clamp()
+        return _s
+
+    async def score_one(key, dims):
+        svc.enqueue_discovery({"company_key": key, "name": key,
+                               "segment": "health_system"})
+        monkeypatch.setattr(svc_mod.engine, "score_account", hs_score(dims))
+        return await svc.run_scoring("acc_" + key)
+
+    hi = await score_one("hi", [("npr", 10, 10), ("emr", 5, 5), ("competitor", 4, 4),
+                                ("pain", 5, 5), ("ai_readiness", 2, 2), ("leadership", 1, 1)])   # 27 high
+    med = await score_one("med", [("npr", 10, 10), ("emr", 5, 5), ("competitor", 1, 4),
+                                  ("pain", 1, 5), ("ai_readiness", 1, 2), ("leadership", 0, 1)])  # 18 medium
+    lo = await score_one("lo", [("npr", 10, 10), ("emr", 0, 5), ("competitor", 1, 4),
+                                ("pain", 1, 5), ("ai_readiness", 0, 2), ("leadership", 0, 1)])    # 12 low
+
+    assert depths == ["full", "light"]                 # low never calls QA
+    assert hi["qa"]["status"] == "verified"
+    assert med["qa"]["status"] == "verified"
+    assert lo["qa"]["status"] == "skipped"
+    assert "skipped" in lo["qa"]["notes"].lower()
+
+
+def test_repo_reset_to_queued(tmp_path):
+    """Reset clears a scored account back to a parked 'queued' one, non-destructively."""
+    from datetime import UTC, datetime
+
+    from auto_search.db.scoring_repository import ScoringJsonRepository
+
+    repo = ScoringJsonRepository(path=str(tmp_path / "s.json"))
+    repo.upsert_account(Account(account_id="a", name="A", segment="payer",
+                                framework="payer", source="discovery"), state="queued")
+    repo.save_score("a", ScoreResult(
+        account_id="a", framework="payer", framework_version="v",
+        dimensions=[Dimension(key="k", label="k", score=5, max=10)],
+        total=5, max_total=10, tier_band="medium", tier_label="Medium Fit",
+        cost_usd=0.2, scored_at=datetime.now(UTC).isoformat()))
+    assert repo.get("a")["state"] == "scored"
+
+    assert repo.reset_to_queued() == 1
+    g = repo.get("a")
+    assert g["state"] == "queued" and g["total"] is None
+    assert g["tier"] is None and g["cost_usd"] == 0.0
+    assert repo.reset_to_queued() == 0                  # already clean
 
 
 # ── cost math (the money the meter reports) ───────────────────────────

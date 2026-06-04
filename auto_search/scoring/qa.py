@@ -25,26 +25,34 @@ from auto_search.scoring.models import Account, QACorrection, QAResult, ScoreRes
 logger = logging.getLogger(__name__)
 
 _MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
-_MAX_SEARCHES = 3
+# Independent QA still uses web_search, but its budget scales with how much the
+# account matters: a high-fit account (shown to leadership) gets the full pass;
+# a medium-fit one gets a focused check of just the material facts.
+_MAX_SEARCHES_FULL = 2
+_MAX_SEARCHES_LIGHT = 1
 _MAX_TOKENS = 1400
 
 
 async def qa_account(
-    account: Account, score: ScoreResult, fw: Framework
+    account: Account, score: ScoreResult, fw: Framework, *, depth: str = "full"
 ) -> tuple[QAResult, float]:
     """Independently verify a score. Never raises — QA failure yields an
     'unverifiable' verdict so a score still ships (the human is the backstop).
 
-    Returns (verdict, cost_usd) so the service can add the QA call to the
-    account's measured spend.
+    depth="full" researches every checkable fact; depth="light" spends a single
+    focused search on the two facts that move the tier most (net patient revenue
+    and EMR/RCM vendor). Returns (verdict, cost_usd) so the service can add the
+    QA call to the account's measured spend.
     """
-    system = _qa_system_prompt(fw)
-    user = _qa_user_message(account, score)
+    light = depth == "light"
+    system = _qa_system_prompt(fw, light=light)
+    user = _qa_user_message(account, score, light=light)
+    max_searches = _MAX_SEARCHES_LIGHT if light else _MAX_SEARCHES_FULL
 
     try:
         response = await llm.call_with_web_search(
             system=system, user_message=user,
-            max_searches=_MAX_SEARCHES, max_tokens=_MAX_TOKENS, model=_MODEL,
+            max_searches=max_searches, max_tokens=_MAX_TOKENS, model=_MODEL,
         )
         data = llm.parse_json_object(llm.extract_text(response))
     except Exception as e:  # noqa: BLE001 — QA must not fail the score
@@ -99,17 +107,24 @@ def mark_tier_changing(fw: Framework, score: ScoreResult, qa: QAResult) -> None:
 # ── prompt building ───────────────────────────────────────────────────
 
 
-def _qa_system_prompt(fw: Framework) -> str:
+def _qa_system_prompt(fw: Framework, *, light: bool = False) -> str:
     ceilings = ", ".join(f"{d.label} (0-{d.max})" for d in fw.dimensions)
+    scope = (
+        "Spend a single, focused web_search to verify only the two most "
+        "material facts: net patient revenue (or organization size) and the "
+        "EMR/RCM vendor. Do not research the other dimensions."
+        if light else
+        "Independently use web_search to verify the materially checkable facts "
+        "(e.g. net patient revenue, EMR/RCM vendor, lives covered, organization "
+        "size, recent leadership or signal claims)."
+    )
     return textwrap.dedent(f"""
         You are an independent QA reviewer for Magical's ABM scoring. A first
         analyst has scored an account on the {fw.label} rubric. You are given the
         account, its known facts, and the per-dimension scores the analyst
         assigned — but NOT their reasoning. Do not assume the analyst is right.
 
-        Independently use web_search to verify the materially checkable facts
-        (e.g. net patient revenue, EMR/RCM vendor, lives covered, organization
-        size, recent leadership or signal claims). Dimensions: {ceilings}.
+        {scope} Dimensions: {ceilings}.
 
         For any dimension where your finding would materially change the score,
         add a correction: what the analyst's score implies, what you found, and
@@ -134,7 +149,7 @@ def _qa_system_prompt(fw: Framework) -> str:
     """).strip()
 
 
-def _qa_user_message(account: Account, score: ScoreResult) -> str:
+def _qa_user_message(account: Account, score: ScoreResult, *, light: bool = False) -> str:
     claimed = [
         {"dimension": d.key, "label": d.label, "score": d.score, "max": d.max}
         for d in score.dimensions
@@ -148,9 +163,14 @@ def _qa_user_message(account: Account, score: ScoreResult) -> str:
         "assigned_total": score.total,
         "max_total": score.max_total,
     }
+    focus = (
+        "\nThis is a focused check: verify only net patient revenue / size and "
+        "the EMR/RCM vendor. Flag a correction only if one of those is wrong.\n"
+        if light else ""
+    )
     return textwrap.dedent(f"""
         Independently QA this score.
-
+        {focus}
         ```json
         {json.dumps(ctx, indent=2, default=str)}
         ```

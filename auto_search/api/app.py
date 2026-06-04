@@ -408,6 +408,17 @@ def create_app() -> FastAPI:
         _schedule_coro(app, _run_batch(app, targets))
         return {"started": len(targets), "busy": True}
 
+    @app.post("/api/scoring/reset")
+    def scoring_reset():
+        """Clear every score back to 'queued' (non-destructive) so the table is
+        clean and accounts can be re-scored on demand to re-measure cost. Refused
+        while a batch is mid-run so it can't fight in-flight saves."""
+        if getattr(app.state, "batch_running", False):
+            return {"reset": 0, "busy": True}
+        n = app.state.scoring_repo.reset_to_queued()
+        logger.info("reset %d scored account(s) -> queued", n)
+        return {"reset": n, "busy": False}
+
     @app.get("/api/scoring/stats")
     def scoring_stats():
         """Spend summary for the live cost meter: month-to-date vs budget, total,

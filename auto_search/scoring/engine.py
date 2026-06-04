@@ -31,11 +31,14 @@ logger = logging.getLogger(__name__)
 _MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 # web_search is the dominant cost (each result is re-sent on later turns, so
 # searches compound the input tokens). Once known facts are injected the scorer
-# spends searches on competitor/pain/intent, not on facts it already has. CSV
-# imports arrive with firmographics + technographics from Definitive, so they
-# need fewer searches (intent only) than a discovery account scored from scratch.
-_MAX_SEARCHES = 4
-_MAX_SEARCHES_CSV = 3
+# spends searches on competitor/pain/intent, not on facts it already has:
+#   - discovery accounts arrive with the qualification research (firmographics,
+#     reasoning, evidence) already done, so the scorer only needs competitor /
+#     RCM vendor / pain / intent.
+#   - CSV imports arrive with firmographics + technographics from Definitive, so
+#     they need even fewer (intent only).
+_MAX_SEARCHES = 3
+_MAX_SEARCHES_CSV = 2
 _MAX_TOKENS = 2000
 
 

@@ -22,6 +22,7 @@ import textwrap
 from datetime import UTC, datetime
 
 from auto_search import llm
+from auto_search.scoring import apollo
 from auto_search.scoring.models import (
     Account,
     DecisionMaker,
@@ -36,10 +37,9 @@ from auto_search.scoring.models import (
 logger = logging.getLogger(__name__)
 
 _MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
-# Deep research: this pass legitimately needs many searches (people, news,
-# services). It is on demand + one-time per account, with the cost surfaced
-# before it runs, so the budget is wider than scoring.
-_MAX_SEARCHES = 12
+# Decision-maker names come from Apollo, so the LLM does NOT web-search for
+# people - it spends its (tighter) budget on news, services, and synthesis only.
+_MAX_SEARCHES = 7
 _MAX_TOKENS = 4500
 _CONFIDENCE = ("known", "likely", "unknown")
 
@@ -51,10 +51,13 @@ class DossierError(RuntimeError):
 async def generate(account: Account, score: ScoreResult) -> tuple[Dossier, float]:
     """Research + write the dossier for one account. Returns (dossier, cost_usd).
     Raises DossierError on an unrecoverable failure."""
-    system = _system_prompt()
-    user = _user_message(account, score)
+    # Decision makers come from Apollo (deterministic names, no LLM people-search
+    # and no name hallucination). The model only adds the relevance notes.
+    people = await apollo.decision_makers(account.domain)
+    system = _system_prompt(bool(people))
+    user = _user_message(account, score, people)
 
-    logger.info("generating dossier for %r", account.name)
+    logger.info("generating dossier for %r (%d Apollo contacts)", account.name, len(people))
     try:
         response = await llm.call_with_web_search(
             system=system, user_message=user,
@@ -71,6 +74,8 @@ async def generate(account: Account, score: ScoreResult) -> tuple[Dossier, float
     queries = llm.extract_web_searches(response)
     cost = llm.call_cost(response, searches=len(queries))
     dossier = _parse(data)
+    # Names + titles are Apollo's; the model supplies the parallel relevance notes.
+    dossier.decision_makers = _merge_people(people, data.get("decision_maker_notes"))
     dossier.model = _MODEL
     dossier.generated_at = datetime.now(UTC).isoformat()
     dossier.cost_usd = cost
@@ -79,11 +84,36 @@ async def generate(account: Account, score: ScoreResult) -> tuple[Dossier, float
     return dossier, cost
 
 
+def _merge_people(people: list[dict], notes) -> list[DecisionMaker]:
+    """Apollo names/titles + the model's per-person relevance notes (by order)."""
+    note_list = _strs(notes)
+    out: list[DecisionMaker] = []
+    for i, p in enumerate(people):
+        out.append(DecisionMaker(
+            role=p.get("title", ""),
+            contact=p.get("name", ""),
+            notes=note_list[i] if i < len(note_list) else "",
+            linkedin=p.get("linkedin", ""),
+        ))
+    return out
+
+
 # ── prompt building ───────────────────────────────────────────────────
 
 
-def _system_prompt() -> str:
-    return textwrap.dedent("""
+def _system_prompt(has_people: bool) -> str:
+    people = (
+        "You are also given a list of CONFIRMED decision makers (name + title, "
+        "from CRM data) in priority order. Do NOT search for individual people. "
+        'For each one, in the SAME ORDER, write a single sentence on why they '
+        'matter to an RCM automation sale, returned as "decision_maker_notes".'
+        if has_people else
+        'No decision makers were available from CRM data, so return an empty '
+        '"decision_maker_notes" array and do NOT search for individual people.'
+    )
+    # Plain string (not an f-string) so the JSON braces stay literal; the people
+    # clause is dropped in via a token.
+    body = textwrap.dedent("""
         You are a senior account-based-marketing analyst for Magical, an
         agentic-AI revenue cycle management (RCM) platform sold to US healthcare
         organizations. Write a sales dossier (a one-pager) the sales team takes
@@ -91,26 +121,27 @@ def _system_prompt() -> str:
 
         The account has already been scored. You are given its fit score, the
         per-pillar dimension summaries, and its known facts - treat those as
-        AUTHORITATIVE and do not re-research them. Spend web_search only on what
-        the score did not establish:
-          - named decision makers (CEO, CFO, VP/Director of Revenue Cycle, CIO,
-            General Counsel) with titles and, where public, how to reach them;
+        AUTHORITATIVE and do not re-research them. __PEOPLE_CLAUSE__
+
+        Spend web_search only on what is not already provided:
           - recent, dated news (EHR go-lives, M&A, leadership moves, funding,
             awards, expansions);
           - specific service lines / specialties and payer mix;
           - RCM complexity drivers (multi-site, multi-service-line, VBC/CIN,
             M&A integration).
+        Be economical with searches - reuse what one search returns across
+        sections rather than searching again. Never collect emails or phone
+        numbers.
 
         Then synthesize the entry strategy, pain points, and messaging angles
         from everything above. Messaging angles are ready-to-send outreach lines
         that reference the account's real, current situation.
 
         Be specific and evidence-rich: cite named EHR/RCM vendors, revenue
-        figures, headcounts, location counts, named people + titles, and dates.
-        Mark every fact's confidence honestly: "known" (publicly confirmed),
-        "likely" (reasonably inferred), or "unknown" (could not confirm). Never
-        invent a person, contact, or number; if a decision-maker seat is open or
-        a fact is unconfirmed, say so and mark it "unknown".
+        figures, headcounts, location counts, and dates. Mark every fact's
+        confidence honestly: "known" (publicly confirmed), "likely" (reasonably
+        inferred), or "unknown" (could not confirm). Never invent a number; if a
+        fact is unconfirmed, mark it "unknown".
 
         Return ONLY this JSON object, no prose, no markdown fences:
         {
@@ -126,9 +157,9 @@ def _system_prompt() -> str:
             { "signal": "<headline>", "detail": "<1-2 sentences with evidence>",
               "score": <0-10 buying-signal strength> }
           ],
-          "decision_makers": [
-            { "role": "<title/function>", "contact": "<name + title, or 'Unknown (seat open)'>",
-              "notes": "<why they matter to an RCM sale>" }
+          "decision_maker_notes": [
+            "<one sentence on decision maker 1 (same order as provided)>",
+            "<one sentence on decision maker 2>"
           ],
           "entry_strategy": {
             "timing": "HIGH|MEDIUM|LOW - <one line why now>",
@@ -147,12 +178,13 @@ def _system_prompt() -> str:
           "messaging_angles": ["<ready-to-send outreach line>", "..."]
         }
 
-        Aim for 6-10 firmographic rows, 3-5 intent signals, 3-6 decision makers,
-        3-5 recent news items, 4-6 pain points, and 3-5 messaging angles.
-    """).strip()
+        Aim for 6-10 firmographic rows, 3-5 intent signals, 3-5 recent news
+        items, 4-6 pain points, and 3-5 messaging angles.
+    """)
+    return body.replace("__PEOPLE_CLAUSE__", people).strip()
 
 
-def _user_message(account: Account, score: ScoreResult) -> str:
+def _user_message(account: Account, score: ScoreResult, people: list[dict]) -> str:
     dims = [
         {"dimension": d.label, "score": f"{d.score}/{d.max}", "summary": d.summary}
         for d in score.dimensions
@@ -171,6 +203,9 @@ def _user_message(account: Account, score: ScoreResult) -> str:
         "score_dimensions": dims,
         "recommendation": score.recommendation,
         "discovery_signals": signals,
+        "confirmed_decision_makers": [
+            {"name": p.get("name"), "title": p.get("title")} for p in people
+        ],
     }
     return textwrap.dedent(f"""
         Write the dossier for this account. The score below is authoritative
@@ -187,11 +222,11 @@ def _user_message(account: Account, score: ScoreResult) -> str:
 
 
 def _parse(data: dict) -> Dossier:
+    # decision_makers are set by generate() from Apollo + the parallel notes.
     return Dossier(
         firmographic_profile=_facts(data.get("firmographic_profile")),
         services=_facts(data.get("services")),
         intent_signals=_signals(data.get("intent_signals")),
-        decision_makers=_people(data.get("decision_makers")),
         entry_strategy=_entry(data.get("entry_strategy")),
         rcm_complexity=_facts(data.get("rcm_complexity")),
         recent_news=_news(data.get("recent_news")),
@@ -223,19 +258,6 @@ def _signals(raw) -> list[IntentSignal]:
             signal=str(it["signal"]).strip(),
             detail=str(it.get("detail", "")).strip(),
             score=_clamp_int(it.get("score"), 0, 10),
-        ))
-    return out
-
-
-def _people(raw) -> list[DecisionMaker]:
-    out: list[DecisionMaker] = []
-    for it in raw or []:
-        if not isinstance(it, dict) or not it.get("role"):
-            continue
-        out.append(DecisionMaker(
-            role=str(it["role"]).strip(),
-            contact=str(it.get("contact", "")).strip(),
-            notes=str(it.get("notes", "")).strip(),
         ))
     return out
 

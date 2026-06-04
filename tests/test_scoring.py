@@ -489,10 +489,6 @@ def test_dossier_parse_shapes_and_guards():
         ],
         "services": [{"label": "Core", "value": "Primary care"}],
         "intent_signals": [{"signal": "Epic go-live", "detail": "x", "score": 12}],  # clamps
-        "decision_makers": [
-            {"role": "CFO", "contact": "Jane Doe, CFO", "notes": "buyer"},
-            {"notes": "no role"},                  # dropped
-        ],
         "entry_strategy": {"timing": "HIGH - now", "primary_angles": ["a", "b"],
                            "cautions": ["c"], "deal_size": "$0.4M-$1M"},
         "rcm_complexity": [{"label": "EHR System", "value": "Epic"}],
@@ -503,10 +499,62 @@ def test_dossier_parse_shapes_and_guards():
     assert len(d.firmographic_profile) == 1
     assert d.firmographic_profile[0].confidence == "likely"
     assert d.intent_signals[0].score == 10                 # clamped to ceiling
-    assert [m.role for m in d.decision_makers] == ["CFO"]  # role-less dropped
+    assert d.decision_makers == []                         # set from Apollo, not _parse
     assert d.entry_strategy.timing.startswith("HIGH") and d.entry_strategy.primary_angles == ["a", "b"]
     assert d.pain_points == ["denials"]
     assert d.messaging_angles == ["Congrats on the Epic cutover"]
+
+
+def test_dossier_merge_people_uses_apollo_names():
+    """Names + titles come verbatim from Apollo; the model supplies notes by
+    order. A missing note degrades to empty, never a wrong name."""
+    from auto_search.scoring import dossier as dmod
+
+    people = [
+        {"name": "Caroline Bosi", "title": "Revenue Cycle Manager",
+         "linkedin": "http://linkedin.com/in/caroline"},
+        {"name": "Jane Roe", "title": "CFO", "linkedin": ""},
+    ]
+    merged = dmod._merge_people(people, ["Owns A/R; primary buyer."])
+    assert [m.contact for m in merged] == ["Caroline Bosi", "Jane Roe"]
+    assert merged[0].role == "Revenue Cycle Manager"
+    assert merged[0].notes == "Owns A/R; primary buyer."
+    assert merged[0].linkedin.endswith("caroline")
+    assert merged[1].notes == ""                            # no note -> blank, name intact
+
+
+@pytest.mark.asyncio
+async def test_apollo_no_key_or_domain(monkeypatch):
+    from auto_search.scoring import apollo
+
+    monkeypatch.delenv("APOLLO_API_KEY", raising=False)
+    assert await apollo.decision_makers("avancecare.com") == []   # no key
+    monkeypatch.setenv("APOLLO_API_KEY", "k")
+    assert await apollo.decision_makers(None) == []               # no domain
+
+
+def test_apollo_shape_prefers_full_name_and_dedups():
+    """Enriched full name wins; a failed enrichment falls back to first name +
+    title; duplicate names are dropped. Emails/phones are never carried."""
+    from auto_search.scoring import apollo
+
+    found = [
+        {"id": "1", "first_name": "Caroline", "title": "RCM Mgr"},
+        {"id": "2", "first_name": "Jane", "title": "CFO"},
+        {"id": "3", "first_name": "Dup", "title": "X"},
+    ]
+    enriched = [
+        {"name": "Caroline Bosi", "title": "Revenue Cycle Manager",
+         "linkedin_url": "http://li/c", "email": "x@y.com"},
+        None,                                              # failed -> fallback
+        {"name": "Caroline Bosi", "title": "Dup"},         # duplicate -> dropped
+    ]
+    out = apollo._shape(found, enriched)
+    assert [p["name"] for p in out] == ["Caroline Bosi", "Jane"]
+    assert out[0]["title"] == "Revenue Cycle Manager"
+    assert out[0]["linkedin"].endswith("/c")
+    assert out[1]["title"] == "CFO" and out[1]["linkedin"] == ""
+    assert all("email" not in p and "phone" not in p for p in out)
 
 
 @pytest.mark.asyncio

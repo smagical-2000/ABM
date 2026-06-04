@@ -135,9 +135,10 @@ class IntentSignal(BaseModel):
 
 
 class DecisionMaker(BaseModel):
-    role: str
-    contact: str = ""            # name + title (or "Unknown ...")
-    notes: str = ""
+    role: str                    # title / function
+    contact: str = ""            # person name (from Apollo), or "Unknown ..."
+    notes: str = ""              # why they matter to an RCM sale
+    linkedin: str = ""           # public LinkedIn URL, when Apollo has it
 
 
 class NewsItem(BaseModel):

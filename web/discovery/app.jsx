@@ -492,63 +492,19 @@ function downloadCsv(filename, csv) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-// One collapsible import batch: a header (filename, count, fit mix, batch
-// actions) over its accounts. Collapsed groups render no rows, so the view
-// stays fast at thousands of accounts across many files.
-function ImportGroup({ group, expanded, onToggle, batchRunning, selected, onToggleSelect, onOpen, onScore, onLanding, onExport, onScoreQueued }) {
-  const g = group;
+// Doubles as the color legend (so the ring colors are readable) and the fit
+// distribution, in one quiet line — replacing the old stat-tile row.
+function FitLegend({ counts }) {
   const meta = window.FIT_META || {};
-  const [fname, ...rest] = (g.label || '').split(' · ');
-  const date = rest.join(' · ');
+  const items = [['high', 'High'], ['medium', 'Medium'], ['low', 'Low'], ['out', 'Not a fit']];
   return (
-    <div className="border-b border-zinc-100 last:border-0">
-      <div onClick={onToggle} className="flex cursor-pointer items-center gap-3 px-6 py-3 transition-colors hover:bg-zinc-50/70">
-        <Icons.chevron className={`h-4 w-4 shrink-0 text-zinc-400 transition-transform ${expanded ? 'rotate-90' : ''}`} />
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            {g.isDiscovery ? <Icons.compass className="h-3.5 w-3.5 shrink-0 text-zinc-400" /> : <Icons.doc className="h-3.5 w-3.5 shrink-0 text-zinc-400" />}
-            <span className="truncate text-[14px] font-semibold text-zinc-800">{fname}</span>
-            {date && <span className="shrink-0 text-[11px] text-zinc-400">{date}</span>}
-            <span className="shrink-0 text-[12px] text-zinc-400">· {g.total}</span>
-          </div>
-          <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] text-zinc-400">
-            {['high', 'medium', 'low', 'out'].map((k) => g.fit[k] > 0 && (
-              <span key={k} className="inline-flex items-center gap-1"><span className={`h-1.5 w-1.5 rounded-full ${(meta[k] || {}).dot || 'bg-zinc-300'}`} />{(meta[k] || {}).word} {g.fit[k]}</span>
-            ))}
-            {g.queuedIds.length > 0 && <span className="text-amber-600">{g.queuedIds.length} queued</span>}
-          </div>
-        </div>
-        <div onClick={(e) => e.stopPropagation()} className="no-print flex shrink-0 items-center gap-2">
-          {g.queuedIds.length > 0 && !batchRunning && (
-            <button onClick={onScoreQueued}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-2.5 py-1.5 text-[12px] font-medium text-white transition-colors hover:bg-indigo-700">
-              <Icons.sparkle className="h-3.5 w-3.5" />Score {g.queuedIds.length}
-            </button>
-          )}
-          {g.scoredIds.length > 0 && (
-            <button onClick={onExport} title="Export this batch as CSV"
-              className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-[12px] font-medium text-zinc-500 transition-colors hover:bg-zinc-50 hover:text-zinc-700">
-              <Icons.download className="h-3.5 w-3.5" />Export
-            </button>
-          )}
-        </div>
-      </div>
-      {expanded && (
-        g.visible.length === 0 ? (
-          <div className="px-6 py-4 text-[12.5px] text-zinc-400">
-            {g.hiddenLow > 0
-              ? `No High/Medium accounts here. ${g.hiddenLow} low-fit hidden — set Fit to All to see them.`
-              : 'No accounts match the filters.'}
-          </div>
-        ) : (
-          g.visible.map((a) => (
-            <ScoredRow key={a.account_id} account={a} batchRunning={batchRunning}
-              selected={selected.has(a.account_id)} onToggleSelect={() => onToggleSelect(a.account_id)}
-              onOpen={() => onOpen(a.account_id)} onScore={() => onScore(a.account_id)}
-              onLanding={() => onLanding(a.account_id)} />
-          ))
-        )
-      )}
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-zinc-500">
+      {items.map(([k, label]) => (
+        <span key={k} className="inline-flex items-center gap-1.5">
+          <span className={`h-1.5 w-1.5 rounded-full ${(meta[k] || {}).dot || 'bg-zinc-300'}`} />
+          {label}<span className="tabular-nums text-zinc-400">{counts[k] || 0}</span>
+        </span>
+      ))}
     </div>
   );
 }
@@ -558,10 +514,11 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [segF, setSegF] = useState('all');
-  const [fitF, setFitF] = useState('priority');   // High + Medium; low fit collapsed by default
+  const [fitF, setFitF] = useState('all');
+  const [sourceF, setSourceF] = useState('all');
   const [dateF, setDateF] = useState('all');
-  const [search, setSearch] = useState('');
-  const [expandedGroups, setExpandedGroups] = useState(() => new Set());
+  const [importF, setImportF] = useState('all');
+  const [imports, setImports] = useState([]);
   const [confirmReset, setConfirmReset] = useState(false);
   const [selected, setSelected] = useState(() => new Set());   // row-selection for export
   const [openAcc, setOpenAcc] = useState(null);
@@ -571,14 +528,16 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
 
   async function load(soft = false) {
     try {
-      // Accounts are primary; the spend summary is best-effort so the table
-      // still loads if the stats endpoint hiccups.
-      const [a, s] = await Promise.all([
+      // Accounts are primary; the spend summary + import list are best-effort so
+      // the table still loads if either endpoint hiccups.
+      const [a, s, im] = await Promise.all([
         window.API.scored(),
         window.API.scoringStats().catch(() => null),
+        window.API.scoringImports().catch(() => null),
       ]);
       setAccounts(a);
       if (s) setStats(s);
+      if (im) setImports(im.imports || []);
     } catch (e) { if (!soft) pushToast(`Couldn't load scores: ${e.message}`, 'danger'); }
     finally { if (!soft) setLoading(false); }
   }
@@ -622,20 +581,14 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
     load(true);
   }
 
-  // opts: { limit } scores up to N queued; { accountIds } scores a specific
-  // batch (one import group). The server still hard-caps to the budget.
-  async function handleScoreAll(opts) {
-    if (opts == null || typeof opts === 'number') opts = { limit: opts || undefined };  // CostMeter passes a number
-    const queued = opts.accountIds
-      ? opts.accountIds
-      : accounts.filter((a) => a.state === 'queued').map((a) => a.account_id);
+  async function handleScoreAll(limit) {
+    const queued = accounts.filter((a) => a.state === 'queued');
     if (!queued.length) return;
-    const n = opts.limit ? Math.min(opts.limit, queued.length) : queued.length;
+    const n = limit ? Math.min(limit, queued.length) : queued.length;
     setBatchKick(true);
     pushToast(`Scoring ${n} queued ${n === 1 ? 'account' : 'accounts'}…`, 'success');
-    const body = opts.accountIds ? { account_ids: opts.accountIds } : (opts.limit ? { limit: opts.limit } : {});
     try {
-      const res = await window.API.scoreQueued(body);
+      const res = await window.API.scoreQueued(limit ? { limit } : {});
       if (res && res.budget_blocked) { setBatchKick(false); pushToast('Monthly budget reached — nothing scored. Raise the budget or wait.', 'danger'); }
       else if (res && res.started === 0) { setBatchKick(false); pushToast('A batch is already running.', 'success'); }
       else if (res && res.budget_capped) { pushToast(`Scoring ${res.started} that fit the budget (the rest stay queued).`, 'success'); }
@@ -663,112 +616,62 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
     return (Date.now() - new Date(iso).getTime()) <= days * 86400000;
   };
 
-  // A row is visible when not yet scored (always actionable) or when its fit
-  // matches the filter. "priority" (the default) shows High + Medium only.
-  const rowVisible = (a) => {
-    if (a.state !== 'scored') return true;
-    if (fitF === 'all') return true;
-    if (fitF === 'priority') return ['high', 'medium'].includes(bandOf(a));
-    return bandOf(a) === fitF;
-  };
-
-  // Group accounts by the import they came in on (Discovery/promoted is its own
-  // group), so the view is a tidy list of files rather than one flat dump.
-  const groups = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    const base = accounts.filter((a) => {
+  const scoredList = useMemo(() => {
+    const arr = accounts.filter((a) => {
       if (segF !== 'all' && a.segment !== segF) return false;
-      if (dateF !== 'all' && (a.state !== 'scored' || !withinDate(a.scored_at, dateF))) return false;
-      if (q && !(a.name || '').toLowerCase().includes(q)) return false;
+      if (sourceF !== 'all' && a.source !== sourceF) return false;
+      if (importF !== 'all' && a.import_label !== importF) return false;
+      if (fitF !== 'all') { if (a.state !== 'scored' || bandOf(a) !== fitF) return false; }
+      if (dateF !== 'all') { if (a.state !== 'scored' || !withinDate(a.scored_at, dateF)) return false; }
       return true;
     });
-    const map = new Map();
-    for (const a of base) {
-      const key = a.import_label || (a.source === 'csv' ? '__csv__' : '__discovery__');
-      if (!map.has(key)) {
-        map.set(key, {
-          key,
-          label: a.import_label || (a.source === 'csv' ? 'CSV import' : 'Discovery / promoted'),
-          isDiscovery: !a.import_label && a.source !== 'csv',
-          accounts: [], latest: '',
-        });
-      }
-      const g = map.get(key);
-      g.accounts.push(a);
-      const t = a.scored_at || a.created_at || '';
-      if (t > g.latest) g.latest = t;
-    }
     const order = { scoring: 0, queued: 1, scored: 2, error: 3 };
-    const sortRows = (arr) => arr.sort((a, b) => {
+    return arr.sort((a, b) => {
       if (order[a.state] !== order[b.state]) return order[a.state] - order[b.state];
       const ra = a.total != null ? a.total / a.max_total : 0;
       const rb = b.total != null ? b.total / b.max_total : 0;
       return rb - ra;
     });
-    const out = [...map.values()].map((g) => {
-      sortRows(g.accounts);
-      const fit = { high: 0, medium: 0, low: 0, out: 0 };
-      g.accounts.forEach((a) => { if (a.state === 'scored') { const b = bandOf(a); if (b in fit) fit[b] += 1; } });
-      return {
-        ...g,
-        fit,
-        visible: g.accounts.filter(rowVisible),
-        scoredIds: g.accounts.filter((a) => a.state === 'scored').map((a) => a.account_id),
-        queuedIds: g.accounts.filter((a) => a.state === 'queued').map((a) => a.account_id),
-        total: g.accounts.length,
-        hiddenLow: fitF === 'priority' ? fit.low + fit.out : 0,
-      };
-    });
-    out.sort((a, b) => (b.latest || '').localeCompare(a.latest || ''));
-    return out;
-  }, [accounts, segF, dateF, search, fitF]);
-
-  // Expand the most recent group on first load; the rest stay collapsed.
-  const initRef = useRef(false);
-  useEffect(() => {
-    if (!initRef.current && groups.length) { initRef.current = true; setExpandedGroups(new Set([groups[0].key])); }
-  }, [groups]);
-  function toggleGroup(key) {
-    setExpandedGroups((prev) => { const n = new Set(prev); if (n.has(key)) n.delete(key); else n.add(key); return n; });
-  }
+  }, [accounts, segF, fitF, sourceF, dateF, importF]);
 
   function toggleSelect(id) {
-    setSelected((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+    setSelected((prev) => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
   }
 
-  function exportRows(rows, tag) {
+  function handleExport() {
+    const useSel = selected.size > 0;
+    const rows = useSel
+      ? accounts.filter((a) => a.state === 'scored' && selected.has(a.account_id))
+      : scoredList.filter((a) => a.state === 'scored');
     if (!rows.length) { pushToast('No scored accounts to export.', 'success'); return; }
+    const tag = useSel ? 'selected' : importF !== 'all' ? 'import' : sourceF !== 'all' ? sourceF : 'all';
     const stamp = new Date().toISOString().slice(0, 10);
     downloadCsv(`magical-scored-${tag}-${stamp}.csv`, buildAccountsCsv(rows));
     pushToast(`Exported ${rows.length} ${rows.length === 1 ? 'account' : 'accounts'} to CSV.`, 'success');
-  }
-  function handleExport() {
-    if (selected.size > 0) {
-      exportRows(accounts.filter((a) => a.state === 'scored' && selected.has(a.account_id)), 'selected');
-    } else {
-      exportRows(groups.flatMap((g) => g.accounts).filter((a) => a.state === 'scored'), 'all');
-    }
-  }
-  function exportGroup(g) {
-    const safe = (g.label || 'import').split(' · ')[0].replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'import';
-    exportRows(g.accounts.filter((a) => a.state === 'scored'), safe);
   }
 
   const scoredOnly = accounts.filter((a) => a.state === 'scored');
   const queuedCount = accounts.filter((a) => a.state === 'queued').length;
   const batchRunning = batchKick || !!(stats && stats.batch_running);
+  const fitCounts = { high: 0, medium: 0, low: 0, out: 0 };
+  scoredOnly.forEach((a) => { const b = bandOf(a); if (b in fitCounts) fitCounts[b] += 1; });
 
-  const visibleScoredIds = groups.flatMap((g) => g.visible).filter((a) => a.state === 'scored').map((a) => a.account_id);
-  const allFilteredSelected = visibleScoredIds.length > 0 && visibleScoredIds.every((id) => selected.has(id));
+  const filteredScoredIds = scoredList.filter((a) => a.state === 'scored').map((a) => a.account_id);
+  const allFilteredSelected = filteredScoredIds.length > 0 && filteredScoredIds.every((id) => selected.has(id));
   function toggleSelectAll() {
     setSelected((prev) => {
-      if (allFilteredSelected) { const n = new Set(prev); visibleScoredIds.forEach((id) => n.delete(id)); return n; }
-      return new Set([...prev, ...visibleScoredIds]);
+      if (allFilteredSelected) { const n = new Set(prev); filteredScoredIds.forEach((id) => n.delete(id)); return n; }
+      return new Set([...prev, ...filteredScoredIds]);
     });
   }
 
   const openAccount = accounts.find((a) => a.account_id === openAcc) || null;
   const landingAccount = accounts.find((a) => a.account_id === openLanding) || null;
+  const visible = scoredList.length;
 
   return (
     <>
@@ -816,22 +719,27 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
               <Dropdown label="Segment" value={segF} onChange={setSegF}
                 options={[{ value: 'all', label: 'All' }, { value: 'health_system', label: 'Health System' }, { value: 'specialty', label: 'Specialty' }, { value: 'payer', label: 'Payer' }]} />
               <Dropdown label="Fit" value={fitF} onChange={setFitF}
-                options={[{ value: 'priority', label: 'High + Medium' }, { value: 'all', label: 'All' }, { value: 'high', label: 'High' }, { value: 'medium', label: 'Medium' }, { value: 'low', label: 'Low' }, { value: 'out', label: 'Not a fit' }]} />
+                options={[{ value: 'all', label: 'All' }, { value: 'high', label: 'High' }, { value: 'medium', label: 'Medium' }, { value: 'low', label: 'Low' }, { value: 'out', label: 'Not a fit' }]} />
+              <Dropdown label="Source" value={sourceF} onChange={setSourceF}
+                options={[{ value: 'all', label: 'All' }, { value: 'discovery', label: 'Discovery' }, { value: 'csv', label: 'CSV import' }]} />
               <Dropdown label="Date" value={dateF} onChange={setDateF}
                 options={[{ value: 'all', label: 'All time' }, { value: 'today', label: 'Today' }, { value: '7d', label: 'Last 7 days' }, { value: '30d', label: 'Last 30 days' }]} />
+              {imports.length > 0 && (
+                <Dropdown label="Import" value={importF} onChange={setImportF}
+                  options={[{ value: 'all', label: 'All imports' },
+                    ...imports.map((im) => ({ value: im.label, label: `${im.label} (${im.count})` }))]} />
+              )}
             </div>
-            <div className="relative">
-              <Icons.search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
-              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search accounts"
-                className="w-44 rounded-lg border border-zinc-200 bg-white py-1.5 pl-8 pr-2.5 text-[13px] text-zinc-700 placeholder-zinc-400 transition-colors focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100" />
-            </div>
+            {scoredOnly.length > 0
+              ? <FitLegend counts={fitCounts} />
+              : <span className="text-[13px] text-zinc-400">{visible} {visible === 1 ? 'account' : 'accounts'}</span>}
           </div>
 
           {selected.size > 0 && (
             <div className="no-print flex flex-wrap items-center gap-3 border-b border-zinc-100 bg-indigo-50/40 px-6 py-2 text-[12.5px]">
               <span className="font-medium text-indigo-700">{selected.size} selected</span>
-              {!allFilteredSelected && visibleScoredIds.length > selected.size && (
-                <button onClick={toggleSelectAll} className="text-indigo-600 transition-colors hover:text-indigo-800">Select all visible ({visibleScoredIds.length})</button>
+              {!allFilteredSelected && filteredScoredIds.length > selected.size && (
+                <button onClick={toggleSelectAll} className="text-indigo-600 transition-colors hover:text-indigo-800">Select all {filteredScoredIds.length}</button>
               )}
               <button onClick={() => setSelected(new Set())} className="text-zinc-400 transition-colors hover:text-zinc-600">Clear</button>
               <span className="ml-auto text-zinc-400">Click Export to download {selected.size}</span>
@@ -840,31 +748,25 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
 
           {loading ? (
             <div className="animate-pulse">{Array.from({ length: 5 }).map((_, i) => <ScoredSkeletonRow key={i} />)}</div>
-          ) : groups.length === 0 ? (
-            accounts.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-24 text-center">
-                <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-zinc-100 text-zinc-400"><Icons.layers className="h-7 w-7" /></div>
-                <h3 className="mt-5 text-[15px] font-semibold text-zinc-900">No scored accounts yet</h3>
-                <p className="mt-1.5 max-w-xs text-[13px] text-zinc-500">Promote a company from Discovery, or import a CSV to start scoring.</p>
-                <button onClick={() => setImporting(true)} className="mt-5 inline-flex items-center gap-2 rounded-lg bg-zinc-900 px-3.5 py-2 text-[13px] font-medium text-white transition-colors hover:bg-zinc-800">
-                  <Icons.upload className="h-4 w-4" />Import accounts
-                </button>
-              </div>
-            ) : (
-              <div className="py-16 text-center text-[13px] text-zinc-400">No accounts match these filters. <button onClick={() => { setSegF('all'); setDateF('all'); setSearch(''); setFitF('all'); }} className="font-medium text-indigo-600 hover:text-indigo-800">Clear filters</button></div>
-            )
+          ) : visible === 0 ? (
+            <div className="flex flex-col items-center justify-center py-24 text-center">
+              <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-zinc-100 text-zinc-400"><Icons.layers className="h-7 w-7" /></div>
+              <h3 className="mt-5 text-[15px] font-semibold text-zinc-900">No scored accounts yet</h3>
+              <p className="mt-1.5 max-w-xs text-[13px] text-zinc-500">Promote a company from Discovery, or import a CSV to start scoring.</p>
+              <button onClick={() => setImporting(true)} className="mt-5 inline-flex items-center gap-2 rounded-lg bg-zinc-900 px-3.5 py-2 text-[13px] font-medium text-white transition-colors hover:bg-zinc-800">
+                <Icons.upload className="h-4 w-4" />Import accounts
+              </button>
+            </div>
           ) : (
-            groups.map((g) => (
-              <ImportGroup key={g.key} group={g} expanded={search.trim() ? true : expandedGroups.has(g.key)}
-                onToggle={() => toggleGroup(g.key)} batchRunning={batchRunning}
-                selected={selected} onToggleSelect={toggleSelect}
-                onOpen={setOpenAcc} onScore={handleScore} onLanding={setOpenLanding}
-                onExport={() => exportGroup(g)}
-                onScoreQueued={() => handleScoreAll({ accountIds: g.queuedIds })} />
+            scoredList.map((a) => (
+              <ScoredRow key={a.account_id} account={a} batchRunning={batchRunning}
+                selected={selected.has(a.account_id)} onToggleSelect={() => toggleSelect(a.account_id)}
+                onOpen={() => setOpenAcc(a.account_id)} onScore={() => handleScore(a.account_id)}
+                onLanding={() => setOpenLanding(a.account_id)} />
             ))
           )}
         </div>
-        <p className="mt-4 text-center text-[12px] text-zinc-400">Grouped by import · open a batch to review, score, or export it</p>
+        <p className="mt-4 text-center text-[12px] text-zinc-400">Promoted accounts and CSV imports converge here · QA runs independently on every score</p>
       </main>
 
       <ScoreDrawer account={openAccount} onClose={() => setOpenAcc(null)}

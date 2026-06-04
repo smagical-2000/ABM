@@ -20,6 +20,7 @@ startup and the Postgres pool is closed on shutdown.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -49,15 +50,19 @@ class RejectBody(BaseModel):
     reason: str
 
 
-def _schedule_scoring(app: FastAPI, account_id: str) -> None:
-    """Run a score in the background, callable from sync or async handlers.
+# Max simultaneous Claude scoring calls when running a queued batch. Bounded so
+# a "Score all" over hundreds of accounts paces the spend + respects rate limits
+# instead of firing every call at once.
+_BATCH_CONCURRENCY = 4
+
+
+def _schedule_coro(app: FastAPI, coro) -> None:
+    """Run a coroutine in the background, callable from sync or async handlers.
 
     Sync handlers run in a threadpool with no running loop, so we hand the
     coroutine to the main loop captured at startup; async handlers schedule it
-    on their own loop. Either way the HTTP response returns immediately and the
-    UI shows the live 'Scoring…' state.
+    on their own loop. Either way the HTTP response returns immediately.
     """
-    coro = app.state.scoring.run_scoring(account_id)
     try:
         loop = asyncio.get_running_loop()
         task = loop.create_task(coro)
@@ -69,6 +74,41 @@ def _schedule_scoring(app: FastAPI, account_id: str) -> None:
         task = asyncio.run_coroutine_threadsafe(coro, loop)
     app.state.scoring_tasks.add(task)
     task.add_done_callback(lambda t: app.state.scoring_tasks.discard(t))
+
+
+def _schedule_scoring(app: FastAPI, account_id: str) -> None:
+    """Background-score one account; the UI shows the live 'Scoring…' state."""
+    _schedule_coro(app, app.state.scoring.run_scoring(account_id))
+
+
+async def _run_batch(app: FastAPI, account_ids: list[str]) -> None:
+    """Score a queued batch with bounded concurrency, then clear the busy flag."""
+    sem = asyncio.Semaphore(_BATCH_CONCURRENCY)
+
+    async def one(account_id: str) -> None:
+        async with sem:
+            try:
+                await app.state.scoring.run_scoring(account_id)
+            except Exception:  # noqa: BLE001 — one failure must not stop the batch
+                logger.exception("batch scoring failed for %s", account_id)
+
+    try:
+        await asyncio.gather(*(one(a) for a in account_ids))
+    finally:
+        app.state.batch_running = False
+    logger.info("batch complete: %d accounts", len(account_ids))
+
+
+async def _json_body(request: Request) -> dict:
+    """Parse an optional JSON request body, tolerating an empty one."""
+    raw = await request.body()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _parse_upload(raw: bytes) -> csv_imports.ImportResult:
@@ -124,6 +164,7 @@ async def lifespan(app: FastAPI):
     app.state.repo = repo
     app.state.scoring_repo = scoring_repo
     app.state.scoring_tasks = set()           # keep background score tasks alive
+    app.state.batch_running = False           # one queued batch at a time
     app.state.loop = asyncio.get_running_loop()
     logger.info("discovery + scoring API ready (repo=%s)", type(repo).__name__)
     try:
@@ -310,20 +351,56 @@ def create_app() -> FastAPI:
 
     @app.post("/api/scoring/import")
     async def import_commit(request: Request):
-        """Parse the CSV body, enqueue the new accounts, and start scoring each.
-        Already-known accounts are skipped."""
+        """Parse the CSV body and enqueue the new accounts as 'queued' — parked,
+        NOT scored. Scoring is on demand (per-account or a batch) so importing a
+        large file never spends money by itself. Known accounts are skipped."""
         result = _parse_upload(await request.body())
         fresh = [a for a in result.accounts if not app.state.scoring.exists(a.account_id)]
-        app.state.scoring.enqueue_csv(fresh, state="scoring")
-        for a in fresh:
-            _schedule_scoring(app, a.account_id)
+        app.state.scoring.enqueue_csv(fresh, state="queued")
         return {
             "schema_label": result.schema_label,
             "segment": result.segment,
             "imported": len(fresh),
+            "queued": len(fresh),
             "skipped_known": len(result.accounts) - len(fresh),
             "accounts": [app.state.scoring.get(a.account_id) for a in fresh],
         }
+
+    @app.post("/api/scoring/score-queued")
+    async def score_queued(request: Request):
+        """Score parked (queued) accounts in a bounded background batch.
+
+        The spend guardrail: imports land queued for free, and the user scores
+        them on demand here. Optional body {"limit": N} or {"account_ids": [...]}
+        to score a slice; default scores every queued account. One batch runs at
+        a time so a second click can't double-spend.
+        """
+        if getattr(app.state, "batch_running", False):
+            return {"started": 0, "busy": True}
+        body = await _json_body(request)
+        queued_ids = [q["account_id"] for q in app.state.scoring_repo.queued()]
+        ids = body.get("account_ids")
+        if isinstance(ids, list) and ids:
+            wanted = set(ids)
+            targets = [a for a in queued_ids if a in wanted]
+        else:
+            targets = queued_ids
+            limit = body.get("limit")
+            if isinstance(limit, int) and limit > 0:
+                targets = targets[:limit]
+        if not targets:
+            return {"started": 0, "busy": False}
+        app.state.batch_running = True
+        _schedule_coro(app, _run_batch(app, targets))
+        return {"started": len(targets), "busy": True}
+
+    @app.get("/api/scoring/stats")
+    def scoring_stats():
+        """Spend summary for the live cost meter: month-to-date vs budget, total,
+        average per account, and how many accounts are parked in 'queued'."""
+        summary = app.state.scoring_repo.cost_summary()
+        summary["batch_running"] = bool(getattr(app.state, "batch_running", False))
+        return summary
 
     @app.get("/api/health")
     def health():

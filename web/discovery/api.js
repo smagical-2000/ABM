@@ -46,6 +46,13 @@ window.API = {
   account: (id) => http(`/api/account/${encodeURIComponent(id)}`),
   scoreAccount: (id) => http(`/api/account/${encodeURIComponent(id)}/score`, { method: 'POST' }),
   scoringActivity: () => http('/api/scoring/activity'),
+  // Spend summary for the cost meter (month-to-date vs budget, total, avg).
+  scoringStats: () => http('/api/scoring/stats'),
+  // Score parked (queued) accounts in a bounded background batch. Pass
+  // { limit } to score a slice, or {} for all queued.
+  scoreQueued: (body = {}) => http('/api/scoring/score-queued', {
+    method: 'POST', body: JSON.stringify(body),
+  }),
   // CSV import posts the raw file text as the body (no multipart).
   importPreview: (csvText) => http('/api/scoring/import/preview', {
     method: 'POST', headers: { 'Content-Type': 'text/csv' }, body: csvText,

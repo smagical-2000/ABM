@@ -30,11 +30,17 @@ logger = logging.getLogger(__name__)
 
 _MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 # web_search is the dominant cost (each result is re-sent on later turns, so
-# searches compound the input tokens). 4 is enough once known facts are
-# injected; the scorer spends them on competitor/pain/intent, not on facts it
-# already has.
+# searches compound the input tokens). Once known facts are injected the scorer
+# spends searches on competitor/pain/intent, not on facts it already has. CSV
+# imports arrive with firmographics + technographics from Definitive, so they
+# need fewer searches (intent only) than a discovery account scored from scratch.
 _MAX_SEARCHES = 4
+_MAX_SEARCHES_CSV = 3
 _MAX_TOKENS = 2000
+
+
+def _max_searches(account: Account) -> int:
+    return _MAX_SEARCHES_CSV if account.source == "csv" else _MAX_SEARCHES
 
 
 class ScoringError(RuntimeError):
@@ -51,7 +57,7 @@ async def score_account(account: Account) -> ScoreResult:
     try:
         response = await llm.call_with_web_search(
             system=system, user_message=user,
-            max_searches=_MAX_SEARCHES, max_tokens=_MAX_TOKENS, model=_MODEL,
+            max_searches=_max_searches(account), max_tokens=_MAX_TOKENS, model=_MODEL,
         )
     except Exception as e:  # noqa: BLE001 — surface as a scoring failure
         raise ScoringError(f"LLM call failed: {type(e).__name__}: {e}") from e
@@ -81,8 +87,10 @@ async def score_account(account: Account) -> ScoreResult:
     result.tier_band, result.tier_label = band.band, band.label
 
     queries = llm.extract_web_searches(response)
-    logger.info("  -> %s %d/%d  (%d searches)",
-                result.tier_label, result.total, result.max_total, len(queries))
+    result.cost_usd = llm.call_cost(response, searches=len(queries))
+    logger.info("  -> %s %d/%d  (%d searches, $%.3f)",
+                result.tier_label, result.total, result.max_total,
+                len(queries), result.cost_usd)
     return result
 
 

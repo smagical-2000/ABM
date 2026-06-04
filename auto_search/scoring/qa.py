@@ -29,9 +29,15 @@ _MAX_SEARCHES = 3
 _MAX_TOKENS = 1400
 
 
-async def qa_account(account: Account, score: ScoreResult, fw: Framework) -> QAResult:
+async def qa_account(
+    account: Account, score: ScoreResult, fw: Framework
+) -> tuple[QAResult, float]:
     """Independently verify a score. Never raises — QA failure yields an
-    'unverifiable' verdict so a score still ships (the human is the backstop)."""
+    'unverifiable' verdict so a score still ships (the human is the backstop).
+
+    Returns (verdict, cost_usd) so the service can add the QA call to the
+    account's measured spend.
+    """
     system = _qa_system_prompt(fw)
     user = _qa_user_message(account, score)
 
@@ -44,8 +50,9 @@ async def qa_account(account: Account, score: ScoreResult, fw: Framework) -> QAR
     except Exception as e:  # noqa: BLE001 — QA must not fail the score
         logger.warning("QA pass failed for %s: %s", account.name, e)
         return QAResult(status="unverifiable",
-                        notes="Independent QA could not complete.", corrections=[])
+                        notes="Independent QA could not complete.", corrections=[]), 0.0
 
+    cost = llm.call_cost(response, searches=len(llm.extract_web_searches(response)))
     corrections = _parse_corrections(data.get("corrections", []))
     status = data.get("status")
     if status not in ("verified", "discrepancy", "unverifiable"):
@@ -57,7 +64,7 @@ async def qa_account(account: Account, score: ScoreResult, fw: Framework) -> QAR
         corrections=corrections,
     )
     mark_tier_changing(fw, score, qa)
-    return qa
+    return qa, cost
 
 
 def mark_tier_changing(fw: Framework, score: ScoreResult, qa: QAResult) -> None:

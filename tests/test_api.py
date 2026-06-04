@@ -102,6 +102,56 @@ class TestWorkflow:
         assert client.get("/api/panel").json() == []
 
 
+_HS_CSV = (
+    "Hospital Name,Firm Type,Net Patient Revenue,"
+    "Electronic Health/Medical Record - Inpatient,# of Staffed Beds,State\n"
+    'Beacon Health,Health System,"$1,400,000,000",MEDITECH,310,IN\n'
+    'Cedar Falls Medical Center,Health System,"$880,000,000",MEDITECH,190,IA\n'
+)
+
+
+class TestCostControls:
+    def test_import_lands_queued_not_scored(self, client):
+        """The spend guardrail: a CSV import parks accounts in 'queued' for free.
+        Nothing is scored, so activity stays empty and no money is spent."""
+        r = client.post("/api/scoring/import", content=_HS_CSV)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["imported"] == 2 and body["queued"] == 2
+        assert all(a["state"] == "queued" for a in body["accounts"])
+        # nothing is being scored
+        assert client.get("/api/scoring/activity").json()["active"] == []
+        stats = client.get("/api/scoring/stats").json()
+        assert stats["queued_count"] == 2
+        assert stats["month_cost"] == 0.0 and stats["total_cost"] == 0.0
+        assert stats["monthly_budget"] == 200.0 and stats["batch_running"] is False
+
+    def test_score_queued_starts_one_batch(self, client, monkeypatch):
+        """Scoring a queued batch is on demand and runs one batch at a time, so a
+        double click can't double-spend."""
+        client.post("/api/scoring/import", content=_HS_CSV)
+
+        async def fake_batch(app, ids):       # don't hit Claude; hold the busy flag
+            return None
+        monkeypatch.setattr(_app_module, "_run_batch", fake_batch)
+
+        first = client.post("/api/scoring/score-queued", json={}).json()
+        assert first["started"] == 2 and first["busy"] is True
+        # a second click while a batch is running starts nothing
+        second = client.post("/api/scoring/score-queued", json={}).json()
+        assert second == {"started": 0, "busy": True}
+
+    def test_score_queued_respects_limit(self, client, monkeypatch):
+        client.post("/api/scoring/import", content=_HS_CSV)
+
+        async def fake_batch(app, ids):
+            return None
+        monkeypatch.setattr(_app_module, "_run_batch", fake_batch)
+
+        out = client.post("/api/scoring/score-queued", json={"limit": 1}).json()
+        assert out["started"] == 1 and out["busy"] is True
+
+
 class TestStaticMount:
     def test_serves_ui_index(self, client):
         # The static UI is mounted at / (serves index.html). 200 confirms mount.

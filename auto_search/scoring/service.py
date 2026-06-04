@@ -79,11 +79,13 @@ class ScoringService:
             )
         else:
             self._repo.set_phase(account_id, "verifying")
-            score.qa = await qa.qa_account(account, score, fw)
+            qa_result, qa_cost = await qa.qa_account(account, score, fw)
+            score.qa = qa_result
+            score.cost_usd = round(score.cost_usd + qa_cost, 4)
         saved = self._repo.save_score(account_id, score)
-        logger.info("scored %s -> %s %d/%d (QA: %s)",
+        logger.info("scored %s -> %s %d/%d (QA: %s, $%.3f)",
                     account.name, score.tier_label, score.total, score.max_total,
-                    score.qa.status if score.qa else "—")
+                    score.qa.status if score.qa else "—", score.cost_usd)
         return saved
 
     # ── reads ──────────────────────────────────────────────────────────

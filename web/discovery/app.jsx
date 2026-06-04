@@ -440,6 +440,7 @@ function App() {
 // ════════════════════════════════════════════════════════════════════════════
 function ScoredView({ refreshKey, pushToast, onCount }) {
   const [accounts, setAccounts] = useState([]);
+  const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [segF, setSegF] = useState('all');
   const [tierF, setTierF] = useState('all');
@@ -448,28 +449,39 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
   const [openAcc, setOpenAcc] = useState(null);
   const [openLanding, setOpenLanding] = useState(null);
   const [importing, setImporting] = useState(false);
+  const [batchKick, setBatchKick] = useState(false);   // optimistic "batch starting"
 
   async function load(soft = false) {
     try {
-      const a = await window.API.scored();
+      // Accounts are primary; the spend summary is best-effort so the table
+      // still loads if the stats endpoint hiccups.
+      const [a, s] = await Promise.all([
+        window.API.scored(),
+        window.API.scoringStats().catch(() => null),
+      ]);
       setAccounts(a);
+      if (s) setStats(s);
     } catch (e) { if (!soft) pushToast(`Couldn't load scores: ${e.message}`, 'danger'); }
     finally { if (!soft) setLoading(false); }
   }
   useEffect(() => { load(); }, []);
   useEffect(() => { if (refreshKey) load(true); }, [refreshKey]);
-  // Poll while anything is queued/scoring so rows resolve live — and do one
-  // final refetch when the last in-flight account finishes, so the resolved
-  // score lands without a manual reload.
+  // Poll while anything is scoring (or a queued batch is running) so rows + the
+  // cost meter resolve live — and do one final refetch when the last in-flight
+  // account finishes, so the resolved score lands without a manual reload.
   const wasActiveRef = useRef(false);
   useEffect(() => {
     let alive = true;
     async function poll() {
       try {
-        const r = await window.API.scoringActivity();
+        const [r, s] = await Promise.all([
+          window.API.scoringActivity(),
+          window.API.scoringStats().catch(() => null),
+        ]);
         if (!alive) return;
-        const active = (r.active || []).length > 0;
-        if (active) { wasActiveRef.current = true; load(true); }
+        if (s) { setStats(s); if (!s.batch_running) setBatchKick(false); }
+        const busy = (r.active || []).length > 0 || (s && s.batch_running);
+        if (busy) { wasActiveRef.current = true; load(true); }
         else if (wasActiveRef.current) { wasActiveRef.current = false; load(true); }
       } catch (_) { /* ignore */ }
     }
@@ -487,7 +499,22 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
   }
   function handleImported(res) {
     setImporting(false);
-    pushToast(`Importing ${res.imported} ${res.imported === 1 ? 'account' : 'accounts'} — scoring…`, 'success');
+    const n = res.imported;
+    pushToast(`Imported ${n} ${n === 1 ? 'account' : 'accounts'} to the queue. Score them when ready.`, 'success');
+    load(true);
+  }
+
+  async function handleScoreAll(limit) {
+    const queued = accounts.filter((a) => a.state === 'queued');
+    if (!queued.length) return;
+    const n = limit ? Math.min(limit, queued.length) : queued.length;
+    setBatchKick(true);
+    pushToast(`Scoring ${n} queued ${n === 1 ? 'account' : 'accounts'}…`, 'success');
+    try {
+      const res = await window.API.scoreQueued(limit ? { limit } : {});
+      if (res && res.started === 0) { setBatchKick(false); pushToast('A batch is already running.', 'success'); }
+    } catch (e) { setBatchKick(false); pushToast(`Couldn't start batch: ${e.message}`, 'danger'); }
+    wasActiveRef.current = true;
     load(true);
   }
 
@@ -510,6 +537,8 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
   }, [accounts, segF, tierF, sourceF, qaF]);
 
   const scoredOnly = accounts.filter((a) => a.state === 'scored');
+  const queuedCount = accounts.filter((a) => a.state === 'queued').length;
+  const batchRunning = batchKick || !!(stats && stats.batch_running);
   const totalScored = scoredOnly.length;
   const tier1Count = scoredOnly.filter((a) => window.tierFor(a.framework, a.total).band === 'high').length;
   const flaggedCount = scoredOnly.filter((a) => a.qa && a.qa.status !== 'verified').length;
@@ -540,6 +569,11 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
           <StatTile value={flaggedCount} label="Flagged by QA" />
           <StatTile value={`${avgFit}%`} label="Avg fit" />
         </div>
+
+        {stats && (stats.scored_count > 0 || queuedCount > 0 || stats.total_cost > 0) && (
+          <CostMeter stats={stats} queuedCount={queuedCount}
+            onScoreBatch={handleScoreAll} batchRunning={batchRunning} />
+        )}
 
         {tierConflicts > 0 && (
           <div className="mt-4 flex items-center gap-2.5 rounded-xl border border-rose-200 bg-rose-50/70 px-4 py-3 text-[13px] text-rose-700">
@@ -577,7 +611,7 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
             </div>
           ) : (
             scoredList.map((a) => (
-              <ScoredRow key={a.account_id} account={a}
+              <ScoredRow key={a.account_id} account={a} batchRunning={batchRunning}
                 onOpen={() => setOpenAcc(a.account_id)} onScore={() => handleScore(a.account_id)}
                 onLanding={() => setOpenLanding(a.account_id)} />
             ))

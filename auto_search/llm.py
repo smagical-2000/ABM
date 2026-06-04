@@ -108,6 +108,46 @@ async def _create_with_retries(make_call):
             backoff *= _BACKOFF_MULT
 
 
+# Sonnet 4.5 pricing per million tokens (USD), plus the web_search tool fee.
+# Used only to report what each call cost — keep in sync with Anthropic pricing.
+_PRICE_IN = 3.0
+_PRICE_OUT = 15.0
+_PRICE_CACHE_WRITE = 3.75
+_PRICE_CACHE_READ = 0.30
+_PRICE_PER_SEARCH = 0.01
+
+
+def _cached_system(system: str) -> list[dict]:
+    """Wrap the system prompt as a cacheable block.
+
+    The rubric/system prompt is identical across accounts of the same segment,
+    so caching it (5-minute TTL) makes every call after the first in a batch
+    read it at ~10% cost. No effect on output — same prompt. Anthropic ignores
+    the cache when the prefix is under the minimum, so this is always safe.
+    """
+    return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+
+
+def call_cost(response: Any, *, searches: int = 0) -> float:
+    """Best-effort USD cost of one call, from the response usage + search count.
+
+    Server-side web_search runs inside one create() call, so the usage already
+    aggregates every internal turn's tokens.
+    """
+    u = getattr(response, "usage", None)
+    if u is None:
+        return 0.0
+    def g(name: str) -> int:
+        return getattr(u, name, 0) or 0
+    cost = (
+        g("input_tokens") * _PRICE_IN
+        + g("output_tokens") * _PRICE_OUT
+        + g("cache_creation_input_tokens") * _PRICE_CACHE_WRITE
+        + g("cache_read_input_tokens") * _PRICE_CACHE_READ
+    ) / 1_000_000 + searches * _PRICE_PER_SEARCH
+    return round(cost, 4)
+
+
 async def call_with_web_search(
     *,
     system: str,
@@ -125,7 +165,7 @@ async def call_with_web_search(
     return await _create_with_retries(lambda: get_client().messages.create(
         model=model or DEFAULT_MODEL,
         max_tokens=max_tokens,
-        system=system,
+        system=_cached_system(system),
         tools=[{
             "type": _WEB_SEARCH_TOOL_TYPE,
             "name": "web_search",
@@ -151,7 +191,7 @@ async def call_plain(
     return await _create_with_retries(lambda: get_client().messages.create(
         model=model or DEFAULT_MODEL,
         max_tokens=max_tokens,
-        system=system,
+        system=_cached_system(system),
         messages=[{"role": "user", "content": user_message}],
     ))
 

@@ -245,12 +245,13 @@ async def test_service_enqueue_score_persist(monkeypatch, tmp_path):
     assert row["account_id"] == "acc_beaconhealth" and row["state"] == "scoring"
 
     async def fake_qa(account, score, fw):
-        return QAResult(status="verified", notes="ok")
+        return QAResult(status="verified", notes="ok"), 0.012
     monkeypatch.setattr(svc_mod.engine, "score_account", _fake_hs_score)
     monkeypatch.setattr(svc_mod.qa, "qa_account", fake_qa)
 
     scored = await svc.run_scoring("acc_beaconhealth")
     assert scored["state"] == "scored" and scored["total"] == 24
+    assert scored["cost_usd"] == 0.012                 # QA cost recorded
     assert scored["tier"]["label"] == "Tier 1"        # re-resolved at save time
     assert len(scored["dimensions"]) == 6 and scored["qa"]["status"] == "verified"
     assert scored["source"] == "discovery"
@@ -276,6 +277,40 @@ async def test_service_marks_error_on_failure(monkeypatch, tmp_path):
     assert out["state"] == "error" and "LLM down" in (out["error"] or "")
 
 
+def test_repo_queued_and_cost_summary(tmp_path):
+    """Parked 'queued' accounts cost nothing and are excluded from 'active';
+    cost_summary aggregates measured spend against the monthly budget."""
+    from datetime import UTC, datetime
+
+    from auto_search.db.scoring_repository import ScoringJsonRepository
+
+    repo = ScoringJsonRepository(path=str(tmp_path / "s.json"))
+    repo.upsert_account(Account(
+        account_id="csv_a", name="A", segment="specialty",
+        framework="specialty", source="csv"), state="queued")
+    repo.upsert_account(Account(
+        account_id="csv_b", name="B", segment="specialty",
+        framework="specialty", source="csv"), state="queued")
+
+    assert {r["account_id"] for r in repo.queued()} == {"csv_a", "csv_b"}
+    assert repo.active() == []                          # queued is parked, not active
+    assert repo.get("csv_a")["elapsed_seconds"] is None  # no live clock when parked
+
+    score = ScoreResult(
+        account_id="csv_a", framework="specialty", framework_version="v",
+        dimensions=[Dimension(key="k", label="k", score=5, max=10)],
+        total=5, max_total=10, tier_band="medium", tier_label="Medium Fit",
+        cost_usd=0.21, scored_at=datetime.now(UTC).isoformat())
+    repo.save_score("csv_a", score)
+
+    s = repo.cost_summary()
+    assert s["scored_count"] == 1 and s["queued_count"] == 1
+    assert s["total_cost"] == 0.21 and s["month_cost"] == 0.21
+    assert s["monthly_budget"] == 200.0
+    assert s["budget_remaining"] == round(200.0 - 0.21, 2)
+    assert s["avg_cost"] == 0.21
+
+
 @pytest.mark.asyncio
 async def test_service_csv_skips_qa(monkeypatch, tmp_path):
     """CSV imports trust the Definitive facts, so QA is skipped (cost saving)."""
@@ -294,7 +329,7 @@ async def test_service_csv_skips_qa(monkeypatch, tmp_path):
     async def fake_qa(*a, **k):
         nonlocal qa_called
         qa_called = True
-        return QAResult(status="discrepancy")
+        return QAResult(status="discrepancy"), 0.01
     monkeypatch.setattr(svc_mod.engine, "score_account", _fake_hs_score)
     monkeypatch.setattr(svc_mod.qa, "qa_account", fake_qa)
 

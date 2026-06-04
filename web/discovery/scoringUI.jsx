@@ -263,7 +263,7 @@ function ScoringProgress({ account }) {
 window.ScoringProgress = ScoringProgress;
 
 // ── ScoredRow ────────────────────────────────────────────────────────────────
-function ScoredRow({ account, entering, onOpen, onScore, onLanding, tw }) {
+function ScoredRow({ account, entering, onOpen, onScore, onLanding, tw, batchRunning }) {
   const a = account;
   const t = tw || {};
   const compact = t.density === 'compact';
@@ -329,10 +329,16 @@ function ScoredRow({ account, entering, onOpen, onScore, onLanding, tw }) {
             : <ScoreRing total={a.total} max={a.max_total} band={tier.band} />)}
           {a.state === 'scoring' && <ScoreRing loading max={a.max_total} band="low" />}
           {a.state === 'queued' && (
-            <button onClick={stop(onScore)}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 py-2 text-[12px] font-medium text-white shadow-sm transition-colors hover:bg-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300">
-              <Icons.sparkle className="h-3.5 w-3.5" />Score now
-            </button>
+            batchRunning ? (
+              <span className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-100 px-3 py-2 text-[12px] font-medium text-zinc-400">
+                <Icons.refresh className="h-3.5 w-3.5 animate-spin" />In queue
+              </span>
+            ) : (
+              <button onClick={stop(onScore)}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 py-2 text-[12px] font-medium text-white shadow-sm transition-colors hover:bg-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300">
+                <Icons.sparkle className="h-3.5 w-3.5" />Score now
+              </button>
+            )
           )}
           {clickable && (
             <span className="text-zinc-300 transition-colors group-hover:text-zinc-500"><Icons.arrowRight className="h-4 w-4" /></span>
@@ -360,3 +366,84 @@ function ScoredSkeletonRow() {
   );
 }
 window.ScoredSkeletonRow = ScoredSkeletonRow;
+
+// ── CostMeter ─────────────────────────────────────────────────────────────────
+// The live spend control. Month-to-date scoring cost against the budget, plus
+// the on-demand batch action for parked (queued) accounts. Imports cost nothing
+// until scored here, and the confirm step won't let an accidental "score all"
+// blow past the remaining budget — it offers a budget-fit batch instead.
+function CostMeter({ stats, queuedCount, onScoreBatch, batchRunning }) {
+  const [confirm, setConfirm] = React.useState(false);
+  if (!stats) return null;
+  const fmt = (n) => '$' + (Number(n) || 0).toFixed(2);
+  const budget = stats.monthly_budget || 200;
+  const month = Number(stats.month_cost) || 0;
+  const remaining = stats.budget_remaining != null ? stats.budget_remaining : Math.max(0, budget - month);
+  const pct = Math.min(100, Math.round((month / budget) * 100));
+  const bar = pct >= 90 ? 'bg-rose-500' : pct >= 70 ? 'bg-amber-500' : 'bg-emerald-500';
+  const est = stats.avg_cost > 0 ? stats.avg_cost : 0.25;        // measured average once we have one
+  const allCost = queuedCount * est;
+  const overBudget = allCost > remaining + 0.001;
+  const fit = Math.max(0, Math.floor(remaining / est));          // accounts that fit the remaining budget
+  const fire = (limit) => { setConfirm(false); onScoreBatch(limit); };
+
+  return (
+    <div className="mt-4 rounded-2xl border border-zinc-200 bg-white px-5 py-4 shadow-sm shadow-zinc-900/[0.02]">
+      <div className="flex flex-wrap items-center justify-between gap-x-8 gap-y-4">
+        <div className="min-w-[240px] flex-1">
+          <div className="flex items-baseline justify-between gap-3">
+            <span className="text-[11px] font-medium uppercase tracking-wide text-zinc-400">Scoring spend · this month</span>
+            <span className="text-[12px] tabular-nums text-zinc-500"><span className="font-semibold text-zinc-800">{fmt(month)}</span> / {fmt(budget)}</span>
+          </div>
+          <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-zinc-100">
+            <div className={`h-full rounded-full ${bar} transition-all duration-500`} style={{ width: Math.max(2, pct) + '%' }} />
+          </div>
+          <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11.5px] text-zinc-400">
+            <span>{fmt(remaining)} left this month</span>
+            <span className="text-zinc-300">·</span>
+            <span>{fmt(stats.total_cost)} all-time</span>
+            {stats.avg_cost > 0 && (<><span className="text-zinc-300">·</span><span>{fmt(stats.avg_cost)}/account</span></>)}
+          </div>
+        </div>
+
+        {queuedCount > 0 && (
+          <div className="flex shrink-0 items-center gap-3">
+            {!confirm ? (
+              <>
+                <div className="text-right">
+                  <div className="text-[13px] font-semibold text-zinc-800">{queuedCount.toLocaleString()} queued</div>
+                  <div className="text-[11.5px] text-zinc-400">~{fmt(allCost)} to score all</div>
+                </div>
+                <button onClick={() => setConfirm(true)} disabled={batchRunning}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 py-2 text-[12.5px] font-medium text-white shadow-sm transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">
+                  {batchRunning
+                    ? (<><Icons.refresh className="h-3.5 w-3.5 animate-spin" />Scoring…</>)
+                    : (<><Icons.sparkle className="h-3.5 w-3.5" />Score queued</>)}
+                </button>
+              </>
+            ) : (
+              <div className="flex flex-col items-end gap-1.5">
+                {overBudget && (
+                  <span className="text-[11.5px] text-rose-600">Scoring all {queuedCount.toLocaleString()} (~{fmt(allCost)}) exceeds your {fmt(remaining)} remaining.</span>
+                )}
+                <div className="flex items-center gap-2">
+                  <button onClick={() => setConfirm(false)}
+                    className="rounded-lg px-2.5 py-1.5 text-[12px] font-medium text-zinc-500 transition-colors hover:bg-zinc-100">Cancel</button>
+                  {overBudget && fit > 0 && (
+                    <button onClick={() => fire(fit)}
+                      className="rounded-lg bg-indigo-600 px-3 py-1.5 text-[12px] font-medium text-white transition-colors hover:bg-indigo-700">Score {fit} within budget</button>
+                  )}
+                  <button onClick={() => fire(null)}
+                    className={`rounded-lg px-3 py-1.5 text-[12px] font-medium text-white transition-colors ${overBudget ? 'bg-rose-600 hover:bg-rose-700' : 'bg-indigo-600 hover:bg-indigo-700'}`}>
+                    Score all {queuedCount.toLocaleString()} (~{fmt(allCost)})
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+window.CostMeter = CostMeter;

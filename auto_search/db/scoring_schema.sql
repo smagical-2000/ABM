@@ -38,6 +38,8 @@ CREATE TABLE IF NOT EXISTS scored_accounts (
     recommendation        TEXT,
     qa                    JSONB,         -- {status,notes,corrections,tier_changing}
     model                 TEXT,
+    -- measured USD spend for this account (scorer + QA), for the cost meter
+    cost_usd              DOUBLE PRECISION NOT NULL DEFAULT 0,
     error_message         TEXT,
 
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -52,5 +54,6 @@ CREATE INDEX IF NOT EXISTS idx_scored_tier
     ON scored_accounts (tier_band)
     WHERE state = 'scored';
 
--- Additive migration for stores created before `phase` existed.
+-- Additive migrations for stores created before these columns existed.
 ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS phase TEXT;
+ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0;

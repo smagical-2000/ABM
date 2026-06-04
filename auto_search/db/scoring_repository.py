@@ -22,7 +22,11 @@ from auto_search.scoring.models import Account, ScoreResult
 
 logger = logging.getLogger(__name__)
 
-_ACTIVE_STATES = ("queued", "scoring")
+# "Active" = actively being scored (a live Claude call, costing money) — this
+# drives the dashboard shimmer + the activity poll. 'queued' is deliberately NOT
+# here: imports park in 'queued' for free until the user scores them on demand,
+# so a 1000-row import must not look like 1000 accounts mid-score.
+_ACTIVE_STATES = ("scoring",)
 
 
 # ── interface ─────────────────────────────────────────────────────────
@@ -37,7 +41,9 @@ class ScoringRepository(Protocol):
     def get(self, account_id: str) -> dict | None: ...
     def list_accounts(self) -> list[dict]: ...
     def active(self) -> list[dict]: ...
+    def queued(self) -> list[dict]: ...
     def exists(self, account_id: str) -> bool: ...
+    def cost_summary(self) -> dict: ...
 
 
 # ── shared row shaping ────────────────────────────────────────────────
@@ -52,7 +58,7 @@ def _row(account: dict) -> dict:
     """
     band, label = account.get("tier_band"), account.get("tier_label")
     state = account.get("state", "queued")
-    in_flight = state in ("scoring", "queued")
+    in_flight = state == "scoring"          # parked 'queued' has no live clock
     started = account.get("updated_at") if in_flight else None
     return {
         "phase": account.get("phase") if in_flight else None,
@@ -79,6 +85,7 @@ def _row(account: dict) -> dict:
         "firmographics": account.get("firmographics") or {},
         "discovery_signals": account.get("discovery_signals") or [],
         "model": account.get("model"),
+        "cost_usd": _as_float(account.get("cost_usd")),
         "error": account.get("error_message"),
         "scored_at": _iso(account.get("scored_at")),
         "created_at": _iso(account.get("created_at")),
@@ -95,12 +102,25 @@ def _score_fields(score: ScoreResult) -> dict:
         "recommendation": score.recommendation,
         "qa": score.qa.model_dump() if score.qa else None,
         "model": score.model,
+        "cost_usd": score.cost_usd,
         "scored_at": score.scored_at or datetime.now(UTC).isoformat(),
     }
 
 
 def _iso(dt) -> str | None:
     return dt.isoformat() if isinstance(dt, datetime) else dt
+
+
+def _as_float(v) -> float:
+    try:
+        return round(float(v), 4) if v is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _month_start_iso() -> str:
+    now = datetime.now(UTC)
+    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
 
 
 def _elapsed(dt) -> int | None:
@@ -207,7 +227,8 @@ class ScoringPostgresRepository:
                     state='scored', error_message=NULL, phase=NULL,
                     total=%(total)s, tier_band=%(band)s, tier_label=%(label)s,
                     dimensions=%(dims)s, recommendation=%(rec)s, qa=%(qa)s,
-                    model=%(model)s, scored_at=%(scored_at)s, updated_at=now()
+                    model=%(model)s, cost_usd=%(cost)s,
+                    scored_at=%(scored_at)s, updated_at=now()
                  WHERE account_id=%(id)s
              RETURNING account_id
                 """,
@@ -216,7 +237,8 @@ class ScoringPostgresRepository:
                     "label": f["tier_label"], "dims": json.dumps(f["dimensions"]),
                     "rec": f["recommendation"],
                     "qa": json.dumps(f["qa"]) if f["qa"] is not None else None,
-                    "model": f["model"], "scored_at": f["scored_at"],
+                    "model": f["model"], "cost": f["cost_usd"],
+                    "scored_at": f["scored_at"],
                 },
             ).fetchone()
         return self.get(account_id) if row else None
@@ -244,12 +266,36 @@ class ScoringPostgresRepository:
             ).fetchall()
         return [_row(r) for r in rows]
 
+    def queued(self) -> list[dict]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM scored_accounts WHERE state='queued' "
+                "ORDER BY created_at ASC"
+            ).fetchall()
+        return [_row(r) for r in rows]
+
     def exists(self, account_id: str) -> bool:
         with self._pool.connection() as conn:
             row = conn.execute(
                 "SELECT 1 FROM scored_accounts WHERE account_id=%s", (account_id,)
             ).fetchone()
         return row is not None
+
+    def cost_summary(self) -> dict:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                  COALESCE(SUM(cost_usd), 0) AS total_cost,
+                  COALESCE(SUM(cost_usd) FILTER (
+                      WHERE scored_at >= date_trunc('month', now())), 0) AS month_cost,
+                  COUNT(*) FILTER (WHERE state='scored')  AS scored_count,
+                  COUNT(*) FILTER (WHERE state='queued')  AS queued_count
+                FROM scored_accounts
+                """
+            ).fetchone()
+        return _cost_summary(row["total_cost"], row["month_cost"],
+                             row["scored_count"], row["queued_count"])
 
 
 # ── JSON file (local/dev) ─────────────────────────────────────────────
@@ -322,8 +368,29 @@ class ScoringJsonRepository:
         return [_row(r) for r in self._store.values()
                 if r.get("state") in _ACTIVE_STATES]
 
+    def queued(self) -> list[dict]:
+        rows = [r for r in self._store.values() if r.get("state") == "queued"]
+        rows.sort(key=lambda r: r.get("created_at") or "")
+        return [_row(r) for r in rows]
+
     def exists(self, account_id: str) -> bool:
         return account_id in self._store
+
+    def cost_summary(self) -> dict:
+        month_start = _month_start_iso()
+        total = month = 0.0
+        scored = queued = 0
+        for r in self._store.values():
+            state = r.get("state")
+            if state == "scored":
+                scored += 1
+                c = _as_float(r.get("cost_usd"))
+                total += c
+                if (_iso(r.get("scored_at")) or "") >= month_start:
+                    month += c
+            elif state == "queued":
+                queued += 1
+        return _cost_summary(total, month, scored, queued)
 
     # -- internals --
 
@@ -343,6 +410,26 @@ class ScoringJsonRepository:
 
 
 # ── helpers + factory ─────────────────────────────────────────────────
+
+
+# The board-approved scoring budget. Surfaced with spend so the meter reads
+# against a fixed number; override with SCORING_MONTHLY_BUDGET if it changes.
+_MONTHLY_BUDGET = _as_float(os.getenv("SCORING_MONTHLY_BUDGET")) or 200.0
+
+
+def _cost_summary(total, month, scored, queued) -> dict:
+    total = _as_float(total)
+    month = _as_float(month)
+    scored = int(scored or 0)
+    return {
+        "total_cost": total,
+        "month_cost": month,
+        "monthly_budget": _MONTHLY_BUDGET,
+        "budget_remaining": round(max(0.0, _MONTHLY_BUDGET - month), 2),
+        "scored_count": scored,
+        "queued_count": int(queued or 0),
+        "avg_cost": round(total / scored, 4) if scored else 0.0,
+    }
 
 
 def _max_total(account: Account) -> int:

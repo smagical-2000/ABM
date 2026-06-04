@@ -92,6 +92,9 @@ class ScoreResult(BaseModel):
     qa: QAResult | None = None
     model: str = ""
     scored_at: str | None = None
+    # Measured USD spend for this account: scorer call + QA call (0 when QA is
+    # skipped). Summed across accounts for the live monthly cost meter.
+    cost_usd: float = 0.0
 
     def clamp(self) -> ScoreResult:
         """Clamp each dimension to its ceiling and recompute the total.

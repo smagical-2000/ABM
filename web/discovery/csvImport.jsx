@@ -1,12 +1,13 @@
 // ── CSV import wizard ────────────────────────────────────────────────────────
 // Choose a file → confirm the detected schema + column mapping → review new vs
 // known → import. The file text is sent to the API: /preview parses + maps
-// without persisting; /import enqueues the new accounts and starts scoring.
+// without persisting; /import parks the new accounts as 'queued' (free) to be
+// scored on demand, so importing a large file never spends money by itself.
 const { useState, useRef } = React;
 
-// Rough Sonnet cost per imported account: one scoring web-search call, no QA
-// (Definitive facts are trusted). Used only to show an estimate before import.
-const EST_COST_PER_ACCOUNT = 0.3;
+// Rough Sonnet cost per account when scored later: one scoring web-search call,
+// no QA (Definitive facts are trusted). Only used to estimate the queue's cost.
+const EST_COST_PER_ACCOUNT = 0.25;
 
 function StepDot({ n, label, active, done }) {
   return (
@@ -144,14 +145,14 @@ function ImportModal({ onClose, onImported, pushToast }) {
               <div className="flex items-center gap-3">
                 <div className="flex-1 rounded-xl border border-emerald-200 bg-emerald-50/50 px-3.5 py-2.5">
                   <div className="text-[20px] font-semibold tabular-nums text-emerald-700">{preview.new_count}</div>
-                  <div className="text-[12px] text-emerald-600/80">new — will be scored</div>
+                  <div className="text-[12px] text-emerald-600/80">new, queued to score</div>
                 </div>
                 <div className="flex-1 rounded-xl border border-zinc-200 bg-zinc-50/60 px-3.5 py-2.5">
                   <div className="text-[20px] font-semibold tabular-nums text-zinc-500">{preview.known_count}</div>
-                  <div className="text-[12px] text-zinc-400">already known — skipped</div>
+                  <div className="text-[12px] text-zinc-400">already known, skipped</div>
                 </div>
               </div>
-              <p className="mt-3 text-[12px] text-zinc-400">Estimated <span className="font-medium text-zinc-500">~${Math.max(1, Math.round(preview.new_count * EST_COST_PER_ACCOUNT))}</span> to score on Sonnet. Imports are scored without the independent QA pass — the Definitive facts are taken as authoritative.</p>
+              <p className="mt-3 text-[12px] text-zinc-400">Importing is free. Accounts land in a <span className="font-medium text-zinc-500">queue</span>, then you score them on demand from the Scored tab (about <span className="font-medium text-zinc-500">~${Math.max(1, Math.round(preview.new_count * EST_COST_PER_ACCOUNT))}</span> total on Sonnet, no separate QA pass since the Definitive facts are authoritative).</p>
               <div className="mt-4 max-h-[220px] overflow-y-auto rounded-xl border border-zinc-200">
                 <table className="w-full text-[12.5px]">
                   <thead className="sticky top-0 bg-zinc-50/95 text-[11px] uppercase tracking-wide text-zinc-400">
@@ -189,8 +190,8 @@ function ImportModal({ onClose, onImported, pushToast }) {
           {step === 3 && (
             <button onClick={commit} disabled={busy || preview.new_count === 0}
               className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40">
-              {busy ? <Icons.refresh className="h-4 w-4 animate-spin" /> : <Icons.sparkle className="h-4 w-4" />}
-              Import &amp; score {preview.new_count}{preview.new_count > 0 ? ` (~$${Math.max(1, Math.round(preview.new_count * EST_COST_PER_ACCOUNT))})` : ''}
+              {busy ? <Icons.refresh className="h-4 w-4 animate-spin" /> : <Icons.upload className="h-4 w-4" />}
+              Import {preview.new_count} to queue
             </button>
           )}
         </div>

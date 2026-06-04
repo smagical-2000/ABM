@@ -155,13 +155,19 @@ async def call_with_web_search(
     max_searches: int,
     max_tokens: int,
     model: str | None = None,
+    temperature: float | None = None,
 ) -> Any:
     """Call Claude with the web_search tool, retrying transient + rate limits.
 
     Returns the raw Anthropic response (multi-block: text + tool-use +
     tool-result). Use extract_text() / extract_web_searches() to read it.
     Non-retryable errors (e.g. BadRequest) propagate to the caller.
+
+    temperature=0 makes the model deterministic, so re-scoring the same account
+    returns the same answer (the only residual variance is what web_search
+    itself returns on the day).
     """
+    extra = {} if temperature is None else {"temperature": temperature}
     return await _create_with_retries(lambda: get_client().messages.create(
         model=model or DEFAULT_MODEL,
         max_tokens=max_tokens,
@@ -172,6 +178,7 @@ async def call_with_web_search(
             "max_uses": max_searches,
         }],
         messages=[{"role": "user", "content": user_message}],
+        **extra,
     ))
 
 
@@ -181,6 +188,7 @@ async def call_plain(
     user_message: str,
     max_tokens: int,
     model: str | None = None,
+    temperature: float | None = None,
 ) -> Any:
     """Call Claude with NO tools (no web_search), retrying transient failures.
 
@@ -188,11 +196,13 @@ async def call_plain(
     the context it needs in the prompt (e.g. judging a job posting from its
     title + description). Much cheaper/faster than the web_search path.
     """
+    extra = {} if temperature is None else {"temperature": temperature}
     return await _create_with_retries(lambda: get_client().messages.create(
         model=model or DEFAULT_MODEL,
         max_tokens=max_tokens,
         system=_cached_system(system),
         messages=[{"role": "user", "content": user_message}],
+        **extra,
     ))
 
 

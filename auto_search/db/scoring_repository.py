@@ -353,12 +353,15 @@ class ScoringPostgresRepository:
                       WHERE dossier_generated_at >= date_trunc('month', now())), 0)
                     AS month_cost,
                   COUNT(*) FILTER (WHERE state='scored')  AS scored_count,
-                  COUNT(*) FILTER (WHERE state='queued')  AS queued_count
+                  COUNT(*) FILTER (WHERE state='queued')  AS queued_count,
+                  COALESCE(SUM(cost_usd) FILTER (WHERE source='csv' AND state='scored'), 0) AS csv_cost,
+                  COUNT(*) FILTER (WHERE source='csv' AND state='scored') AS csv_count
                 FROM scored_accounts
                 """
             ).fetchone()
+        csv_avg = (row["csv_cost"] / row["csv_count"]) if row["csv_count"] else 0.0
         return _cost_summary(row["total_cost"], row["month_cost"],
-                             row["scored_count"], row["queued_count"])
+                             row["scored_count"], row["queued_count"], csv_avg)
 
     def recover_orphaned_scoring(self, older_than_seconds: int = 0) -> int:
         """Return stuck 'scoring' accounts to the queue. With the default 0 this
@@ -502,12 +505,15 @@ class ScoringJsonRepository:
 
     def cost_summary(self) -> dict:
         month_start = _month_start_iso()
-        total = month = 0.0
-        scored = queued = 0
+        total = month = csv_cost = 0.0
+        scored = queued = csv_count = 0
         for r in self._store.values():
             state = r.get("state")
             if state == "scored":
                 scored += 1
+                if r.get("source") == "csv":
+                    csv_cost += _as_float(r.get("cost_usd"))
+                    csv_count += 1
             elif state == "queued":
                 queued += 1
             c = _as_float(r.get("cost_usd"))
@@ -520,7 +526,8 @@ class ScoringJsonRepository:
                 total += dc
                 if (_iso(r.get("dossier_generated_at")) or "") >= month_start:
                     month += dc
-        return _cost_summary(total, month, scored, queued)
+        csv_avg = (csv_cost / csv_count) if csv_count else 0.0
+        return _cost_summary(total, month, scored, queued, csv_avg)
 
     def recover_orphaned_scoring(self, older_than_seconds: int = 0) -> int:
         n = 0
@@ -588,7 +595,7 @@ class ScoringJsonRepository:
 _MONTHLY_BUDGET = _as_float(os.getenv("SCORING_MONTHLY_BUDGET")) or 200.0
 
 
-def _cost_summary(total, month, scored, queued) -> dict:
+def _cost_summary(total, month, scored, queued, csv_avg=0.0) -> dict:
     total = _as_float(total)
     month = _as_float(month)
     scored = int(scored or 0)
@@ -600,6 +607,9 @@ def _cost_summary(total, month, scored, queued) -> dict:
         "scored_count": scored,
         "queued_count": int(queued or 0),
         "avg_cost": round(total / scored, 4) if scored else 0.0,
+        # measured average for CSV-source accounts only — the right basis for a
+        # CSV import estimate (CSV scoring skips QA, so it is cheaper).
+        "csv_avg_cost": round(_as_float(csv_avg), 4),
     }
 
 

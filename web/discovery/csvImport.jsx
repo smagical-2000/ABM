@@ -3,11 +3,12 @@
 // known → import. The file text is sent to the API: /preview parses + maps
 // without persisting; /import parks the new accounts as 'queued' (free) to be
 // scored on demand, so importing a large file never spends money by itself.
-const { useState, useRef } = React;
+const { useState, useRef, useEffect } = React;
 
-// Rough Sonnet cost per account when scored later: one scoring web-search call,
-// no QA (Definitive facts are trusted). Only used to estimate the queue's cost.
-const EST_COST_PER_ACCOUNT = 0.25;
+// Fallback per-account cost until we have a measured CSV average from the cost
+// meter (one scoring web-search call, no QA - Definitive facts are trusted).
+const EST_COST_PER_ACCOUNT = 0.15;
+const fmtEst = (n) => (n < 10 ? n.toFixed(2) : String(Math.round(n)));
 
 function StepDot({ n, label, active, done }) {
   return (
@@ -28,7 +29,19 @@ function ImportModal({ onClose, onImported, pushToast }) {
   const [preview, setPreview] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [estPer, setEstPer] = useState(EST_COST_PER_ACCOUNT);   // measured CSV average if we have one
+  const [measured, setMeasured] = useState(false);
   const inputRef = useRef(null);
+
+  // Use the real measured CSV average (cheaper than the blended average) so the
+  // estimate reflects what scoring this batch will actually cost.
+  useEffect(() => {
+    window.API.scoringStats().then((s) => {
+      if (!s) return;
+      const per = s.csv_avg_cost > 0 ? s.csv_avg_cost : s.avg_cost;
+      if (per > 0) { setEstPer(per); setMeasured(true); }
+    }).catch(() => {});
+  }, []);
 
   async function ingest(file) {
     if (!file) return;
@@ -152,7 +165,7 @@ function ImportModal({ onClose, onImported, pushToast }) {
                   <div className="text-[12px] text-zinc-400">already known, skipped</div>
                 </div>
               </div>
-              <p className="mt-3 text-[12px] text-zinc-400">Importing is free. Accounts land in a <span className="font-medium text-zinc-500">queue</span>, then you score them on demand from the Scored tab (about <span className="font-medium text-zinc-500">~${Math.max(1, Math.round(preview.new_count * EST_COST_PER_ACCOUNT))}</span> total on Sonnet, no separate QA pass since the Definitive facts are authoritative).</p>
+              <p className="mt-3 text-[12px] text-zinc-400">Importing is free. Accounts land in a <span className="font-medium text-zinc-500">queue</span>, then you score them on demand from the Scored tab — about <span className="font-medium text-zinc-500">~${fmtEst(preview.new_count * estPer)}</span> total{measured ? <span> (≈${`$${estPer.toFixed(2)}`}/account from your recent imports)</span> : ' on Sonnet'}, no separate QA pass since the Definitive facts are authoritative.</p>
               <div className="mt-4 max-h-[220px] overflow-y-auto rounded-xl border border-zinc-200">
                 <table className="w-full text-[12.5px]">
                   <thead className="sticky top-0 bg-zinc-50/95 text-[11px] uppercase tracking-wide text-zinc-400">

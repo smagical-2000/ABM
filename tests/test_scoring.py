@@ -310,6 +310,7 @@ def test_repo_queued_and_cost_summary(tmp_path):
     assert s["monthly_budget"] == 200.0
     assert s["budget_remaining"] == round(200.0 - 0.21, 2)
     assert s["avg_cost"] == 0.21
+    assert s["csv_avg_cost"] == 0.21                    # CSV-only average for the import estimate
 
 
 def test_repo_recovers_orphaned_scoring(tmp_path):

@@ -61,6 +61,7 @@ async def score_account(account: Account) -> ScoreResult:
         response = await llm.call_with_web_search(
             system=system, user_message=user,
             max_searches=_max_searches(account), max_tokens=_MAX_TOKENS, model=_MODEL,
+            temperature=0,                       # deterministic: re-scores stay consistent
         )
     except Exception as e:  # noqa: BLE001 — surface as a scoring failure
         raise ScoringError(f"LLM call failed: {type(e).__name__}: {e}") from e

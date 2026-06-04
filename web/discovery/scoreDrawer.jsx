@@ -39,7 +39,7 @@ function QAVerdict({ qa }) {
   );
 }
 
-function ScoreDrawer({ account, onClose, onRescore, onAddToList, onOpenLanding }) {
+function ScoreDrawer({ account, onClose, onRescore, onOpenLanding }) {
   const open = !!account;
   const animate = typeof document === 'undefined' || document.visibilityState !== 'hidden';
   const a = account;
@@ -196,13 +196,9 @@ function ScoreDrawer({ account, onClose, onRescore, onAddToList, onOpenLanding }
                   className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2.5 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300">
                   <window.Icons.doc className="h-4 w-4" />Open Landing Page
                 </button>
-                <button onClick={onAddToList}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3.5 py-2.5 text-[13px] font-medium text-zinc-600 transition-colors hover:bg-zinc-50 hover:text-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200">
-                  <window.Icons.plus className="h-4 w-4" />Add to list
-                </button>
-                <button onClick={onRescore} title="Re-score"
-                  className="inline-flex items-center justify-center rounded-lg border border-zinc-200 bg-white p-2.5 text-zinc-500 transition-colors hover:bg-zinc-50 hover:text-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200">
-                  <Icons.refresh className="h-4 w-4" />
+                <button onClick={onRescore} title="Re-score this account"
+                  className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3.5 py-2.5 text-[13px] font-medium text-zinc-500 transition-colors hover:bg-zinc-50 hover:text-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200">
+                  <Icons.refresh className="h-4 w-4" />Re-score
                 </button>
               </div>
             </div>

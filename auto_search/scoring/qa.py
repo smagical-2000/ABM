@@ -53,6 +53,7 @@ async def qa_account(
         response = await llm.call_with_web_search(
             system=system, user_message=user,
             max_searches=max_searches, max_tokens=_MAX_TOKENS, model=_MODEL,
+            temperature=0,                       # deterministic verification
         )
         data = llm.parse_json_object(llm.extract_text(response))
     except Exception as e:  # noqa: BLE001 — QA must not fail the score

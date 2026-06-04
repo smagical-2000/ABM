@@ -771,7 +771,6 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
 
       <ScoreDrawer account={openAccount} onClose={() => setOpenAcc(null)}
         onRescore={() => { if (openAccount) handleScore(openAccount.account_id); setOpenAcc(null); }}
-        onAddToList={() => pushToast(`Added ${openAccount ? openAccount.name : 'account'} to target list`, 'success')}
         onOpenLanding={() => { if (openAccount) { setOpenLanding(openAccount.account_id); setOpenAcc(null); } }} />
 
       <LandingPageModal account={landingAccount} onClose={() => setOpenLanding(null)} pushToast={pushToast} />

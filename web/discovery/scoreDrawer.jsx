@@ -79,6 +79,12 @@ function ScoreDrawer({ account, onClose, onRescore, onAddToList, onOpenLanding }
               <div className="mt-3 flex flex-wrap items-center gap-2 text-[13px] text-zinc-500">
                 <SegmentBadge segment={a.segment} size="lg" />
                 <SourceTag source={a.source} />
+                {a.import_label && (<>
+                  <span className="text-zinc-300">·</span>
+                  <span className="inline-flex items-center gap-1 text-[12px] text-zinc-400" title={`Imported from ${a.import_label}`}>
+                    <window.Icons.doc className="h-3.5 w-3.5 text-zinc-400" />{a.import_label.split(' · ')[0]}
+                  </span>
+                </>)}
                 {fw && (<><span className="text-zinc-300">·</span><span className="text-[12px] text-zinc-400">{fw.label} rubric · {fw.version}</span></>)}
                 <span className="inline-flex items-center gap-1.5 rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] font-medium text-zinc-500 ring-1 ring-inset ring-zinc-200"><window.Icons.doc className="h-3 w-3 text-zinc-400" />Landing Page ready</span>
               </div>

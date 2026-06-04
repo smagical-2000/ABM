@@ -25,7 +25,7 @@ from auto_search.scoring.models import Account, QACorrection, QAResult, ScoreRes
 logger = logging.getLogger(__name__)
 
 _MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
-_MAX_SEARCHES = 5
+_MAX_SEARCHES = 3
 _MAX_TOKENS = 1400
 
 

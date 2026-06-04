@@ -16,7 +16,7 @@ from typing import Any
 
 from auto_search.scoring import engine, qa
 from auto_search.scoring.frameworks import FRAMEWORKS, framework_for_segment, resolve_tier
-from auto_search.scoring.models import Account
+from auto_search.scoring.models import Account, QAResult
 
 logger = logging.getLogger(__name__)
 
@@ -67,8 +67,19 @@ class ScoringService:
         band = resolve_tier(fw, score.total, [d.model_dump() for d in score.dimensions])
         score.tier_band, score.tier_label = band.band, band.label
 
-        self._repo.set_phase(account_id, "verifying")
-        score.qa = await qa.qa_account(account, score, fw)
+        if account.source == "csv":
+            # Definitive Healthcare firmographics are authoritative, so an
+            # independent QA pass would mostly re-verify facts we already trust.
+            # Skip it to save a web_search call per imported account.
+            score.qa = QAResult(
+                status="verified",
+                notes="Firmographics taken as authoritative from the Definitive "
+                      "import; independent QA skipped to save cost.",
+                corrections=[],
+            )
+        else:
+            self._repo.set_phase(account_id, "verifying")
+            score.qa = await qa.qa_account(account, score, fw)
         saved = self._repo.save_score(account_id, score)
         logger.info("scored %s -> %s %d/%d (QA: %s)",
                     account.name, score.tier_label, score.total, score.max_total,

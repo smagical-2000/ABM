@@ -4,6 +4,10 @@
 // without persisting; /import enqueues the new accounts and starts scoring.
 const { useState, useRef } = React;
 
+// Rough Sonnet cost per imported account: one scoring web-search call, no QA
+// (Definitive facts are trusted). Used only to show an estimate before import.
+const EST_COST_PER_ACCOUNT = 0.3;
+
 function StepDot({ n, label, active, done }) {
   return (
     <div className="flex items-center gap-2">
@@ -147,6 +151,7 @@ function ImportModal({ onClose, onImported, pushToast }) {
                   <div className="text-[12px] text-zinc-400">already known — skipped</div>
                 </div>
               </div>
+              <p className="mt-3 text-[12px] text-zinc-400">Estimated <span className="font-medium text-zinc-500">~${Math.max(1, Math.round(preview.new_count * EST_COST_PER_ACCOUNT))}</span> to score on Sonnet. Imports are scored without the independent QA pass — the Definitive facts are taken as authoritative.</p>
               <div className="mt-4 max-h-[220px] overflow-y-auto rounded-xl border border-zinc-200">
                 <table className="w-full text-[12.5px]">
                   <thead className="sticky top-0 bg-zinc-50/95 text-[11px] uppercase tracking-wide text-zinc-400">
@@ -185,7 +190,7 @@ function ImportModal({ onClose, onImported, pushToast }) {
             <button onClick={commit} disabled={busy || preview.new_count === 0}
               className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40">
               {busy ? <Icons.refresh className="h-4 w-4 animate-spin" /> : <Icons.sparkle className="h-4 w-4" />}
-              Import &amp; score {preview.new_count}
+              Import &amp; score {preview.new_count}{preview.new_count > 0 ? ` (~$${Math.max(1, Math.round(preview.new_count * EST_COST_PER_ACCOUNT))})` : ''}
             </button>
           )}
         </div>

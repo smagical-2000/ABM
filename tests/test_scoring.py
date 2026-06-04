@@ -274,3 +274,32 @@ async def test_service_marks_error_on_failure(monkeypatch, tmp_path):
 
     out = await svc.run_scoring("acc_x")
     assert out["state"] == "error" and "LLM down" in (out["error"] or "")
+
+
+@pytest.mark.asyncio
+async def test_service_csv_skips_qa(monkeypatch, tmp_path):
+    """CSV imports trust the Definitive facts, so QA is skipped (cost saving)."""
+    from auto_search.db.scoring_repository import ScoringJsonRepository
+    from auto_search.scoring import service as svc_mod
+    from auto_search.scoring.service import ScoringService
+
+    svc = ScoringService(ScoringJsonRepository(path=str(tmp_path / "s.json")))
+    svc.enqueue_csv([Account(
+        account_id="csv_x", name="X Health", segment="health_system",
+        framework="health_system", source="csv",
+        firmographics={"Net Patient Revenue": "$1.4B"})], state="scoring")
+
+    qa_called = False
+
+    async def fake_qa(*a, **k):
+        nonlocal qa_called
+        qa_called = True
+        return QAResult(status="discrepancy")
+    monkeypatch.setattr(svc_mod.engine, "score_account", _fake_hs_score)
+    monkeypatch.setattr(svc_mod.qa, "qa_account", fake_qa)
+
+    scored = await svc.run_scoring("csv_x")
+    assert qa_called is False                         # QA skipped for CSV
+    assert scored["qa"]["status"] == "verified"
+    assert "skipped" in scored["qa"]["notes"].lower()
+    assert scored["state"] == "scored"

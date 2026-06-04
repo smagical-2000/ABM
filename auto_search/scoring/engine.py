@@ -29,8 +29,12 @@ from auto_search.scoring.models import Account, Dimension, ScoreResult
 logger = logging.getLogger(__name__)
 
 _MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
-_MAX_SEARCHES = 6
-_MAX_TOKENS = 2200
+# web_search is the dominant cost (each result is re-sent on later turns, so
+# searches compound the input tokens). 4 is enough once known facts are
+# injected; the scorer spends them on competitor/pain/intent, not on facts it
+# already has.
+_MAX_SEARCHES = 4
+_MAX_TOKENS = 2000
 
 
 class ScoringError(RuntimeError):
@@ -102,13 +106,14 @@ def _system_prompt(fw: Framework) -> str:
 
         {fw.intro}
 
-        Use the web_search tool to research the company's website, size, tech
-        stack, leadership, and recent news. Use only publicly available
-        information. When a fact is given to you as a KNOWN FACT, treat it as
-        authoritative and do not re-research it. When a value is genuinely
-        missing, infer logically from size/specialty/patterns and flag it
-        "inferred"; if it cannot be reasonably inferred, score it low and flag
-        it "unknown".
+        Use the web_search tool sparingly to research the company. You have a
+        small search budget, so spend it only on what you do NOT already have:
+        competitor/automation vendors, pain signals, leadership changes, and
+        recent intent. When a fact is given to you as a KNOWN FACT, treat it as
+        authoritative and do NOT search for it. Use only publicly available
+        information. When a value is genuinely missing, infer logically from
+        size/specialty/patterns and flag it "inferred"; if it cannot be
+        reasonably inferred, score it low and flag it "unknown".
 
         Score every dimension below. The score must not exceed the dimension's
         ceiling.

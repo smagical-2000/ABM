@@ -22,14 +22,17 @@ function QAVerdict({ qa }) {
         ? { wrap: 'border-amber-200 bg-amber-50/60', ic: 'text-amber-500', head: 'text-amber-800', body: 'text-amber-700' }
         : { wrap: 'border-zinc-200 bg-zinc-50/70', ic: 'text-zinc-400', head: 'text-zinc-700', body: 'text-zinc-500' };
   const heading = qa.tier_changing ? 'Tier-changing discrepancy' : m.label;
+  const ran = qa.status !== 'skipped';
   return (
     <div className={`rounded-xl border px-4 py-3.5 ${tone.wrap}`}>
       <div className="flex items-center gap-2">
         <Icon className={`h-4 w-4 ${tone.ic}`} />
         <span className={`text-[13px] font-semibold ${tone.head}`}>{heading}</span>
-        <span className="ml-auto inline-flex items-center gap-1 text-[11px] text-zinc-400">
-          <window.Icons.sparkle className="h-3.5 w-3.5" />Independent pass
-        </span>
+        {ran && (
+          <span className="ml-auto inline-flex items-center gap-1 text-[11px] text-zinc-400">
+            <window.Icons.sparkle className="h-3.5 w-3.5" />Independent pass
+          </span>
+        )}
       </div>
       <p className={`mt-2 text-[13px] leading-relaxed ${tone.body} text-pretty`}>{qa.notes}</p>
     </div>
@@ -88,7 +91,10 @@ function ScoreDrawer({ account, onClose, onRescore, onAddToList, onOpenLanding }
                 <ScoreRing total={a.total} max={a.max_total} band={tier.band} size="lg" />
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
-                    <TierBadge band={tier.band} label={tier.label} size="lg" />
+                    <TierBadge band={tier.band} label={window.fitWord(tier.band)} size="lg" />
+                    {a.segment === 'health_system' && tier.label && (
+                      <span className="text-[12px] font-medium text-zinc-400">{tier.label}</span>
+                    )}
                   </div>
                   <div className="mt-2 text-[13px] text-zinc-500">
                     <span className="font-semibold text-zinc-800">{a.total}</span> of {a.max_total} points
@@ -144,12 +150,19 @@ function ScoreDrawer({ account, onClose, onRescore, onAddToList, onOpenLanding }
                 </div>
               </div>
 
-              {/* Firmographics */}
+              {/* Known facts — carried into the scorer so it does not re-research */}
               {a.firmographics && Object.keys(a.firmographics).length > 0 && (
                 <div className="mt-7">
-                  <SectionLabel>Known facts {a.source === 'csv' ? '· from import' : ''}</SectionLabel>
+                  <SectionLabel>Known facts · {a.source === 'csv' ? 'from import' : 'from discovery'}</SectionLabel>
                   <div className="rounded-xl border border-zinc-200 px-4 py-1">
-                    {Object.entries(a.firmographics).map(([k, v]) => <ScoreField key={k} label={k}>{v}</ScoreField>)}
+                    {Object.entries(a.firmographics).map(([k, v]) => (
+                      String(v).length > 48 ? (
+                        <div key={k} className="border-b border-zinc-100 py-2.5 last:border-0">
+                          <div className="text-[12px] text-zinc-400">{k}</div>
+                          <div className="mt-1 text-[13px] leading-relaxed text-zinc-700 text-pretty">{v}</div>
+                        </div>
+                      ) : <ScoreField key={k} label={k}>{v}</ScoreField>
+                    ))}
                   </div>
                 </div>
               )}

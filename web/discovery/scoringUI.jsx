@@ -55,6 +55,18 @@ const BAND_STYLE = {
 };
 window.BAND_STYLE = BAND_STYLE;
 
+// One fit vocabulary across every segment — the ring color carries it, so this
+// is just the word + legend tone. Tier 1-4 language is kept only inside the
+// Health System detail (and any board export), never on the dashboard.
+const FIT_META = {
+  high: { word: 'High', dot: 'bg-emerald-500', tone: 'text-emerald-600' },
+  medium: { word: 'Medium', dot: 'bg-amber-500', tone: 'text-amber-600' },
+  low: { word: 'Low', dot: 'bg-zinc-400', tone: 'text-zinc-500' },
+  out: { word: 'Not a fit', dot: 'bg-rose-500', tone: 'text-rose-600' },
+};
+window.FIT_META = FIT_META;
+window.fitWord = (band) => (FIT_META[band] || FIT_META.low).word;
+
 // ── ScoreRing ────────────────────────────────────────────────────────────────
 function ScoreRing({ total, max, band, size = 'sm', loading = false }) {
   const dim = size === 'lg' ? 92 : size === 'md' ? 64 : 52;
@@ -105,9 +117,10 @@ window.TierBadge = TierBadge;
 
 // ── QABadge ──────────────────────────────────────────────────────────────────
 const QA_META = {
-  verified: { label: 'QA verified', icon: 'shieldCheck', cls: 'bg-emerald-50 text-emerald-700 ring-emerald-100', iccls: 'text-emerald-500' },
+  verified: { label: 'Independently verified', icon: 'shieldCheck', cls: 'bg-emerald-50 text-emerald-700 ring-emerald-100', iccls: 'text-emerald-500' },
   discrepancy: { label: 'QA discrepancy', icon: 'alert', cls: 'bg-amber-50 text-amber-700 ring-amber-100', iccls: 'text-amber-500' },
-  unverifiable: { label: 'Unverifiable', icon: 'help', cls: 'bg-zinc-100 text-zinc-500 ring-zinc-200', iccls: 'text-zinc-400' },
+  unverifiable: { label: 'Could not verify', icon: 'help', cls: 'bg-zinc-100 text-zinc-500 ring-zinc-200', iccls: 'text-zinc-400' },
+  skipped: { label: 'QA not run', icon: 'help', cls: 'bg-zinc-100 text-zinc-500 ring-zinc-200', iccls: 'text-zinc-400' },
 };
 window.QA_META = QA_META;
 
@@ -273,69 +286,43 @@ window.ScoringProgress = ScoringProgress;
 // ── ScoredRow ────────────────────────────────────────────────────────────────
 function ScoredRow({ account, entering, onOpen, onScore, onLanding, tw, batchRunning }) {
   const a = account;
-  const t = tw || {};
-  const compact = t.density === 'compact';
-  const showQA = t.showQA !== false;
-  const numberDisplay = t.scoreDisplay === 'number';
+  const compact = (tw || {}).density === 'compact';
   const tier = a.tier || (a.total != null ? window.tierFor(a.framework, a.total) : null);
   const stop = (fn) => (e) => { e.stopPropagation(); fn && fn(); };
   const clickable = a.state === 'scored';
+  // The only QA signal loud enough for the at-a-glance row: an independent
+  // disagreement that moves the fit tier. Everything else lives in the drawer.
+  const flagged = clickable && a.qa && a.qa.tier_changing;
   return (
     <div
       onClick={clickable ? onOpen : undefined}
-      className={`group relative border-b border-zinc-100 px-6 ${compact ? 'py-2.5' : 'py-4'} transition-all duration-500
+      className={`group relative border-b border-zinc-100 px-6 ${compact ? 'py-3' : 'py-4'} transition-all duration-500
         ${clickable ? 'cursor-pointer hover:bg-zinc-50/70' : ''}
         ${entering ? 'opacity-0 translate-y-1' : 'opacity-100 translate-y-0'}`}>
       <div className="flex items-center gap-4">
-        {/* Left: identity */}
+        {/* Left: identity only — the score breakdown opens in the drawer */}
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2.5">
             <h3 className="truncate text-[15px] font-semibold text-zinc-900">{a.name}</h3>
             <SegmentBadge segment={a.segment} />
-          </div>
-          <div className={`${compact ? 'mt-1' : 'mt-2'} flex flex-wrap items-center gap-2`}>
-            {a.state === 'scored' && tier && <TierBadge band={tier.band} label={tier.label} />}
-            {a.state === 'scored' && showQA && a.qa && <QABadge status={a.qa.status} tierChanging={a.qa.tier_changing} />}
-            {a.state === 'scoring' && (
-              <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-600 ring-1 ring-inset ring-indigo-100">
-                <span className="relative flex h-1.5 w-1.5"><span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-indigo-400 opacity-70" /><span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-indigo-500" /></span>
-                {a.phase === 'verifying' ? 'Verifying…' : 'Scoring…'}
-              </span>
-            )}
-            {a.state === 'queued' && (
-              <span className="inline-flex items-center gap-1.5 rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] font-medium text-zinc-500 ring-1 ring-inset ring-zinc-200">
-                Not scored yet
-              </span>
+            {flagged && (
+              <span title="Independent QA disagrees on a fact that moves the fit. Open to review."
+                className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" />
             )}
           </div>
-          <div className={`${compact ? 'mt-1' : 'mt-2'} flex items-center gap-1.5 text-[12px] text-zinc-400`}>
+          <div className="mt-1.5 flex items-center gap-1.5 text-[12px] text-zinc-400">
             <SourceTag source={a.source} />
-            <span className="text-zinc-300">·</span>
-            {a.state === 'scored'
-              ? <span>scored {relativeTime(a.scored_at)}</span>
-              : a.state === 'scoring'
-                ? <span>{a.phase === 'verifying' ? 'verifying…' : 'scoring…'}</span>
-                : <span>awaiting score</span>}
-            {a.approximate_employees && (<><span className="text-zinc-300">·</span><span>~{a.approximate_employees.toLocaleString()} staff</span></>)}
+            {a.state === 'scored' && (<><span className="text-zinc-300">·</span><span>scored {relativeTime(a.scored_at)}</span></>)}
+            {a.state === 'queued' && (<><span className="text-zinc-300">·</span><span>not scored</span></>)}
+            {a.state === 'error' && (<><span className="text-zinc-300">·</span><span>score failed</span></>)}
           </div>
         </div>
 
-        {/* Middle: pillar scores (scored) or live progress (scoring) */}
-        {a.state === 'scored' && <PillarMeters account={a} band={tier.band} />}
-        {a.state === 'scoring' && <ScoringProgress account={a} />}
-
-        {/* Right: ring/number + action */}
+        {/* Right: the colored ring is the fit (green High, amber Medium, grey
+            Low, red Not a fit); other states get their own affordance */}
         <div className="flex shrink-0 items-center gap-3">
-          {a.state === 'scored' && (
-            <button onClick={stop(onLanding)} title="Open Landing Page"
-              className="hidden items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-[12px] font-medium text-zinc-500 opacity-0 transition-all hover:border-indigo-200 hover:bg-indigo-50/40 hover:text-indigo-700 group-hover:opacity-100 md:inline-flex">
-              <Icons.doc className="h-3.5 w-3.5" />Landing Page
-            </button>
-          )}
-          {a.state === 'scored' && (numberDisplay
-            ? (<div className="text-right"><div className="text-[22px] font-semibold leading-none tabular-nums text-zinc-900">{a.total}<span className="text-[13px] font-normal text-zinc-300">/{a.max_total}</span></div></div>)
-            : <ScoreRing total={a.total} max={a.max_total} band={tier.band} />)}
-          {a.state === 'scoring' && <ScoreRing loading max={a.max_total} band="low" />}
+          {a.state === 'scoring' && <ScoringProgress account={a} />}
+          {a.state === 'scored' && <ScoreRing total={a.total} max={a.max_total} band={tier.band} />}
           {a.state === 'queued' && (
             batchRunning ? (
               <span className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-100 px-3 py-2 text-[12px] font-medium text-zinc-400">
@@ -347,6 +334,12 @@ function ScoredRow({ account, entering, onOpen, onScore, onLanding, tw, batchRun
                 <Icons.sparkle className="h-3.5 w-3.5" />Score now
               </button>
             )
+          )}
+          {a.state === 'error' && (
+            <button onClick={stop(onScore)}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[12px] font-medium text-zinc-500 transition-colors hover:bg-zinc-50 hover:text-zinc-700">
+              <Icons.refresh className="h-3.5 w-3.5" />Retry
+            </button>
           )}
           {clickable && (
             <span className="text-zinc-300 transition-colors group-hover:text-zinc-500"><Icons.arrowRight className="h-4 w-4" /></span>

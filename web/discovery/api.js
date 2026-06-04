@@ -53,6 +53,8 @@ window.API = {
   scoreQueued: (body = {}) => http('/api/scoring/score-queued', {
     method: 'POST', body: JSON.stringify(body),
   }),
+  // Clear every score back to 'queued' (non-destructive) to re-run + re-measure.
+  resetScores: () => http('/api/scoring/reset', { method: 'POST' }),
   // CSV import posts the raw file text as the body (no multipart).
   importPreview: (csvText) => http('/api/scoring/import/preview', {
     method: 'POST', headers: { 'Content-Type': 'text/csv' }, body: csvText,

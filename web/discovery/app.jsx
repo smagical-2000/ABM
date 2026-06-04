@@ -144,6 +144,17 @@ function App() {
     setNavPulse(true);
     setTimeout(() => setNavPulse(false), 1600);
   }
+  // The nav badge count must be correct on either tab, so App owns it from the
+  // lightweight stats endpoint rather than only while ScoredView is mounted.
+  useEffect(() => {
+    let alive = true;
+    const load = () => window.API.scoringStats()
+      .then((s) => { if (alive && s) setScoredCount(s.scored_count); })
+      .catch(() => {});
+    load();
+    const id = setInterval(load, 8000);
+    return () => { alive = false; clearInterval(id); };
+  }, [scoredRefreshKey]);
 
   // ── DISCOVERY state + logic (unchanged from the live panel) ─────────────────
   const [loading, setLoading] = useState(true);
@@ -345,7 +356,9 @@ function App() {
                 </button>
               </>
             ) : (
-              <span className="hidden text-[12px] text-zinc-400 lg:inline">{scoredCount} scored · auto-refreshing</span>
+              <span className="hidden items-center gap-1.5 text-[12px] text-zinc-400 lg:inline-flex">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />Live
+              </span>
             )}
           </div>
         </div>
@@ -438,14 +451,33 @@ function App() {
 // Scored view — accounts in the scoring phase, read from the API. Polls while
 // any account is in flight so 'Scoring…' rows resolve to scores live.
 // ════════════════════════════════════════════════════════════════════════════
+
+// Doubles as the color legend (so the ring colors are readable) and the fit
+// distribution, in one quiet line — replacing the old stat-tile row.
+function FitLegend({ counts }) {
+  const meta = window.FIT_META || {};
+  const items = [['high', 'High'], ['medium', 'Medium'], ['low', 'Low'], ['out', 'Not a fit']];
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-zinc-500">
+      {items.map(([k, label]) => (
+        <span key={k} className="inline-flex items-center gap-1.5">
+          <span className={`h-1.5 w-1.5 rounded-full ${(meta[k] || {}).dot || 'bg-zinc-300'}`} />
+          {label}<span className="tabular-nums text-zinc-400">{counts[k] || 0}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function ScoredView({ refreshKey, pushToast, onCount }) {
   const [accounts, setAccounts] = useState([]);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [segF, setSegF] = useState('all');
-  const [tierF, setTierF] = useState('all');
+  const [fitF, setFitF] = useState('all');
   const [sourceF, setSourceF] = useState('all');
-  const [qaF, setQaF] = useState('all');
+  const [dateF, setDateF] = useState('all');
+  const [confirmReset, setConfirmReset] = useState(false);
   const [openAcc, setOpenAcc] = useState(null);
   const [openLanding, setOpenLanding] = useState(null);
   const [importing, setImporting] = useState(false);
@@ -518,13 +550,30 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
     load(true);
   }
 
+  async function handleReset() {
+    setConfirmReset(false);
+    try {
+      const res = await window.API.resetScores();
+      if (res && res.busy) { pushToast('Finish the running batch first.', 'success'); return; }
+      pushToast(`Cleared ${res.reset} ${res.reset === 1 ? 'score' : 'scores'} back to the queue.`, 'success');
+      load(true);
+    } catch (e) { pushToast(`Couldn't reset: ${e.message}`, 'danger'); }
+  }
+
+  const bandOf = (a) => (a.total != null ? window.tierFor(a.framework, a.total).band : null);
+  const withinDate = (iso, key) => {
+    if (key === 'all') return true;
+    if (!iso) return false;
+    const days = key === 'today' ? 1 : key === '7d' ? 7 : 30;
+    return (Date.now() - new Date(iso).getTime()) <= days * 86400000;
+  };
+
   const scoredList = useMemo(() => {
-    const band = (a) => (a.total != null ? window.tierFor(a.framework, a.total).band : null);
     const arr = accounts.filter((a) => {
       if (segF !== 'all' && a.segment !== segF) return false;
       if (sourceF !== 'all' && a.source !== sourceF) return false;
-      if (tierF !== 'all') { if (a.state !== 'scored' || band(a) !== tierF) return false; }
-      if (qaF !== 'all') { if (!a.qa || a.qa.status !== qaF) return false; }
+      if (fitF !== 'all') { if (a.state !== 'scored' || bandOf(a) !== fitF) return false; }
+      if (dateF !== 'all') { if (a.state !== 'scored' || !withinDate(a.scored_at, dateF)) return false; }
       return true;
     });
     const order = { scoring: 0, queued: 1, scored: 2, error: 3 };
@@ -534,16 +583,13 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
       const rb = b.total != null ? b.total / b.max_total : 0;
       return rb - ra;
     });
-  }, [accounts, segF, tierF, sourceF, qaF]);
+  }, [accounts, segF, fitF, sourceF, dateF]);
 
   const scoredOnly = accounts.filter((a) => a.state === 'scored');
   const queuedCount = accounts.filter((a) => a.state === 'queued').length;
   const batchRunning = batchKick || !!(stats && stats.batch_running);
-  const totalScored = scoredOnly.length;
-  const tier1Count = scoredOnly.filter((a) => window.tierFor(a.framework, a.total).band === 'high').length;
-  const flaggedCount = scoredOnly.filter((a) => a.qa && a.qa.status !== 'verified').length;
-  const avgFit = totalScored ? Math.round(scoredOnly.reduce((s, a) => s + a.total / a.max_total, 0) / totalScored * 100) : 0;
-  const tierConflicts = scoredOnly.filter((a) => a.qa && a.qa.tier_changing).length;
+  const fitCounts = { high: 0, medium: 0, low: 0, out: 0 };
+  scoredOnly.forEach((a) => { const b = bandOf(a); if (b in fitCounts) fitCounts[b] += 1; });
 
   const openAccount = accounts.find((a) => a.account_id === openAcc) || null;
   const landingAccount = accounts.find((a) => a.account_id === openLanding) || null;
@@ -554,20 +600,27 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
       <main className="mx-auto max-w-6xl px-8 py-8">
         <div className="mb-6 flex items-end justify-between gap-4">
           <div>
-            <h1 className="text-[24px] font-semibold tracking-tight text-zinc-900">Scored Accounts</h1>
-            <p className="mt-1 text-[14px] text-zinc-500">Each account is scored on its segment rubric and independently QA'd. Open any one for the breakdown.</p>
+            <h1 className="text-[24px] font-semibold tracking-tight text-zinc-900">Scored accounts</h1>
+            <p className="mt-1 text-[14px] text-zinc-500">One fit score per account, on its segment rubric. Open any row for the full breakdown.</p>
           </div>
-          <button onClick={() => setImporting(true)}
-            className="inline-flex shrink-0 items-center gap-2 rounded-lg bg-indigo-600 px-3.5 py-2 text-[13px] font-medium text-white shadow-sm transition-colors hover:bg-indigo-700">
-            <Icons.upload className="h-4 w-4" />Import accounts
-          </button>
-        </div>
-
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <StatTile value={totalScored} label="Scored" emphasized />
-          <StatTile value={tier1Count} label="High Fit / Tier 1" />
-          <StatTile value={flaggedCount} label="Flagged by QA" />
-          <StatTile value={`${avgFit}%`} label="Avg fit" />
+          <div className="flex shrink-0 items-center gap-2">
+            {scoredOnly.length > 0 && (confirmReset ? (
+              <span className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2 py-1.5 text-[12.5px]">
+                <span className="px-1 text-zinc-500">Clear all scores?</span>
+                <button onClick={() => setConfirmReset(false)} className="rounded-md px-2 py-1 font-medium text-zinc-500 transition-colors hover:bg-zinc-100">Cancel</button>
+                <button onClick={handleReset} className="rounded-md bg-zinc-900 px-2.5 py-1 font-medium text-white transition-colors hover:bg-zinc-800">Clear {scoredOnly.length}</button>
+              </span>
+            ) : (
+              <button onClick={() => setConfirmReset(true)} title="Clear all scores back to the queue, then re-run selectively"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[13px] font-medium text-zinc-500 transition-colors hover:bg-zinc-50 hover:text-zinc-700">
+                <Icons.refresh className="h-4 w-4" />Reset
+              </button>
+            ))}
+            <button onClick={() => setImporting(true)}
+              className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3.5 py-2 text-[13px] font-medium text-white shadow-sm transition-colors hover:bg-indigo-700">
+              <Icons.upload className="h-4 w-4" />Import accounts
+            </button>
+          </div>
         </div>
 
         {stats && (stats.scored_count > 0 || queuedCount > 0 || stats.total_cost > 0) && (
@@ -575,27 +628,21 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
             onScoreBatch={handleScoreAll} batchRunning={batchRunning} />
         )}
 
-        {tierConflicts > 0 && (
-          <div className="mt-4 flex items-center gap-2.5 rounded-xl border border-rose-200 bg-rose-50/70 px-4 py-3 text-[13px] text-rose-700">
-            <Icons.alert className="h-4 w-4 shrink-0 text-rose-500" />
-            <span><span className="font-semibold">{tierConflicts} tier-changing QA {tierConflicts === 1 ? 'discrepancy' : 'discrepancies'}.</span> The independent pass disagrees on a fact that moves the fit tier — open the account before routing.</span>
-            <button onClick={() => setQaF('discrepancy')} className="ml-auto shrink-0 rounded-lg bg-white px-2.5 py-1 text-[12px] font-medium text-rose-700 ring-1 ring-inset ring-rose-200 transition-colors hover:bg-rose-50">Show flagged</button>
-          </div>
-        )}
-
-        <div className="mt-8 overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm shadow-zinc-900/[0.02]">
+        <div className="mt-6 overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm shadow-zinc-900/[0.02]">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-100 px-6 py-3.5">
             <div className="flex flex-wrap items-center gap-4">
               <Dropdown label="Segment" value={segF} onChange={setSegF}
                 options={[{ value: 'all', label: 'All' }, { value: 'health_system', label: 'Health System' }, { value: 'specialty', label: 'Specialty' }, { value: 'payer', label: 'Payer' }]} />
-              <Dropdown label="Tier" value={tierF} onChange={setTierF}
-                options={[{ value: 'all', label: 'All' }, { value: 'high', label: 'High Fit / Tier 1' }, { value: 'medium', label: 'Medium / Tier 2' }, { value: 'low', label: 'Low / Tier 3' }, { value: 'out', label: 'Tier 4' }]} />
+              <Dropdown label="Fit" value={fitF} onChange={setFitF}
+                options={[{ value: 'all', label: 'All' }, { value: 'high', label: 'High' }, { value: 'medium', label: 'Medium' }, { value: 'low', label: 'Low' }, { value: 'out', label: 'Not a fit' }]} />
               <Dropdown label="Source" value={sourceF} onChange={setSourceF}
                 options={[{ value: 'all', label: 'All' }, { value: 'discovery', label: 'Discovery' }, { value: 'csv', label: 'CSV import' }]} />
-              <Dropdown label="QA" value={qaF} onChange={setQaF}
-                options={[{ value: 'all', label: 'All' }, { value: 'verified', label: 'Verified' }, { value: 'discrepancy', label: 'Discrepancy' }, { value: 'unverifiable', label: 'Unverifiable' }]} />
+              <Dropdown label="Date" value={dateF} onChange={setDateF}
+                options={[{ value: 'all', label: 'All time' }, { value: 'today', label: 'Today' }, { value: '7d', label: 'Last 7 days' }, { value: '30d', label: 'Last 30 days' }]} />
             </div>
-            <span className="text-[13px] text-zinc-400">{visible} {visible === 1 ? 'account' : 'accounts'} · sorted by fit</span>
+            {scoredOnly.length > 0
+              ? <FitLegend counts={fitCounts} />
+              : <span className="text-[13px] text-zinc-400">{visible} {visible === 1 ? 'account' : 'accounts'}</span>}
           </div>
 
           {loading ? (

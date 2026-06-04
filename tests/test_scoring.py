@@ -338,3 +338,33 @@ async def test_service_csv_skips_qa(monkeypatch, tmp_path):
     assert scored["qa"]["status"] == "verified"
     assert "skipped" in scored["qa"]["notes"].lower()
     assert scored["state"] == "scored"
+
+
+# ── cost math (the money the meter reports) ───────────────────────────
+
+
+class TestCallCost:
+    def _resp(self, **usage):
+        from types import SimpleNamespace
+        return SimpleNamespace(usage=SimpleNamespace(**usage))
+
+    def test_plain_input_output_plus_searches(self):
+        from auto_search import llm
+        # 10k in @ $3/M + 2k out @ $15/M = $0.06, + 3 searches @ $0.01 = $0.09
+        resp = self._resp(input_tokens=10_000, output_tokens=2_000,
+                          cache_creation_input_tokens=0, cache_read_input_tokens=0)
+        assert llm.call_cost(resp, searches=3) == 0.09
+
+    def test_cache_read_is_cheaper_than_fresh_input(self):
+        from auto_search import llm
+        # 9k cached-read @ $0.30/M is far cheaper than @ $3/M fresh input.
+        # (1k in + 0.5k out + 9k cache_read)/1e6 + 1 search
+        resp = self._resp(input_tokens=1_000, output_tokens=500,
+                          cache_creation_input_tokens=0, cache_read_input_tokens=9_000)
+        assert llm.call_cost(resp, searches=1) == 0.0232
+
+    def test_missing_usage_is_zero(self):
+        from types import SimpleNamespace
+
+        from auto_search import llm
+        assert llm.call_cost(SimpleNamespace(), searches=2) == 0.0

@@ -45,6 +45,8 @@ window.API = {
   scored: () => http('/api/scored'),
   account: (id) => http(`/api/account/${encodeURIComponent(id)}`),
   scoreAccount: (id) => http(`/api/account/${encodeURIComponent(id)}/score`, { method: 'POST' }),
+  // Kick the on-demand deep-research dossier; poll account(id) until ready.
+  generateDossier: (id) => http(`/api/account/${encodeURIComponent(id)}/dossier`, { method: 'POST' }),
   scoringActivity: () => http('/api/scoring/activity'),
   // Spend summary for the cost meter (month-to-date vs budget, total, avg).
   scoringStats: () => http('/api/scoring/stats'),

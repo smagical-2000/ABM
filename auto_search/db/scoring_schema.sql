@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS scored_accounts (
 
     state                 TEXT NOT NULL DEFAULT 'queued'
         CHECK (state IN ('queued','scoring','scored','error')),
+    -- sub-step while state='scoring' (scoring | verifying), for the progress UI
+    phase                 TEXT,
 
     -- the score (NULL until state='scored')
     total                 INTEGER,
@@ -49,3 +51,6 @@ CREATE INDEX IF NOT EXISTS idx_scored_state
 CREATE INDEX IF NOT EXISTS idx_scored_tier
     ON scored_accounts (tier_band)
     WHERE state = 'scored';
+
+-- Additive migration for stores created before `phase` existed.
+ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS phase TEXT;

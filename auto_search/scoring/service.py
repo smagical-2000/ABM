@@ -50,6 +50,7 @@ class ScoringService:
         fw = FRAMEWORKS.get(account.framework) or framework_for_segment(account.segment)
 
         self._repo.set_state(account_id, "scoring")
+        self._repo.set_phase(account_id, "scoring")
         try:
             score = await engine.score_account(account)
         except engine.ScoringError as e:
@@ -66,6 +67,7 @@ class ScoringService:
         band = resolve_tier(fw, score.total, [d.model_dump() for d in score.dimensions])
         score.tier_band, score.tier_label = band.band, band.label
 
+        self._repo.set_phase(account_id, "verifying")
         score.qa = await qa.qa_account(account, score, fw)
         saved = self._repo.save_score(account_id, score)
         logger.info("scored %s -> %s %d/%d (QA: %s)",

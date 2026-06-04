@@ -32,6 +32,7 @@ class ScoringRepository(Protocol):
     def ensure_schema(self) -> None: ...
     def upsert_account(self, account: Account, *, state: str) -> dict: ...
     def set_state(self, account_id: str, state: str, *, error: str | None = None) -> None: ...
+    def set_phase(self, account_id: str, phase: str | None) -> None: ...
     def save_score(self, account_id: str, score: ScoreResult) -> dict | None: ...
     def get(self, account_id: str) -> dict | None: ...
     def list_accounts(self) -> list[dict]: ...
@@ -46,9 +47,17 @@ def _row(account: dict) -> dict:
     """Shape a stored account into the object the UI consumes (scoringData.js).
 
     Adds a resolved `tier` for convenience; scored fields are null until scored.
+    For in-flight accounts it also reports the phase + when scoring started, so
+    the UI can show live elapsed time and a progress estimate.
     """
     band, label = account.get("tier_band"), account.get("tier_label")
+    state = account.get("state", "queued")
+    in_flight = state in ("scoring", "queued")
+    started = account.get("updated_at") if in_flight else None
     return {
+        "phase": account.get("phase") if in_flight else None,
+        "scoring_started_at": _iso(started),
+        "elapsed_seconds": _elapsed(started) if in_flight else None,
         "account_id": account["account_id"],
         "name": account["name"],
         "segment": account.get("segment"),
@@ -92,6 +101,22 @@ def _score_fields(score: ScoreResult) -> dict:
 
 def _iso(dt) -> str | None:
     return dt.isoformat() if isinstance(dt, datetime) else dt
+
+
+def _elapsed(dt) -> int | None:
+    """Whole seconds since `dt` (a datetime or ISO string), or None."""
+    if isinstance(dt, datetime):
+        base = dt
+    elif isinstance(dt, str):
+        try:
+            base = datetime.fromisoformat(dt)
+        except ValueError:
+            return None
+    else:
+        return None
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=UTC)
+    return max(0, int((datetime.now(UTC) - base).total_seconds()))
 
 
 # ── Postgres ──────────────────────────────────────────────────────────
@@ -164,13 +189,22 @@ class ScoringPostgresRepository:
                 (state, error, account_id),
             )
 
+    def set_phase(self, account_id: str, phase: str | None) -> None:
+        # Phase changes must NOT reset updated_at — elapsed is measured from the
+        # start of scoring.
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE scored_accounts SET phase=%s WHERE account_id=%s",
+                (phase, account_id),
+            )
+
     def save_score(self, account_id: str, score: ScoreResult) -> dict | None:
         f = _score_fields(score)
         with self._pool.connection() as conn:
             row = conn.execute(
                 """
                 UPDATE scored_accounts SET
-                    state='scored', error_message=NULL,
+                    state='scored', error_message=NULL, phase=NULL,
                     total=%(total)s, tier_band=%(band)s, tier_label=%(label)s,
                     dimensions=%(dims)s, recommendation=%(rec)s, qa=%(qa)s,
                     model=%(model)s, scored_at=%(scored_at)s, updated_at=now()
@@ -257,6 +291,12 @@ class ScoringJsonRepository:
             row["updated_at"] = datetime.now(UTC).isoformat()
             self._flush()
 
+    def set_phase(self, account_id: str, phase: str | None) -> None:
+        row = self._store.get(account_id)
+        if row:
+            row["phase"] = phase           # no updated_at change — keep the clock
+            self._flush()
+
     def save_score(self, account_id: str, score: ScoreResult) -> dict | None:
         row = self._store.get(account_id)
         if not row:
@@ -264,6 +304,7 @@ class ScoringJsonRepository:
         row.update(_score_fields(score))
         row["state"] = "scored"
         row["error_message"] = None
+        row["phase"] = None
         row["updated_at"] = datetime.now(UTC).isoformat()
         self._flush()
         return _row(row)

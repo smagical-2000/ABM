@@ -458,14 +458,22 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
   }
   useEffect(() => { load(); }, []);
   useEffect(() => { if (refreshKey) load(true); }, [refreshKey]);
-  // Poll while anything is queued/scoring so it resolves live.
+  // Poll while anything is queued/scoring so rows resolve live — and do one
+  // final refetch when the last in-flight account finishes, so the resolved
+  // score lands without a manual reload.
+  const wasActiveRef = useRef(false);
   useEffect(() => {
     let alive = true;
     async function poll() {
-      try { const r = await window.API.scoringActivity(); if (alive && (r.active || []).length > 0) load(true); }
-      catch (_) { /* ignore */ }
+      try {
+        const r = await window.API.scoringActivity();
+        if (!alive) return;
+        const active = (r.active || []).length > 0;
+        if (active) { wasActiveRef.current = true; load(true); }
+        else if (wasActiveRef.current) { wasActiveRef.current = false; load(true); }
+      } catch (_) { /* ignore */ }
     }
-    const id = setInterval(poll, 3500);
+    const id = setInterval(poll, 3000);
     poll();
     return () => { alive = false; clearInterval(id); };
   }, []);

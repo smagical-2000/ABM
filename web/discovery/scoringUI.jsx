@@ -230,6 +230,38 @@ function PillarMeters({ account, band }) {
 }
 window.PillarMeters = PillarMeters;
 
+// ── ScoringProgress ──────────────────────────────────────────────────────────
+// Live progress for an in-flight score: the phase, elapsed time, and an
+// estimate bar. An LLM call's duration varies with how many web searches it
+// runs, so this is an honest estimate (elapsed vs a typical run), not a fake
+// exact percentage. Two phases: researching & scoring, then independent QA.
+function ScoringProgress({ account }) {
+  const EST = 50; // typical seconds for score + QA on the enterprise key
+  const start = account.scoring_started_at ? new Date(account.scoring_started_at).getTime() : null;
+  const [elapsed, setElapsed] = React.useState(account.elapsed_seconds || 0);
+  React.useEffect(() => {
+    if (!start) return undefined;
+    const tick = () => setElapsed(Math.max(0, Math.round((Date.now() - start) / 1000)));
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [start]);
+  const pct = Math.round(Math.min(0.96, elapsed / EST) * 100);
+  const verifying = account.phase === 'verifying';
+  return (
+    <div className="hidden w-[210px] shrink-0 lg:block">
+      <div className="flex items-center justify-between text-[11px]">
+        <span className="font-medium text-indigo-600">{verifying ? 'Verifying · independent QA' : 'Researching & scoring'}</span>
+        <span className="tabular-nums text-zinc-400">{elapsed}s<span className="text-zinc-300"> / ~{EST}s</span></span>
+      </div>
+      <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-zinc-100">
+        <div className="h-full rounded-full bg-indigo-400" style={{ width: `${pct}%`, transition: 'width 1s linear' }} />
+      </div>
+    </div>
+  );
+}
+window.ScoringProgress = ScoringProgress;
+
 // ── ScoredRow ────────────────────────────────────────────────────────────────
 function ScoredRow({ account, entering, onOpen, onScore, onLanding, tw }) {
   const a = account;
@@ -259,7 +291,7 @@ function ScoredRow({ account, entering, onOpen, onScore, onLanding, tw }) {
             {a.state === 'scoring' && (
               <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-600 ring-1 ring-inset ring-indigo-100">
                 <span className="relative flex h-1.5 w-1.5"><span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-indigo-400 opacity-70" /><span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-indigo-500" /></span>
-                Scoring…
+                {a.phase === 'verifying' ? 'Verifying…' : 'Scoring…'}
               </span>
             )}
             {a.state === 'queued' && (
@@ -274,14 +306,15 @@ function ScoredRow({ account, entering, onOpen, onScore, onLanding, tw }) {
             {a.state === 'scored'
               ? <span>scored {relativeTime(a.scored_at)}</span>
               : a.state === 'scoring'
-                ? <span>started just now</span>
+                ? <span>{a.phase === 'verifying' ? 'verifying…' : 'scoring…'}</span>
                 : <span>awaiting score</span>}
             {a.approximate_employees && (<><span className="text-zinc-300">·</span><span>~{a.approximate_employees.toLocaleString()} staff</span></>)}
           </div>
         </div>
 
-        {/* Middle: pillar scores */}
+        {/* Middle: pillar scores (scored) or live progress (scoring) */}
         {a.state === 'scored' && <PillarMeters account={a} band={tier.band} />}
+        {a.state === 'scoring' && <ScoringProgress account={a} />}
 
         {/* Right: ring/number + action */}
         <div className="flex shrink-0 items-center gap-3">

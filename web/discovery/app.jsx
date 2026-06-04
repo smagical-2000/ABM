@@ -520,6 +520,7 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
   const [importF, setImportF] = useState('all');
   const [imports, setImports] = useState([]);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [selected, setSelected] = useState(() => new Set());   // row-selection for export
   const [openAcc, setOpenAcc] = useState(null);
   const [openLanding, setOpenLanding] = useState(null);
   const [importing, setImporting] = useState(false);
@@ -596,6 +597,7 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
 
   async function handleReset() {
     setConfirmReset(false);
+    setSelected(new Set());
     try {
       const res = await window.API.resetScores();
       if (res && res.busy) { pushToast('Finish the running batch first.', 'success'); return; }
@@ -630,10 +632,21 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
     });
   }, [accounts, segF, fitF, sourceF, dateF, importF]);
 
+  function toggleSelect(id) {
+    setSelected((prev) => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
+  }
+
   function handleExport() {
-    const rows = scoredList.filter((a) => a.state === 'scored');
-    if (!rows.length) { pushToast('No scored accounts in this view to export.', 'success'); return; }
-    const tag = importF !== 'all' ? 'import' : sourceF !== 'all' ? sourceF : 'all';
+    const useSel = selected.size > 0;
+    const rows = useSel
+      ? accounts.filter((a) => a.state === 'scored' && selected.has(a.account_id))
+      : scoredList.filter((a) => a.state === 'scored');
+    if (!rows.length) { pushToast('No scored accounts to export.', 'success'); return; }
+    const tag = useSel ? 'selected' : importF !== 'all' ? 'import' : sourceF !== 'all' ? sourceF : 'all';
     const stamp = new Date().toISOString().slice(0, 10);
     downloadCsv(`magical-scored-${tag}-${stamp}.csv`, buildAccountsCsv(rows));
     pushToast(`Exported ${rows.length} ${rows.length === 1 ? 'account' : 'accounts'} to CSV.`, 'success');
@@ -644,6 +657,15 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
   const batchRunning = batchKick || !!(stats && stats.batch_running);
   const fitCounts = { high: 0, medium: 0, low: 0, out: 0 };
   scoredOnly.forEach((a) => { const b = bandOf(a); if (b in fitCounts) fitCounts[b] += 1; });
+
+  const filteredScoredIds = scoredList.filter((a) => a.state === 'scored').map((a) => a.account_id);
+  const allFilteredSelected = filteredScoredIds.length > 0 && filteredScoredIds.every((id) => selected.has(id));
+  function toggleSelectAll() {
+    setSelected((prev) => {
+      if (allFilteredSelected) { const n = new Set(prev); filteredScoredIds.forEach((id) => n.delete(id)); return n; }
+      return new Set([...prev, ...filteredScoredIds]);
+    });
+  }
 
   const openAccount = accounts.find((a) => a.account_id === openAcc) || null;
   const landingAccount = accounts.find((a) => a.account_id === openLanding) || null;
@@ -659,9 +681,10 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {scoredOnly.length > 0 && !confirmReset && (
-              <button onClick={handleExport} title="Download the accounts in the current view as CSV"
+              <button onClick={handleExport}
+                title={selected.size > 0 ? 'Download the selected accounts as CSV' : 'Download the accounts in the current view as CSV'}
                 className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[13px] font-medium text-zinc-500 transition-colors hover:bg-zinc-50 hover:text-zinc-700">
-                <Icons.download className="h-4 w-4" />Export
+                <Icons.download className="h-4 w-4" />Export{selected.size > 0 ? ` ${selected.size}` : ''}
               </button>
             )}
             {scoredOnly.length > 0 && (confirmReset ? (
@@ -710,6 +733,17 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
               : <span className="text-[13px] text-zinc-400">{visible} {visible === 1 ? 'account' : 'accounts'}</span>}
           </div>
 
+          {selected.size > 0 && (
+            <div className="no-print flex flex-wrap items-center gap-3 border-b border-zinc-100 bg-indigo-50/40 px-6 py-2 text-[12.5px]">
+              <span className="font-medium text-indigo-700">{selected.size} selected</span>
+              {!allFilteredSelected && filteredScoredIds.length > selected.size && (
+                <button onClick={toggleSelectAll} className="text-indigo-600 transition-colors hover:text-indigo-800">Select all {filteredScoredIds.length}</button>
+              )}
+              <button onClick={() => setSelected(new Set())} className="text-zinc-400 transition-colors hover:text-zinc-600">Clear</button>
+              <span className="ml-auto text-zinc-400">Click Export to download {selected.size}</span>
+            </div>
+          )}
+
           {loading ? (
             <div className="animate-pulse">{Array.from({ length: 5 }).map((_, i) => <ScoredSkeletonRow key={i} />)}</div>
           ) : visible === 0 ? (
@@ -724,6 +758,7 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
           ) : (
             scoredList.map((a) => (
               <ScoredRow key={a.account_id} account={a} batchRunning={batchRunning}
+                selected={selected.has(a.account_id)} onToggleSelect={() => toggleSelect(a.account_id)}
                 onOpen={() => setOpenAcc(a.account_id)} onScore={() => handleScore(a.account_id)}
                 onLanding={() => setOpenLanding(a.account_id)} />
             ))
@@ -735,7 +770,7 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
       <ScoreDrawer account={openAccount} onClose={() => setOpenAcc(null)}
         onRescore={() => { if (openAccount) handleScore(openAccount.account_id); setOpenAcc(null); }}
         onAddToList={() => pushToast(`Added ${openAccount ? openAccount.name : 'account'} to target list`, 'success')}
-        onOpenLanding={() => openAccount && setOpenLanding(openAccount.account_id)} />
+        onOpenLanding={() => { if (openAccount) { setOpenLanding(openAccount.account_id); setOpenAcc(null); } }} />
 
       <LandingPageModal account={landingAccount} onClose={() => setOpenLanding(null)} pushToast={pushToast} />
 

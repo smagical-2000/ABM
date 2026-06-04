@@ -289,7 +289,7 @@ function ScoringProgress({ account }) {
 window.ScoringProgress = ScoringProgress;
 
 // ── ScoredRow ────────────────────────────────────────────────────────────────
-function ScoredRow({ account, entering, onOpen, onScore, onLanding, tw, batchRunning }) {
+function ScoredRow({ account, entering, onOpen, onScore, onLanding, tw, batchRunning, selected, onToggleSelect }) {
   const a = account;
   const compact = (tw || {}).density === 'compact';
   const tier = a.tier || (a.total != null ? window.tierFor(a.framework, a.total) : null);
@@ -305,6 +305,14 @@ function ScoredRow({ account, entering, onOpen, onScore, onLanding, tw, batchRun
         ${clickable ? 'cursor-pointer hover:bg-zinc-50/70' : ''}
         ${entering ? 'opacity-0 translate-y-1' : 'opacity-100 translate-y-0'}`}>
       <div className="flex items-center gap-4">
+        {/* selection checkbox (scored rows only); a spacer keeps others aligned */}
+        {a.state === 'scored' && onToggleSelect ? (
+          <input type="checkbox" checked={!!selected} onChange={stop(onToggleSelect)} onClick={(e) => e.stopPropagation()}
+            aria-label={`Select ${a.name}`}
+            className="no-print h-4 w-4 shrink-0 cursor-pointer rounded border-zinc-300 text-indigo-600 focus:ring-indigo-300" />
+        ) : (
+          <span className="no-print h-4 w-4 shrink-0" />
+        )}
         {/* Left: identity only — the score breakdown opens in the drawer */}
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2.5">

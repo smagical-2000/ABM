@@ -230,6 +230,14 @@ function GeneratingPanel({ name }) {
 function LandingPageModal({ account, onClose, pushToast }) {
   const [acc, setAcc] = React.useState(account);
   const [kicking, setKicking] = React.useState(false);
+  // Tag <body> only while actually open (this component stays mounted with a
+  // null account when closed), so the print stylesheet hides the app and lets
+  // the document paginate (see @media print in index.html).
+  React.useEffect(() => {
+    if (!account) return undefined;
+    document.body.classList.add('doc-open');
+    return () => document.body.classList.remove('doc-open');
+  }, [account && account.account_id]);
   // On open, sync to the passed account and pull the latest stored state, so a
   // dossier generated earlier shows even if the parent list hasn't refreshed.
   React.useEffect(() => {
@@ -272,11 +280,11 @@ function LandingPageModal({ account, onClose, pushToast }) {
     setKicking(false);
   }
 
-  return (
-    <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto p-4 sm:p-8">
+  const overlay = (
+    <div className="landing-overlay fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto p-4 sm:p-8">
       <div className="no-print absolute inset-0 bg-zinc-900/40 backdrop-blur-[3px] animate-fade" onClick={onClose} />
 
-      <div className="relative w-full max-w-3xl shrink-0 animate-pop">
+      <div className="landing-shell relative w-full max-w-3xl shrink-0 animate-pop">
         {/* toolbar */}
         <div className="no-print mb-3 flex items-center justify-between">
           <span className="inline-flex items-center gap-1.5 rounded-full bg-white/90 px-2.5 py-1 text-[11px] font-medium text-zinc-500 ring-1 ring-inset ring-zinc-200 backdrop-blur">
@@ -344,5 +352,6 @@ function LandingPageModal({ account, onClose, pushToast }) {
       </div>
     </div>
   );
+  return ReactDOM.createPortal(overlay, document.body);
 }
 window.LandingPageModal = LandingPageModal;

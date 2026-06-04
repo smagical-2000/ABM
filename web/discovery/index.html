@@ -35,14 +35,25 @@
     .animate-pop { animation: popIn 0.2s cubic-bezier(0.16,1,0.3,1); }
     @keyframes spinSlow { to { transform: rotate(270deg); } }
     .animate-spin-slow { animation: spinSlow 1.3s linear infinite; transform-origin: center; }
-    /* Download PDF = browser print of only the dossier document. */
+    /* Download PDF = browser print of only the dossier document. The modal is
+       portaled to <body>, so in print we hide the app (#root) and let the
+       document flow in normal layout, which lets it paginate across pages
+       instead of repeating the fixed viewport. */
     @media print {
-      body * { visibility: hidden !important; }
-      .print-document, .print-document * { visibility: visible !important; }
+      html, body { height: auto !important; background: #fff !important; }
+      body.doc-open #root { display: none !important; }
+      .landing-overlay {
+        position: static !important; display: block !important; inset: auto !important;
+        overflow: visible !important; height: auto !important; padding: 0 !important;
+        background: none !important; backdrop-filter: none !important;
+      }
+      .landing-shell {
+        position: static !important; max-width: none !important; width: 100% !important;
+        margin: 0 !important; transform: none !important;
+      }
       .print-document {
-        position: absolute !important; left: 0; top: 0; width: 100%;
-        max-width: none !important; margin: 0 !important;
         box-shadow: none !important; border: 0 !important; border-radius: 0 !important;
+        overflow: visible !important;
       }
       .no-print { display: none !important; }
       @page { margin: 14mm; }

@@ -62,27 +62,37 @@ class ScoringService:
             self._repo.set_state(account_id, "error", error=f"{type(e).__name__}: {e}")
             return self._repo.get(account_id)
 
-        # Guarantee the tier is consistent with the framework + total at save
-        # time, independent of how the score was produced.
-        band = resolve_tier(fw, score.total, [d.model_dump() for d in score.dimensions])
-        score.tier_band, score.tier_label = band.band, band.label
+        # Everything past the engine call (tier resolve, QA, persist) is wrapped
+        # so a failure here lands the account in 'error', never leaving it pinned
+        # in 'scoring'. A process restart is the only remaining orphan path, and
+        # the repository's startup sweep covers that.
+        try:
+            # Guarantee the tier is consistent with the framework + total at save
+            # time, independent of how the score was produced.
+            band = resolve_tier(fw, score.total, [d.model_dump() for d in score.dimensions])
+            score.tier_band, score.tier_label = band.band, band.label
 
-        if account.source == "csv":
-            # Definitive Healthcare firmographics are authoritative, so an
-            # independent QA pass would mostly re-verify facts we already trust.
-            # Skip it to save a web_search call per imported account.
-            score.qa = QAResult(
-                status="verified",
-                notes="Firmographics taken as authoritative from the Definitive "
-                      "import; independent QA skipped to save cost.",
-                corrections=[],
-            )
-        else:
-            self._repo.set_phase(account_id, "verifying")
-            qa_result, qa_cost = await qa.qa_account(account, score, fw)
-            score.qa = qa_result
-            score.cost_usd = round(score.cost_usd + qa_cost, 4)
-        saved = self._repo.save_score(account_id, score)
+            if account.source == "csv":
+                # Definitive Healthcare firmographics are authoritative, so an
+                # independent QA pass would mostly re-verify facts we already
+                # trust. Skip it to save a web_search call per imported account.
+                score.qa = QAResult(
+                    status="verified",
+                    notes="Firmographics taken as authoritative from the Definitive "
+                          "import; independent QA skipped to save cost.",
+                    corrections=[],
+                )
+            else:
+                self._repo.set_phase(account_id, "verifying")
+                qa_result, qa_cost = await qa.qa_account(account, score, fw)
+                score.qa = qa_result
+                score.cost_usd = round(score.cost_usd + qa_cost, 4)
+            saved = self._repo.save_score(account_id, score)
+        except Exception as e:  # noqa: BLE001 — never leave an account stuck 'scoring'
+            logger.exception("persisting score failed for %s", account.name)
+            self._repo.set_state(account_id, "error", error=f"{type(e).__name__}: {e}")
+            return self._repo.get(account_id)
+
         logger.info("scored %s -> %s %d/%d (QA: %s, $%.3f)",
                     account.name, score.tier_label, score.total, score.max_total,
                     score.qa.status if score.qa else "—", score.cost_usd)

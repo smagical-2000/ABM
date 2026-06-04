@@ -40,6 +40,9 @@ CREATE TABLE IF NOT EXISTS scored_accounts (
     model                 TEXT,
     -- measured USD spend for this account (scorer + QA), for the cost meter
     cost_usd              DOUBLE PRECISION NOT NULL DEFAULT 0,
+    -- which CSV import this account came in on (filename + time), so a user can
+    -- filter + export exactly the batch they uploaded. NULL for discovery.
+    import_label          TEXT,
     error_message         TEXT,
 
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -57,3 +60,4 @@ CREATE INDEX IF NOT EXISTS idx_scored_tier
 -- Additive migrations for stores created before these columns existed.
 ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS phase TEXT;
 ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS import_label TEXT;

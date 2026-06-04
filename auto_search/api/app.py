@@ -24,6 +24,7 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -112,6 +113,13 @@ async def _json_body(request: Request) -> dict:
     except (ValueError, TypeError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _import_label(filename: str | None) -> str:
+    """A readable label for an import batch: filename plus the date/time, which
+    also disambiguates two uploads of the same filename."""
+    name = (filename or "").strip() or "import.csv"
+    return f"{name} · {datetime.now(UTC).strftime('%b %d, %H:%M')}"
 
 
 def _parse_upload(raw: bytes) -> csv_imports.ImportResult:
@@ -367,18 +375,29 @@ def create_app() -> FastAPI:
     async def import_commit(request: Request):
         """Parse the CSV body and enqueue the new accounts as 'queued' — parked,
         NOT scored. Scoring is on demand (per-account or a batch) so importing a
-        large file never spends money by itself. Known accounts are skipped."""
+        large file never spends money by itself. Known accounts are skipped.
+
+        Each batch is tagged with a label (the uploaded filename + time) so the
+        user can later filter to, and export, exactly what they uploaded."""
         result = _parse_upload(await request.body())
         fresh = [a for a in result.accounts if not app.state.scoring.exists(a.account_id)]
-        app.state.scoring.enqueue_csv(fresh, state="queued")
+        label = _import_label(request.headers.get("x-import-filename"))
+        app.state.scoring.enqueue_csv(fresh, state="queued", import_label=label)
         return {
             "schema_label": result.schema_label,
             "segment": result.segment,
             "imported": len(fresh),
             "queued": len(fresh),
             "skipped_known": len(result.accounts) - len(fresh),
+            "import_label": label,
             "accounts": [app.state.scoring.get(a.account_id) for a in fresh],
         }
+
+    @app.get("/api/scoring/imports")
+    def scoring_imports():
+        """The distinct CSV import batches (label + count), newest first — feeds
+        the Import filter so a user can isolate and export their own upload."""
+        return {"imports": app.state.scoring_repo.import_labels()}
 
     @app.post("/api/scoring/score-queued")
     async def score_queued(request: Request):

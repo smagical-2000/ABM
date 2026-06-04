@@ -452,6 +452,46 @@ function App() {
 // any account is in flight so 'Scoring…' rows resolve to scores live.
 // ════════════════════════════════════════════════════════════════════════════
 
+// ── CSV export (client-side, from the already-loaded accounts) ───────────────
+function csvCell(v) {
+  const s = v == null ? '' : String(v);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+function segLabel(seg) {
+  const m = window.SEGMENT_META && window.SEGMENT_META[seg];
+  return (m && m.label) || seg || '';
+}
+function buildAccountsCsv(accounts) {
+  const head = ['Account', 'Domain', 'Segment', 'Sub-segment', 'Source', 'Import',
+    'Fit', 'Score', 'Max', 'Firmographic', 'Technographic', 'Business Intent',
+    'Recommendation', 'QA', 'Scored', 'Cost (USD)', 'Key facts'];
+  const lines = accounts.map((a) => {
+    const tier = a.tier || window.tierFor(a.framework, a.total);
+    const pillars = window.pillarsFor(a);
+    const pill = (i) => (pillars[i] ? `${pillars[i].score}/${pillars[i].max}` : '');
+    const facts = a.firmographics
+      ? Object.entries(a.firmographics).map(([k, v]) => `${k}: ${v}`).join('; ') : '';
+    return [
+      a.name, a.domain || '', segLabel(a.segment), a.sub_segment || '',
+      a.source === 'csv' ? 'CSV import' : 'Discovery', a.import_label || '',
+      window.fitWord(tier.band), a.total, a.max_total,
+      pill(0), pill(1), pill(2),
+      a.recommendation || '', a.qa ? a.qa.status : '',
+      a.scored_at ? window.shortDate(a.scored_at) : '',
+      a.cost_usd != null ? a.cost_usd : '', facts,
+    ].map(csvCell).join(',');
+  });
+  return [head.join(','), ...lines].join('\n');
+}
+function downloadCsv(filename, csv) {
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url; link.download = filename;
+  document.body.appendChild(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 // Doubles as the color legend (so the ring colors are readable) and the fit
 // distribution, in one quiet line — replacing the old stat-tile row.
 function FitLegend({ counts }) {
@@ -477,6 +517,8 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
   const [fitF, setFitF] = useState('all');
   const [sourceF, setSourceF] = useState('all');
   const [dateF, setDateF] = useState('all');
+  const [importF, setImportF] = useState('all');
+  const [imports, setImports] = useState([]);
   const [confirmReset, setConfirmReset] = useState(false);
   const [openAcc, setOpenAcc] = useState(null);
   const [openLanding, setOpenLanding] = useState(null);
@@ -485,14 +527,16 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
 
   async function load(soft = false) {
     try {
-      // Accounts are primary; the spend summary is best-effort so the table
-      // still loads if the stats endpoint hiccups.
-      const [a, s] = await Promise.all([
+      // Accounts are primary; the spend summary + import list are best-effort so
+      // the table still loads if either endpoint hiccups.
+      const [a, s, im] = await Promise.all([
         window.API.scored(),
         window.API.scoringStats().catch(() => null),
+        window.API.scoringImports().catch(() => null),
       ]);
       setAccounts(a);
       if (s) setStats(s);
+      if (im) setImports(im.imports || []);
     } catch (e) { if (!soft) pushToast(`Couldn't load scores: ${e.message}`, 'danger'); }
     finally { if (!soft) setLoading(false); }
   }
@@ -572,6 +616,7 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
     const arr = accounts.filter((a) => {
       if (segF !== 'all' && a.segment !== segF) return false;
       if (sourceF !== 'all' && a.source !== sourceF) return false;
+      if (importF !== 'all' && a.import_label !== importF) return false;
       if (fitF !== 'all') { if (a.state !== 'scored' || bandOf(a) !== fitF) return false; }
       if (dateF !== 'all') { if (a.state !== 'scored' || !withinDate(a.scored_at, dateF)) return false; }
       return true;
@@ -583,7 +628,16 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
       const rb = b.total != null ? b.total / b.max_total : 0;
       return rb - ra;
     });
-  }, [accounts, segF, fitF, sourceF, dateF]);
+  }, [accounts, segF, fitF, sourceF, dateF, importF]);
+
+  function handleExport() {
+    const rows = scoredList.filter((a) => a.state === 'scored');
+    if (!rows.length) { pushToast('No scored accounts in this view to export.', 'success'); return; }
+    const tag = importF !== 'all' ? 'import' : sourceF !== 'all' ? sourceF : 'all';
+    const stamp = new Date().toISOString().slice(0, 10);
+    downloadCsv(`magical-scored-${tag}-${stamp}.csv`, buildAccountsCsv(rows));
+    pushToast(`Exported ${rows.length} ${rows.length === 1 ? 'account' : 'accounts'} to CSV.`, 'success');
+  }
 
   const scoredOnly = accounts.filter((a) => a.state === 'scored');
   const queuedCount = accounts.filter((a) => a.state === 'queued').length;
@@ -604,6 +658,12 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
             <p className="mt-1 text-[14px] text-zinc-500">One fit score per account, on its segment rubric. Open any row for the full breakdown.</p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            {scoredOnly.length > 0 && !confirmReset && (
+              <button onClick={handleExport} title="Download the accounts in the current view as CSV"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[13px] font-medium text-zinc-500 transition-colors hover:bg-zinc-50 hover:text-zinc-700">
+                <Icons.download className="h-4 w-4" />Export
+              </button>
+            )}
             {scoredOnly.length > 0 && (confirmReset ? (
               <span className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2 py-1.5 text-[12.5px]">
                 <span className="px-1 text-zinc-500">Clear all scores?</span>
@@ -639,6 +699,11 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
                 options={[{ value: 'all', label: 'All' }, { value: 'discovery', label: 'Discovery' }, { value: 'csv', label: 'CSV import' }]} />
               <Dropdown label="Date" value={dateF} onChange={setDateF}
                 options={[{ value: 'all', label: 'All time' }, { value: 'today', label: 'Today' }, { value: '7d', label: 'Last 7 days' }, { value: '30d', label: 'Last 30 days' }]} />
+              {imports.length > 0 && (
+                <Dropdown label="Import" value={importF} onChange={setImportF}
+                  options={[{ value: 'all', label: 'All imports' },
+                    ...imports.map((im) => ({ value: im.label, label: `${im.label} (${im.count})` }))]} />
+              )}
             </div>
             {scoredOnly.length > 0
               ? <FitLegend counts={fitCounts} />

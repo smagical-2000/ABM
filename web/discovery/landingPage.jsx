@@ -17,7 +17,7 @@ function LandingPageModal({ account, onClose, pushToast }) {
     <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto p-4 sm:p-8">
       <div className="absolute inset-0 bg-zinc-900/40 backdrop-blur-[3px] animate-fade" onClick={onClose} />
 
-      <div className="relative my-auto w-full max-w-3xl animate-pop">
+      <div className="relative w-full max-w-3xl shrink-0 animate-pop">
         {/* floating toolbar */}
         <div className="mb-3 flex items-center justify-between">
           <span className="inline-flex items-center gap-1.5 rounded-full bg-white/90 px-2.5 py-1 text-[11px] font-medium text-zinc-500 ring-1 ring-inset ring-zinc-200 backdrop-blur">

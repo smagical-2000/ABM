@@ -31,9 +31,12 @@ class ScoringService:
         """Create/refresh an account from a promoted discovery company."""
         return self._repo.upsert_account(_account_from_discovery(company), state=state)
 
-    def enqueue_csv(self, accounts: list[Account], *, state: str = "scoring") -> list[dict]:
-        """Create/refresh imported accounts. Returns the stored rows."""
-        return [self._repo.upsert_account(a, state=state) for a in accounts]
+    def enqueue_csv(self, accounts: list[Account], *, state: str = "scoring",
+                    import_label: str | None = None) -> list[dict]:
+        """Create/refresh imported accounts, tagged with the import they arrived
+        on so the batch can be filtered + exported later. Returns the stored rows."""
+        return [self._repo.upsert_account(a, state=state, import_label=import_label)
+                for a in accounts]
 
     # ── score ──────────────────────────────────────────────────────────
 

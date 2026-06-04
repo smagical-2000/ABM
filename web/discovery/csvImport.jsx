@@ -52,7 +52,7 @@ function ImportModal({ onClose, onImported, pushToast }) {
     setBusy(true);
     setError(null);
     try {
-      const res = await window.API.importCommit(csvText);
+      const res = await window.API.importCommit(csvText, fileName);
       onImported(res);
     } catch (e) {
       setError(humanize(e.message));

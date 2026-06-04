@@ -44,6 +44,11 @@ Object.assign(window.Icons, {
       <path d="M12 5v14M5 12h14" />
     </svg>
   ),
+  download: (p) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" {...p}>
+      <path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14" />
+    </svg>
+  ),
 });
 
 // ── Tier band styling ────────────────────────────────────────────────────────

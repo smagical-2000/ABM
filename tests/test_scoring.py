@@ -456,6 +456,26 @@ def test_repo_reset_to_queued(tmp_path):
     assert repo.reset_to_queued() == 0                  # already clean
 
 
+def test_repo_import_labels(tmp_path):
+    """Imported accounts carry the batch label; import_labels aggregates it for
+    the filter. Discovery accounts have no label."""
+    from auto_search.db.scoring_repository import ScoringJsonRepository
+
+    repo = ScoringJsonRepository(path=str(tmp_path / "s.json"))
+    label = "accounts.csv · Jun 04, 09:00"
+    for i in range(2):
+        repo.upsert_account(Account(
+            account_id=f"csv_{i}", name=f"C{i}", segment="specialty",
+            framework="specialty", source="csv"), state="queued", import_label=label)
+    repo.upsert_account(Account(account_id="disc", name="D", segment="payer",
+                                framework="payer", source="discovery"), state="queued")
+
+    labels = repo.import_labels()
+    assert len(labels) == 1 and labels[0] == {"label": label, "count": 2}
+    assert repo.get("csv_0")["import_label"] == label
+    assert repo.get("disc")["import_label"] is None
+
+
 # ── cost math (the money the meter reports) ───────────────────────────
 
 

@@ -59,7 +59,11 @@ window.API = {
   importPreview: (csvText) => http('/api/scoring/import/preview', {
     method: 'POST', headers: { 'Content-Type': 'text/csv' }, body: csvText,
   }),
-  importCommit: (csvText) => http('/api/scoring/import', {
-    method: 'POST', headers: { 'Content-Type': 'text/csv' }, body: csvText,
+  importCommit: (csvText, filename) => http('/api/scoring/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/csv', 'X-Import-Filename': filename || '' },
+    body: csvText,
   }),
+  // Distinct CSV import batches (label + count) for the Import filter.
+  scoringImports: () => http('/api/scoring/imports'),
 };

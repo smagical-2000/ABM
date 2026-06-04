@@ -151,6 +151,18 @@ class TestCostControls:
         out = client.post("/api/scoring/score-queued", json={"limit": 1}).json()
         assert out["started"] == 1 and out["busy"] is True
 
+    def test_import_tags_batch_and_lists_it(self, client):
+        """Each import is tagged (filename + time) so a user can isolate and
+        export exactly what they uploaded."""
+        r = client.post("/api/scoring/import", content=_HS_CSV,
+                        headers={"X-Import-Filename": "beacon_systems.csv"})
+        assert r.status_code == 200
+        label = r.json()["import_label"]
+        assert "beacon_systems.csv" in label
+        assert all(a["import_label"] == label for a in r.json()["accounts"])
+        imps = client.get("/api/scoring/imports").json()["imports"]
+        assert any(i["label"] == label and i["count"] == 2 for i in imps)
+
     def test_reset_clears_scores_to_queued(self, client):
         """Reset returns every scored account to a parked, re-scoreable 'queued'
         and zeroes the cost meter, non-destructively."""

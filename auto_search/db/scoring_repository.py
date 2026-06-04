@@ -40,7 +40,9 @@ STALE_SCORING_SECONDS = 1800   # 30 minutes
 
 class ScoringRepository(Protocol):
     def ensure_schema(self) -> None: ...
-    def upsert_account(self, account: Account, *, state: str) -> dict: ...
+    def upsert_account(self, account: Account, *, state: str,
+                       import_label: str | None = None) -> dict: ...
+    def import_labels(self) -> list[dict]: ...
     def set_state(self, account_id: str, state: str, *, error: str | None = None) -> None: ...
     def set_phase(self, account_id: str, phase: str | None) -> None: ...
     def save_score(self, account_id: str, score: ScoreResult) -> dict | None: ...
@@ -94,6 +96,7 @@ def _row(account: dict) -> dict:
         "discovery_signals": account.get("discovery_signals") or [],
         "model": account.get("model"),
         "cost_usd": _as_float(account.get("cost_usd")),
+        "import_label": account.get("import_label"),
         "error": account.get("error_message"),
         "scored_at": _iso(account.get("scored_at")),
         "created_at": _iso(account.get("created_at")),
@@ -170,7 +173,8 @@ class ScoringPostgresRepository:
             conn.execute(sql)
         logger.info("scoring schema ensured")
 
-    def upsert_account(self, account: Account, *, state: str) -> dict:
+    def upsert_account(self, account: Account, *, state: str,
+                       import_label: str | None = None) -> dict:
         now = datetime.now(UTC)
         with self._pool.connection() as conn:
             conn.execute(
@@ -179,12 +183,12 @@ class ScoringPostgresRepository:
                     account_id, source, discovery_company_key, name, segment,
                     framework, domain, sub_segment, approximate_employees,
                     firmographics, discovery_signals, state, max_total,
-                    created_at, updated_at
+                    import_label, created_at, updated_at
                 ) VALUES (
                     %(id)s, %(source)s, %(dck)s, %(name)s, %(segment)s,
                     %(framework)s, %(domain)s, %(sub)s, %(emp)s,
                     %(firmo)s, %(signals)s, %(state)s, %(max_total)s,
-                    %(now)s, %(now)s
+                    %(label)s, %(now)s, %(now)s
                 )
                 ON CONFLICT (account_id) DO UPDATE SET
                     name = EXCLUDED.name,
@@ -194,6 +198,7 @@ class ScoringPostgresRepository:
                     firmographics = EXCLUDED.firmographics,
                     discovery_signals = EXCLUDED.discovery_signals,
                     state = EXCLUDED.state,
+                    import_label = COALESCE(EXCLUDED.import_label, scored_accounts.import_label),
                     updated_at = EXCLUDED.updated_at
                 """,
                 {
@@ -204,10 +209,21 @@ class ScoringPostgresRepository:
                     "emp": account.approximate_employees,
                     "firmo": json.dumps(account.firmographics, default=str),
                     "signals": json.dumps(account.discovery_signals, default=str),
-                    "state": state, "max_total": _max_total(account), "now": now,
+                    "state": state, "max_total": _max_total(account),
+                    "label": import_label, "now": now,
                 },
             )
         return self.get(account.account_id)
+
+    def import_labels(self) -> list[dict]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT import_label AS label, COUNT(*) AS count, "
+                "MAX(created_at) AS latest FROM scored_accounts "
+                "WHERE import_label IS NOT NULL GROUP BY import_label "
+                "ORDER BY MAX(created_at) DESC"
+            ).fetchall()
+        return [{"label": r["label"], "count": r["count"]} for r in rows]
 
     def set_state(self, account_id: str, state: str, *, error: str | None = None) -> None:
         with self._pool.connection() as conn:
@@ -343,7 +359,8 @@ class ScoringJsonRepository:
     def ensure_schema(self) -> None:
         return None
 
-    def upsert_account(self, account: Account, *, state: str) -> dict:
+    def upsert_account(self, account: Account, *, state: str,
+                       import_label: str | None = None) -> dict:
         now = datetime.now(UTC).isoformat()
         existing = self._store.get(account.account_id, {})
         existing.update({
@@ -358,10 +375,24 @@ class ScoringJsonRepository:
             "state": state, "max_total": _max_total(account),
             "updated_at": now,
         })
+        if import_label or not existing.get("import_label"):
+            existing["import_label"] = import_label
         existing.setdefault("created_at", now)
         self._store[account.account_id] = existing
         self._flush()
         return _row(existing)
+
+    def import_labels(self) -> list[dict]:
+        agg: dict[str, dict] = {}
+        for r in self._store.values():
+            label = r.get("import_label")
+            if not label:
+                continue
+            slot = agg.setdefault(label, {"label": label, "count": 0, "latest": ""})
+            slot["count"] += 1
+            slot["latest"] = max(slot["latest"], r.get("created_at") or "")
+        rows = sorted(agg.values(), key=lambda s: s["latest"], reverse=True)
+        return [{"label": s["label"], "count": s["count"]} for s in rows]
 
     def set_state(self, account_id: str, state: str, *, error: str | None = None) -> None:
         row = self._store.get(account_id)

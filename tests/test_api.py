@@ -50,7 +50,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(_app_module, "get_scoring_repository",
                         lambda: ScoringJsonRepository(tmp_path / "scoring.json"))
     monkeypatch.setattr(_app_module, "_schedule_scoring",
-                        lambda app, account_id: None)
+                        lambda app, account_id, **kw: None)
     from auto_search.api.app import create_app
     with TestClient(create_app()) as c:
         yield c
@@ -131,7 +131,7 @@ class TestCostControls:
         double click can't double-spend."""
         client.post("/api/scoring/import", content=_HS_CSV)
 
-        async def fake_batch(app, ids):       # don't hit Claude; hold the busy flag
+        async def fake_batch(app, ids, **kw):  # don't hit Claude; hold the busy flag
             return None
         monkeypatch.setattr(_app_module, "_run_batch", fake_batch)
 
@@ -144,12 +144,36 @@ class TestCostControls:
     def test_score_queued_respects_limit(self, client, monkeypatch):
         client.post("/api/scoring/import", content=_HS_CSV)
 
-        async def fake_batch(app, ids):
+        async def fake_batch(app, ids, **kw):
             return None
         monkeypatch.setattr(_app_module, "_run_batch", fake_batch)
 
         out = client.post("/api/scoring/score-queued", json={"limit": 1}).json()
         assert out["started"] == 1 and out["busy"] is True
+
+    def test_large_estimate_requires_confirm(self, client, monkeypatch):
+        """A batch whose estimate exceeds the op cap is refused until the caller
+        passes confirm_large_spend (still inside the monthly budget)."""
+        monkeypatch.setenv("SPEND_MAX_OP_ESTIMATE_USD", "0.10")   # tiny so 2 rows exceed it
+        client.post("/api/scoring/import", content=_HS_CSV)
+
+        async def fake_batch(app, ids, **kw):
+            return None
+        monkeypatch.setattr(_app_module, "_run_batch", fake_batch)
+
+        blocked = client.post("/api/scoring/score-queued", json={})
+        assert blocked.status_code == 400
+        assert blocked.json()["detail"]["error"] == "confirm_large_spend_required"
+
+        ok = client.post("/api/scoring/score-queued",
+                         json={"confirm_large_spend": True}).json()
+        assert ok["started"] == 2 and ok["busy"] is True
+
+    def test_stats_exposes_spend_rollup(self, client):
+        s = client.get("/api/scoring/stats").json()
+        for k in ("month_scoring_cost", "month_discovery_cost", "month_total_cost",
+                  "daily_total_cost", "last_operations"):
+            assert k in s
 
     def test_import_tags_batch_and_lists_it(self, client):
         """Each import is tagged (filename + time) so a user can isolate and
@@ -257,7 +281,7 @@ class TestBudgetEnforcement:
         _max_out_budget(repo)
         client.post("/api/scoring/import", content=_HS_CSV)   # queue fresh accounts
 
-        async def fake_batch(app, ids):
+        async def fake_batch(app, ids, **kw):
             return None
         monkeypatch.setattr(_app_module, "_run_batch", fake_batch)
         out = client.post("/api/scoring/score-queued", json={}).json()

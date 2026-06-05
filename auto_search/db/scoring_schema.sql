@@ -74,3 +74,43 @@ ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS dossier_state TEXT;
 ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS dossier_cost DOUBLE PRECISION NOT NULL DEFAULT 0;
 ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS dossier_generated_at TIMESTAMPTZ;
 ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS dossier_error TEXT;
+
+
+-- ────────────────────────────────────────────────────────────────────
+-- Spend guardrails: one row per paid operation + one row per paid step,
+-- so a runaway batch can be stopped mid-flight and all spend (including
+-- discovery qualify) is auditable rather than invisible.
+-- ────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS spend_operations (
+    id               TEXT PRIMARY KEY,
+    op_type          TEXT NOT NULL,            -- score_batch|score_one|dossier|promote|discovery_cron
+    status           TEXT NOT NULL DEFAULT 'running',
+        -- running|completed|overheated|budget_blocked|failed
+    estimated_usd    DOUBLE PRECISION NOT NULL DEFAULT 0,
+    actual_usd       DOUBLE PRECISION NOT NULL DEFAULT 0,
+    accounts_planned INTEGER NOT NULL DEFAULT 0,
+    accounts_done    INTEGER NOT NULL DEFAULT 0,
+    started_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at      TIMESTAMPTZ,
+    error_message    TEXT,
+    metadata         JSONB
+);
+
+CREATE TABLE IF NOT EXISTS cost_events (
+    id            TEXT PRIMARY KEY,
+    operation_id  TEXT,
+    op_type       TEXT,
+    account_id    TEXT,
+    company_key   TEXT,
+    step          TEXT,                        -- score|qa|dossier|qualify
+    estimated_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+    actual_usd    DOUBLE PRECISION NOT NULL DEFAULT 0,
+    model         TEXT,
+    searches      INTEGER NOT NULL DEFAULT 0,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    metadata      JSONB
+);
+
+CREATE INDEX IF NOT EXISTS idx_cost_events_op ON cost_events (operation_id);
+CREATE INDEX IF NOT EXISTS idx_cost_events_created ON cost_events (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_spend_ops_started ON spend_operations (started_at DESC);

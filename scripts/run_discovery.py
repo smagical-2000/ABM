@@ -275,6 +275,36 @@ async def main(args: argparse.Namespace) -> None:
         print(f"  {RED}errors:        {totals.get('error', 0)}{RESET}")
         print(f"\n  store totals: {repo.stats()}")
         print(f"  {DIM}panel (qualified) → python scripts/run_discovery.py --panel{RESET}")
+        evaluated = (totals.get("qualified", 0) + totals.get("needs_review", 0)
+                     + totals.get("disqualified", 0))
+        _record_discovery_cost(evaluated)
+
+
+def _record_discovery_cost(evaluated: int) -> None:
+    """Make discovery's qualify spend visible in the scoring cost meter.
+
+    Estimate-based (the qualifier's exact per-call cost isn't surfaced), written
+    as a 'qualify' cost_event so it lands in month_discovery_cost. Best-effort:
+    never break the run if the scoring store is unavailable.
+    """
+    if evaluated <= 0:
+        return
+    try:
+        from auto_search.db.scoring_repository import get_scoring_repository
+        from auto_search.scoring import spend_guard
+        repo = get_scoring_repository()
+        if hasattr(repo, "ensure_schema"):
+            repo.ensure_schema()
+        est = round(evaluated * spend_guard.discovery_est_qual_cost(), 4)
+        op = spend_guard.Operation(repo, "discovery_cron",
+                                   estimated_usd=est, accounts_planned=evaluated)
+        op.record(step="qualify", actual_usd=est)
+        op.accounts_done = evaluated
+        op.finish(status="completed")
+        logging.getLogger(__name__).info("recorded discovery qual cost ~$%.2f (%d evaluated)",
+                                         est, evaluated)
+    except Exception:  # noqa: BLE001 — accounting must never break discovery
+        logging.getLogger(__name__).warning("discovery cost recording skipped", exc_info=False)
 
 
 if __name__ == "__main__":

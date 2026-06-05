@@ -57,6 +57,13 @@ class ScoringRepository(Protocol):
     def cost_summary(self) -> dict: ...
     def recover_orphaned_scoring(self, older_than_seconds: int = 0) -> int: ...
     def reset_to_queued(self) -> int: ...
+    # spend guardrails
+    def create_spend_operation(self, op: dict) -> None: ...
+    def finish_spend_operation(self, op_id: str, *, status: str, actual_usd: float,
+                               accounts_done: int, error: str | None = None) -> None: ...
+    def record_cost_event(self, event: dict) -> None: ...
+    def spend_rollup(self) -> dict: ...
+    def recent_operations(self, limit: int = 10) -> list[dict]: ...
 
 
 # ── shared row shaping ────────────────────────────────────────────────
@@ -389,6 +396,64 @@ class ScoringPostgresRepository:
             )
             return cur.rowcount or 0
 
+    # ── spend guardrails ───────────────────────────────────────────────
+
+    def create_spend_operation(self, op: dict) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO spend_operations
+                  (id, op_type, status, estimated_usd, actual_usd,
+                   accounts_planned, accounts_done, metadata)
+                VALUES (%(id)s, %(op_type)s, %(status)s, %(estimated_usd)s,
+                        %(actual_usd)s, %(accounts_planned)s, %(accounts_done)s, %(metadata)s)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                {**op, "metadata": json.dumps(op["metadata"]) if op.get("metadata") else None},
+            )
+
+    def finish_spend_operation(self, op_id, *, status, actual_usd, accounts_done, error=None):
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE spend_operations SET status=%s, actual_usd=%s, accounts_done=%s, "
+                "error_message=%s, finished_at=now() WHERE id=%s",
+                (status, actual_usd, accounts_done, error, op_id))
+
+    def record_cost_event(self, event: dict) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO cost_events
+                  (id, operation_id, op_type, account_id, company_key, step,
+                   estimated_usd, actual_usd, model, searches)
+                VALUES (%(id)s, %(operation_id)s, %(op_type)s, %(account_id)s,
+                        %(company_key)s, %(step)s, %(estimated_usd)s, %(actual_usd)s,
+                        %(model)s, %(searches)s)
+                """, event)
+
+    def spend_rollup(self) -> dict:
+        with self._pool.connection() as conn:
+            r = conn.execute(
+                """
+                SELECT
+                  COALESCE(SUM(actual_usd) FILTER (WHERE step <> 'qualify'
+                      AND created_at >= date_trunc('month', now())), 0) AS month_scoring,
+                  COALESCE(SUM(actual_usd) FILTER (WHERE step = 'qualify'
+                      AND created_at >= date_trunc('month', now())), 0) AS month_discovery,
+                  COALESCE(SUM(actual_usd) FILTER (
+                      WHERE created_at >= date_trunc('day', now())), 0) AS daily_total
+                FROM cost_events
+                """).fetchone()
+        return _rollup(r["month_scoring"], r["month_discovery"], r["daily_total"])
+
+    def recent_operations(self, limit: int = 10) -> list[dict]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT id, op_type, status, estimated_usd, actual_usd, accounts_planned, "
+                "accounts_done, started_at, finished_at FROM spend_operations "
+                "ORDER BY started_at DESC LIMIT %s", (limit,)).fetchall()
+        return [_op_row(r) for r in rows]
+
 
 # ── JSON file (local/dev) ─────────────────────────────────────────────
 
@@ -397,6 +462,11 @@ class ScoringJsonRepository:
     def __init__(self, path: str | Path = "./data/scoring_store.json") -> None:
         self._path = Path(path)
         self._store: dict[str, dict] = self._load()
+        # Spend ledger lives in sibling files so it survives a restart in dev.
+        self._spend_path = self._path.with_suffix(".spend.json")
+        spend = self._load_json(self._spend_path)
+        self._ops: list[dict] = spend.get("operations", [])
+        self._events: list[dict] = spend.get("events", [])
 
     def ensure_schema(self) -> None:
         return None
@@ -561,7 +631,63 @@ class ScoringJsonRepository:
             self._flush()
         return n
 
+    # ── spend guardrails ───────────────────────────────────────────────
+
+    def create_spend_operation(self, op: dict) -> None:
+        self._ops.append({**op, "started_at": datetime.now(UTC).isoformat(),
+                          "finished_at": None, "error_message": None})
+        self._flush_spend()
+
+    def finish_spend_operation(self, op_id, *, status, actual_usd, accounts_done, error=None):
+        for o in self._ops:
+            if o.get("id") == op_id:
+                o.update({"status": status, "actual_usd": actual_usd,
+                          "accounts_done": accounts_done, "error_message": error,
+                          "finished_at": datetime.now(UTC).isoformat()})
+                break
+        self._flush_spend()
+
+    def record_cost_event(self, event: dict) -> None:
+        self._events.append({**event, "created_at": datetime.now(UTC).isoformat()})
+        self._flush_spend()
+
+    def spend_rollup(self) -> dict:
+        month_start = _month_start_iso()
+        day_start = datetime.now(UTC).replace(
+            hour=0, minute=0, second=0, microsecond=0).isoformat()
+        ms = md = dt = 0.0
+        for e in self._events:
+            amt = _as_float(e.get("actual_usd"))
+            created = e.get("created_at") or ""
+            if created >= month_start:
+                if e.get("step") == "qualify":
+                    md += amt
+                else:
+                    ms += amt
+            if created >= day_start:
+                dt += amt
+        return _rollup(ms, md, dt)
+
+    def recent_operations(self, limit: int = 10) -> list[dict]:
+        rows = sorted(self._ops, key=lambda o: o.get("started_at") or "", reverse=True)
+        return [_op_row(o) for o in rows[:limit]]
+
     # -- internals --
+
+    def _load_json(self, path: Path) -> dict:
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text())
+        except json.JSONDecodeError:
+            return {}
+
+    def _flush_spend(self) -> None:
+        self._spend_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._spend_path.with_suffix(self._spend_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(
+            {"operations": self._ops, "events": self._events}, indent=2, default=str))
+        tmp.replace(self._spend_path)
 
     def _load(self) -> dict[str, dict]:
         if not self._path.exists():
@@ -593,6 +719,33 @@ class ScoringJsonRepository:
 # The board-approved scoring budget. Surfaced with spend so the meter reads
 # against a fixed number; override with SCORING_MONTHLY_BUDGET if it changes.
 _MONTHLY_BUDGET = _as_float(os.getenv("SCORING_MONTHLY_BUDGET")) or 200.0
+
+
+def _rollup(month_scoring, month_discovery, daily) -> dict:
+    ms = _as_float(month_scoring)
+    md = _as_float(month_discovery)
+    dt = _as_float(daily)
+    warn = _as_float(os.getenv("SPEND_DAILY_WARN_USD")) or 50.0
+    return {
+        "month_scoring_cost": ms,
+        "month_discovery_cost": md,
+        "month_total_cost": round(ms + md, 4),
+        "daily_total_cost": dt,
+        "daily_warn": warn,
+        "daily_over_warn": bool(warn and dt >= warn),
+    }
+
+
+def _op_row(r) -> dict:
+    return {
+        "id": r.get("id"), "op_type": r.get("op_type"), "status": r.get("status"),
+        "estimated_usd": _as_float(r.get("estimated_usd")),
+        "actual_usd": _as_float(r.get("actual_usd")),
+        "accounts_planned": int(r.get("accounts_planned") or 0),
+        "accounts_done": int(r.get("accounts_done") or 0),
+        "started_at": _iso(r.get("started_at")),
+        "finished_at": _iso(r.get("finished_at")),
+    }
 
 
 def _cost_summary(total, month, scored, queued, csv_avg=0.0) -> dict:

@@ -15,7 +15,7 @@ import logging
 import os
 from typing import Any
 
-from auto_search.scoring import dossier, engine, qa
+from auto_search.scoring import dossier, engine, qa, spend_guard
 from auto_search.scoring.frameworks import FRAMEWORKS, framework_for_segment, resolve_tier
 from auto_search.scoring.models import Account, Dimension, QAResult, ScoreResult
 
@@ -41,11 +41,13 @@ class ScoringService:
 
     # ── score ──────────────────────────────────────────────────────────
 
-    async def run_scoring(self, account_id: str) -> dict | None:
+    async def run_scoring(self, account_id: str, *,
+                          op: spend_guard.Operation | None = None) -> dict | None:
         """Score one account end-to-end: engine -> independent QA -> persist.
 
         Never raises — a scoring failure lands the account in 'error' (retryable)
-        rather than crashing a background task.
+        rather than crashing a background task. `op` (when batched) records the
+        per-step cost and enforces the per-account spend cap.
         """
         row = self._repo.get(account_id)
         if row is None:
@@ -79,13 +81,32 @@ class ScoringService:
             band = resolve_tier(fw, score.total, [d.model_dump() for d in score.dimensions])
             score.tier_band, score.tier_label = band.band, band.label
 
+            # Layer A — per-account spike: record the (paid) scorer step and, if
+            # this one account has already blown past the cap, stop spending more
+            # LLM on it (skip QA) and drop it to 'error'. The batch continues.
+            if op is not None:
+                op.record(step="score", actual_usd=score.cost_usd, account_id=account_id,
+                          company_key=account.discovery_company_key, model=score.model)
+                if op.account_over_cap(account_id):
+                    logger.warning("per-account spend cap hit for %s ($%.2f) — skipping QA",
+                                   account.name, op.account_cost(account_id))
+                    op.accounts_done += 1
+                    self._repo.set_state(account_id, "error",
+                                         error="overheat: per-account spend cap")
+                    return self._repo.get(account_id)
+
             qa_result, qa_cost = await self._verify(account_id, account, score, fw)
             score.qa = qa_result
             score.cost_usd = round(score.cost_usd + qa_cost, 4)
+            if op is not None and qa_cost:
+                op.record(step="qa", actual_usd=qa_cost, account_id=account_id,
+                          company_key=account.discovery_company_key, model=score.model)
             # Apply QA's corrections to the OFFICIAL score before persisting, so
             # the stored total/tier reflect the verification - not just a note.
             qa.apply_qa_corrections(score, score.qa, fw)
             saved = self._repo.save_score(account_id, score)
+            if op is not None:
+                op.accounts_done += 1
         except Exception as e:  # noqa: BLE001 — never leave an account stuck 'scoring'
             logger.exception("persisting score failed for %s", account.name)
             self._repo.set_state(account_id, "error", error=f"{type(e).__name__}: {e}")
@@ -130,7 +151,8 @@ class ScoringService:
 
     # ── dossier (on-demand deep research) ──────────────────────────────
 
-    async def generate_dossier(self, account_id: str) -> dict | None:
+    async def generate_dossier(self, account_id: str, *,
+                               op: spend_guard.Operation | None = None) -> dict | None:
         """Generate the landing-page dossier for a scored account end to end.
 
         Never raises — a failure lands dossier_state='error' (retryable) rather
@@ -155,6 +177,9 @@ class ScoringService:
                                          error=f"{type(e).__name__}: {e}")
             return self._repo.get(account_id)
 
+        if op is not None:
+            op.record(step="dossier", actual_usd=result.cost_usd, account_id=account_id,
+                      company_key=account.discovery_company_key, model=result.model)
         saved = self._repo.save_dossier(account_id, result)
         logger.info("dossier ready for %s ($%.3f)", account.name, result.cost_usd)
         return saved

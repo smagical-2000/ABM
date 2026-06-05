@@ -550,6 +550,7 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
   // cost meter resolve live — and do one final refetch when the last in-flight
   // account finishes, so the resolved score lands without a manual reload.
   const wasActiveRef = useRef(false);
+  const overheatRef = useRef(null);
   useEffect(() => {
     let alive = true;
     async function poll() {
@@ -559,7 +560,17 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
           window.API.scoringStats().catch(() => null),
         ]);
         if (!alive) return;
-        if (s) { setStats(s); if (!s.batch_running) setBatchKick(false); }
+        if (s) {
+          setStats(s);
+          if (!s.batch_running) setBatchKick(false);
+          // Surface a batch that was stopped for overheating, once.
+          const oh = s.last_overheat;
+          const key = oh ? `${oh.actual}/${oh.estimated}` : null;
+          if (key && key !== overheatRef.current) {
+            overheatRef.current = key;
+            pushToast(`Batch stopped — overheated (spent $${oh.actual}, est $${oh.estimated}).`, 'danger');
+          } else if (!key) { overheatRef.current = null; }
+        }
         const busy = (r.active || []).length > 0 || (s && s.batch_running);
         if (busy) { wasActiveRef.current = true; load(true); }
         else if (wasActiveRef.current) { wasActiveRef.current = false; load(true); }
@@ -590,8 +601,12 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
     const n = limit ? Math.min(limit, queued.length) : queued.length;
     setBatchKick(true);
     pushToast(`Scoring ${n} queued ${n === 1 ? 'account' : 'accounts'}…`, 'success');
+    // Clicking "Score all" through the confirm IS the large-spend confirmation,
+    // so pass it through; the server still hard-caps to the monthly budget.
+    const body = limit ? { limit } : {};
+    body.confirm_large_spend = true;
     try {
-      const res = await window.API.scoreQueued(limit ? { limit } : {});
+      const res = await window.API.scoreQueued(body);
       if (res && res.budget_blocked) { setBatchKick(false); pushToast('Monthly budget reached — nothing scored. Raise the budget or wait.', 'danger'); }
       else if (res && res.started === 0) { setBatchKick(false); pushToast('A batch is already running.', 'success'); }
       else if (res && res.budget_capped) { pushToast(`Scoring ${res.started} that fit the budget (the rest stay queued).`, 'success'); }

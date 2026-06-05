@@ -42,6 +42,7 @@ from auto_search.db.scoring_repository import (
 from auto_search.runtime import is_production
 from auto_search.scoring import budget as budget_guard
 from auto_search.scoring import imports as csv_imports
+from auto_search.scoring import spend_guard
 from auto_search.scoring.frameworks import all_frameworks_public
 from auto_search.scoring.service import ScoringService
 from auto_search.services import DiscoveryStats, PanelCompany, ReviewService
@@ -96,41 +97,71 @@ def _claim_scoring(app: FastAPI, account_id: str) -> bool:
     return True
 
 
-def _schedule_scoring(app: FastAPI, account_id: str) -> None:
-    """Background-score one account, guarded so the same account never doubles up."""
+def _schedule_scoring(app: FastAPI, account_id: str, *, op_type: str = "score_one") -> None:
+    """Background-score one account, guarded so the same account never doubles up.
+
+    Wraps the score in a single-account spend operation so even an ad-hoc score
+    or a promote records its cost_events and is held to the per-account cap.
+    """
     if not _claim_scoring(app, account_id):
         logger.info("skip scoring %s — already in flight", account_id)
         return
 
     async def _run() -> None:
+        op = spend_guard.Operation(app.state.scoring_repo, op_type,
+                                   estimated_usd=budget_guard.EST_SCORE_COST,
+                                   accounts_planned=1)
         try:
-            await app.state.scoring.run_scoring(account_id)
+            await app.state.scoring.run_scoring(account_id, op=op)
         finally:
+            op.finish()
             app.state.scoring_inflight.discard(account_id)
 
     _schedule_coro(app, _run())
 
 
-async def _run_batch(app: FastAPI, account_ids: list[str]) -> None:
-    """Score a queued batch with bounded concurrency, then clear the busy flag."""
+async def _run_batch(app: FastAPI, account_ids: list[str], *,
+                     op: spend_guard.Operation | None = None) -> None:
+    """Score a queued batch with bounded concurrency, then clear the busy flag.
+
+    Layer B (per-operation envelope): once `op` reports overheated, stop
+    scheduling NEW accounts — in-flight ones finish — so a batch whose actual
+    spend blows past its estimate is halted mid-flight, not after the fact.
+    """
     sem = asyncio.Semaphore(_BATCH_CONCURRENCY)
+    stop = {"flag": False}
 
     async def one(account_id: str) -> None:
+        if stop["flag"]:
+            return
         async with sem:
+            if stop["flag"]:
+                return
             if not _claim_scoring(app, account_id):
                 return                     # already being scored elsewhere
             try:
-                await app.state.scoring.run_scoring(account_id)
+                await app.state.scoring.run_scoring(account_id, op=op)
             except Exception:  # noqa: BLE001 — one failure must not stop the batch
                 logger.exception("batch scoring failed for %s", account_id)
             finally:
                 app.state.scoring_inflight.discard(account_id)
+            if op is not None and op.overheated() and not stop["flag"]:
+                stop["flag"] = True
+                logger.warning("batch overheated: spent $%.2f vs est $%.2f — stopping new work",
+                               op.actual, op.estimated)
 
     try:
         await asyncio.gather(*(one(a) for a in account_ids))
     finally:
+        if op is not None:
+            op.finish()
+            app.state.last_overheat = (
+                {"actual": round(op.actual, 2), "estimated": round(op.estimated, 2)}
+                if op.overheated() else None
+            )
         app.state.batch_running = False
-    logger.info("batch complete: %d accounts", len(account_ids))
+    logger.info("batch complete: %d accounts (op=%s, $%.3f)",
+                len(account_ids), op.id if op else "—", op.actual if op else 0.0)
 
 
 def _assert_budget(app: FastAPI, est: float) -> dict:
@@ -373,7 +404,7 @@ def create_app() -> FastAPI:
         row = app.state.scoring.enqueue_discovery(
             company.model_dump(), state="scoring" if affordable else "queued")
         if affordable:
-            _schedule_scoring(app, row["account_id"])
+            _schedule_scoring(app, row["account_id"], op_type="promote")
         return {"account_id": row["account_id"], "state": row["state"],
                 "budget_blocked": not affordable}
 
@@ -461,7 +492,17 @@ def create_app() -> FastAPI:
             return account                            # already in flight
         _assert_budget(app, budget_guard.EST_DOSSIER_COST)
         app.state.scoring_repo.set_dossier_state(account_id, "generating")
-        _schedule_coro(app, app.state.scoring.generate_dossier(account_id))
+
+        async def _run() -> None:
+            op = spend_guard.Operation(app.state.scoring_repo, "dossier",
+                                       estimated_usd=budget_guard.EST_DOSSIER_COST,
+                                       accounts_planned=1)
+            try:
+                await app.state.scoring.generate_dossier(account_id, op=op)
+            finally:
+                op.finish()
+
+        _schedule_coro(app, _run())
         return app.state.scoring.get(account_id)
 
     @app.post("/api/scoring/import/preview")
@@ -533,10 +574,23 @@ def create_app() -> FastAPI:
         if affordable <= 0:
             return {"started": 0, "busy": False, "budget_blocked": True, "budget": summary}
         targets = targets[:affordable]
+        # Layer B pre-flight: estimate the batch; a large one needs an explicit
+        # confirm_large_spend (still inside the monthly budget cap above).
+        est_each = summary.get("csv_avg_cost") or summary.get("avg_cost") or budget_guard.EST_SCORE_COST
+        estimate = spend_guard.estimate_batch(len(targets), est_each)
+        if spend_guard.needs_confirmation(estimate) and body.get("confirm_large_spend") is not True:
+            raise HTTPException(status_code=400, detail={
+                "error": "confirm_large_spend_required",
+                "estimated_usd": estimate, "accounts": len(targets),
+                "threshold_usd": spend_guard.max_op_estimate(),
+            })
+        op = spend_guard.Operation(app.state.scoring_repo, "score_batch",
+                                   estimated_usd=estimate, accounts_planned=len(targets))
         app.state.batch_running = True
-        _schedule_coro(app, _run_batch(app, targets))
+        _schedule_coro(app, _run_batch(app, targets, op=op))
         return {"started": len(targets), "busy": True,
-                "budget_capped": len(targets) < requested, "budget": summary}
+                "budget_capped": len(targets) < requested,
+                "estimated_usd": estimate, "operation_id": op.id, "budget": summary}
 
     @app.post("/api/scoring/reset")
     async def scoring_reset(request: Request):
@@ -556,10 +610,16 @@ def create_app() -> FastAPI:
 
     @app.get("/api/scoring/stats")
     def scoring_stats():
-        """Spend summary for the live cost meter: month-to-date vs budget, total,
-        average per account, and how many accounts are parked in 'queued'."""
+        """Spend summary for the live cost meter: month-to-date vs budget, the
+        scoring/discovery/daily rollup, and the recent spend operations."""
         summary = app.state.scoring_repo.cost_summary()
         summary["batch_running"] = bool(getattr(app.state, "batch_running", False))
+        try:
+            summary.update(app.state.scoring_repo.spend_rollup())
+            summary["last_operations"] = app.state.scoring_repo.recent_operations(8)
+        except Exception:  # noqa: BLE001 — rollup is best-effort, never break the meter
+            logger.exception("spend rollup failed")
+        summary["last_overheat"] = getattr(app.state, "last_overheat", None)
         return summary
 
     @app.get("/api/health")

@@ -213,13 +213,16 @@ def show_panel(repo) -> None:
     print(f"\n  {len(rows)} qualified compan{'y' if len(rows) == 1 else 'ies'} in panel")
 
 
-async def main(args: argparse.Namespace) -> None:
+async def main(args: argparse.Namespace) -> int:
+    """Returns a process exit code: 0 ok (incl. partial-source failures),
+    1 if every selected source failed (a total failure the scheduler should
+    flag), 2 on a usage error."""
     configure_logging(args.debug)
     repo = get_repository()
 
     if args.panel:
         show_panel(repo)
-        return
+        return 0
 
     since = datetime.now(UTC) - timedelta(days=args.days)
     # --no-limit (or --limit 0) removes the artificial per-source cap: the daily
@@ -234,7 +237,7 @@ async def main(args: argparse.Namespace) -> None:
     unknown = [s for s in selected if s not in CONNECTORS]
     if unknown:
         print(f"{RED}unknown source(s): {unknown}. valid: {list(CONNECTORS)}{RESET}")
-        return
+        return 2
 
     print(f"\n{BOLD}Discovery run{RESET}  since {since.date()} ({args.days}d), "
           f"limit {'no cap' if limit is None else f'{limit}/source'}, sources={selected}, "
@@ -244,6 +247,7 @@ async def main(args: argparse.Namespace) -> None:
               f"per new company{RESET}")
 
     totals: dict[str, int] = {}
+    ran = failed = 0
     for name in selected:
         try:
             connector = CONNECTORS[name](limit)
@@ -260,10 +264,12 @@ async def main(args: argparse.Namespace) -> None:
                 prefilter=prefilter,
             )
         except Exception as e:  # noqa: BLE001 — one source must not kill the cron
+            failed += 1
             logging.getLogger(__name__).error(
                 "connector %s failed: %s", name, e, exc_info=args.debug)
             print(f"  {RED}⚠️  {name} failed: {type(e).__name__}: {e}{RESET}")
             continue
+        ran += 1
         for k, v in counts.items():
             totals[k] = totals.get(k, 0) + v
 
@@ -278,6 +284,16 @@ async def main(args: argparse.Namespace) -> None:
         evaluated = (totals.get("qualified", 0) + totals.get("needs_review", 0)
                      + totals.get("disqualified", 0))
         _record_discovery_cost(evaluated)
+
+    # Production exit code: a single source failing keeps exit 0 (resilient), but
+    # a TOTAL failure (every selected source errored) exits non-zero so the
+    # scheduler marks the run failed and can alert.
+    if selected and ran == 0:
+        print(f"\n  {RED}all {failed} source(s) failed — exiting non-zero{RESET}")
+        return 1
+    if failed:
+        print(f"  {YELLOW}{failed} of {len(selected)} source(s) failed (others ran){RESET}")
+    return 0
 
 
 def _record_discovery_cost(evaluated: int) -> None:
@@ -332,4 +348,4 @@ if __name__ == "__main__":
     p.add_argument("--panel", action="store_true",
                    help="Show the current qualified-company panel and exit")
     p.add_argument("--debug", action="store_true")
-    asyncio.run(main(p.parse_args()))
+    sys.exit(asyncio.run(main(p.parse_args())))

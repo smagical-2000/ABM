@@ -91,6 +91,17 @@ class TestWorkflow:
     def test_promote_404(self, client):
         assert client.post("/api/company/nope/promote").status_code == 404
 
+    def test_discovery_run_kicks_browserless_sources(self, client, monkeypatch):
+        """The on-demand panel button runs the browserless sources (not layoffs)."""
+        async def fake_run(repo, **kw):
+            return {"ran": 4, "qualified": 0, "needs_review": 0,
+                    "disqualified": 0, "by_source": {}}
+        monkeypatch.setattr(_app_module.discovery_runner, "run_once", fake_run)
+        out = client.post("/api/discovery/run").json()
+        assert out["started"] is True
+        assert set(out["sources"]) == {"leadership", "acquisitions", "funding", "jobs"}
+        assert "layoffs" not in out["sources"]
+
     def test_reject_requires_reason(self, client):
         # missing body → 422 validation
         assert client.post("/api/company/acmehealth/reject").status_code == 422

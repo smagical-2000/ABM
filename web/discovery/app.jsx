@@ -200,6 +200,8 @@ function App() {
   useEffect(() => { loadAll(); }, []);
 
   const [activity, setActivity] = useState([]);
+  const [discoRunning, setDiscoRunning] = useState(false);   // on-demand run in flight
+  const [confirmRun, setConfirmRun] = useState(false);
   const [feed, setFeed] = useState([]);
   const wasActiveRef = useRef(false);
   const lastSeenRef = useRef(null);
@@ -219,6 +221,7 @@ function App() {
         const active = (a && a.active) || [];
         const recent = (a && a.recent) || [];
         setActivity(active);
+        setDiscoRunning(!!(a && a.running) || active.length > 0);
         if (lastSeenRef.current === null) {
           lastSeenRef.current = recent.length ? recent[0].at : '';
         } else {
@@ -234,6 +237,16 @@ function App() {
     const id = setInterval(poll, 4000);
     return () => { alive = false; clearInterval(id); };
   }, []);
+
+  async function handleRunDiscovery() {
+    setConfirmRun(false);
+    setDiscoRunning(true);
+    try {
+      const res = await window.API.runDiscovery();
+      if (res && res.busy) { pushToast('A discovery run is already in progress.', 'muted'); return; }
+      pushToast('Discovery running — pulling the last 24h…', 'success');
+    } catch (e) { setDiscoRunning(false); pushToast(`Couldn't start: ${e.message}`, 'danger'); }
+  }
 
   function removeCompany(key) {
     setLeaving((l) => ({ ...l, [key]: true }));
@@ -350,6 +363,19 @@ function App() {
                       deadline={deadline} queued={queuedCount} onPreview={previewCountdown} onClose={() => setAutoOpen(false)} />
                   )}
                 </div>
+                {confirmRun ? (
+                  <span className="inline-flex items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2 py-1 text-[12.5px]">
+                    <span className="px-1 text-zinc-500" title="Layoffs (WARN) runs via the scheduled cron — it needs a browser the API image omits.">Pull last 24h? (leadership · M&A · funding · jobs)</span>
+                    <button onClick={() => setConfirmRun(false)} className="rounded-md px-2 py-1 font-medium text-zinc-500 transition-colors hover:bg-zinc-100">Cancel</button>
+                    <button onClick={handleRunDiscovery} className="rounded-md bg-indigo-600 px-2.5 py-1 font-medium text-white transition-colors hover:bg-indigo-700">Run</button>
+                  </span>
+                ) : (
+                  <button onClick={() => setConfirmRun(true)} disabled={discoRunning}
+                    title="Pull the last 24h of signals into the panel now (browserless sources)"
+                    className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-1.5 text-[13px] font-medium text-white shadow-sm transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">
+                    {discoRunning ? <><Icons.refresh className="h-4 w-4 animate-spin" />Running…</> : <><Icons.zap className="h-4 w-4" />Run 24h</>}
+                  </button>
+                )}
                 <button onClick={() => { setLoading(true); loadAll(); pushToast('Refreshed', 'muted'); }}
                   className="inline-flex items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[13px] font-medium text-zinc-600 transition-colors hover:bg-zinc-50">
                   <Icons.refresh className="h-4 w-4" />Refresh

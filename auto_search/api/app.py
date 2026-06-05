@@ -33,6 +33,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from auto_search import discovery_runner
 from auto_search.api.auth import install_basic_auth
 from auto_search.db import get_repository
 from auto_search.db.scoring_repository import (
@@ -264,6 +265,8 @@ async def lifespan(app: FastAPI):
     app.state.scoring_tasks = set()           # keep background score tasks alive
     app.state.scoring_inflight = set()        # account_ids being scored (dedupe lock)
     app.state.batch_running = False           # one queued batch at a time
+    app.state.discovery_running = False       # one on-demand discovery run at a time
+    app.state.last_discovery = None
     app.state.loop = asyncio.get_running_loop()
     # No scoring task can be alive at boot, so anything still marked 'scoring'
     # was orphaned by the previous shutdown — return it to the queue so it does
@@ -370,7 +373,44 @@ def create_app() -> FastAPI:
         repo = app.state.repo
         active = repo.active_runs() if hasattr(repo, "active_runs") else []
         recent = repo.recent_decisions() if hasattr(repo, "recent_decisions") else []
-        return {"active": active, "recent": recent}
+        return {"active": active, "recent": recent,
+                "running": bool(getattr(app.state, "discovery_running", False)),
+                "last_run": getattr(app.state, "last_discovery", None)}
+
+    @app.post("/api/discovery/run")
+    def discovery_run():
+        """Manually pull the last 24h of signals into the panel, on demand.
+
+        Runs the browserless sources (leadership, acquisitions, funding, jobs) in
+        the background, deduped; the existing activity poll shows it processing
+        and qualified companies stream into the panel. Layoffs (WARN) needs a
+        browser the web image omits, so it stays with the cron worker. One run at
+        a time so a double click can't double-spend."""
+        if getattr(app.state, "discovery_running", False):
+            return {"started": False, "busy": True}
+        app.state.discovery_running = True
+
+        async def _run() -> None:
+            op = spend_guard.Operation(app.state.scoring_repo, "discovery_manual",
+                                       estimated_usd=0.0, accounts_planned=0)
+
+            def on_cost(evaluated: int) -> None:
+                op.record(step="qualify",
+                          actual_usd=round(evaluated * spend_guard.discovery_est_qual_cost(), 4))
+                op.accounts_done = evaluated
+
+            try:
+                summary = await discovery_runner.run_once(
+                    app.state.repo, days=1, on_cost=on_cost)
+                app.state.last_discovery = {**summary, "at": datetime.now(UTC).isoformat()}
+            except Exception:  # noqa: BLE001 — never crash the loop
+                logger.exception("on-demand discovery run failed")
+            finally:
+                op.finish()
+                app.state.discovery_running = False
+
+        _schedule_coro(app, _run())
+        return {"started": True, "sources": list(discovery_runner.BROWSERLESS_SOURCES)}
 
     @app.get("/api/company/{key}", response_model=PanelCompany)
     def get_company(key: str):

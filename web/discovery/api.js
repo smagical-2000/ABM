@@ -24,6 +24,8 @@ async function http(path, opts) {
 window.API = {
   stats: () => http('/api/stats'),
   activity: () => http('/api/activity'),
+  // Manually pull the last 24h of signals into the panel (browserless sources).
+  runDiscovery: () => http('/api/discovery/run', { method: 'POST' }),
   panel: ({ status = 'qualified', segment, signal_type } = {}) => {
     const q = new URLSearchParams({ status });
     if (segment && segment !== 'all') q.set('segment', segment);

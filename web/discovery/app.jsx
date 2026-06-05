@@ -325,9 +325,9 @@ function App() {
         <div className="mx-auto flex max-w-6xl items-center justify-between px-8 py-4">
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2.5">
-              <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-indigo-600 text-white">
-                <Icons.sparkle className="h-4 w-4" />
-              </div>
+              <img src={(typeof window !== 'undefined' && window.MAGICAL_LOGO_URL) || 'assets/magical-logo.svg'}
+                alt="Magical" className="h-7 w-7 rounded-lg"
+                onError={(e) => { e.currentTarget.style.display = 'none'; }} />
               <span className="text-[15px] font-semibold tracking-tight">Magical</span>
               <span className="text-zinc-300">/</span>
             </div>

@@ -20,7 +20,7 @@ import textwrap
 from datetime import UTC, datetime
 
 from auto_search import llm
-from auto_search.scoring.frameworks import Framework, resolve_tier
+from auto_search.scoring.frameworks import Framework, resolve_tier, scoring_prompt_context
 from auto_search.scoring.models import Account, QACorrection, QAResult, ScoreResult
 
 logger = logging.getLogger(__name__)
@@ -62,7 +62,10 @@ async def qa_account(
         return QAResult(status="unverifiable",
                         notes="Independent QA could not complete.", corrections=[]), 0.0
 
-    cost = llm.call_cost(response, searches=len(llm.extract_web_searches(response)))
+    queries = llm.extract_web_searches(response)
+    cost = llm.call_cost(response, searches=len(queries))
+    if queries:
+        logger.info("QA searches for %s: %s", account.name, " | ".join(queries))
     corrections = _parse_corrections(data.get("corrections", []))
     status = data.get("status")
     if status not in ("verified", "discrepancy", "unverifiable"):
@@ -171,6 +174,8 @@ def _qa_system_prompt(fw: Framework, *, light: bool = False) -> str:
         assigned — but NOT their reasoning. Do not assume the analyst is right.
         You are not a commentator: if you find a material error you MUST assign a
         corrected_score. A discrepancy without a number is invalid.
+
+        {scoring_prompt_context()}
 
         {scope} Dimensions: {ceilings}.
 

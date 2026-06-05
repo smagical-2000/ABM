@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import textwrap
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 
 @dataclass(frozen=True)
@@ -136,6 +137,8 @@ _SPECIALTY = Framework(
             Hiring patterns (revenue cycle, operations, IT), leadership changes,
             new facilities/expansions, efficiency/margin mandates, press on AI /
             cost reduction / staffing, funding rounds, PE-backed (add points).
+            Weight recency: signals from the last 18 months score highest; older
+            signals alone cap this dimension at 6/10.
             """).strip()),
     ),
     bands=(
@@ -188,6 +191,22 @@ SEGMENT_TO_FRAMEWORK = {
 }
 
 DEFAULT_FRAMEWORK = "specialty"
+
+
+def scoring_prompt_context() -> str:
+    """Shared date + recency lines injected into scorer, QA, and dossier prompts."""
+    today = datetime.now(UTC).strftime("%B %d, %Y")
+    return textwrap.dedent(f"""
+        TODAY'S DATE: {today}.
+
+        RECENCY (web_search + intent scoring):
+        - Prefer evidence from the last 18 months.
+        - For high intent scores (7+), cite at least one signal from the last 12 months.
+        - 2023-2024 findings are acceptable only when no newer public signal exists;
+          say so explicitly in the summary ("no 2025-2026 signal found; using 2024 …").
+        - Do not treat undated or clearly outdated content as current buying intent.
+        - Leadership changes older than 18 months should not drive high intent alone.
+    """).strip()
 
 
 def framework_for_segment(segment: str | None) -> Framework:

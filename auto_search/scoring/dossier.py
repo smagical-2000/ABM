@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 
 from auto_search import llm
 from auto_search.scoring import apollo
+from auto_search.scoring.frameworks import scoring_prompt_context
 from auto_search.scoring.models import (
     Account,
     DecisionMaker,
@@ -123,6 +124,8 @@ def _system_prompt(has_people: bool) -> str:
         per-pillar dimension summaries, and its known facts - treat those as
         AUTHORITATIVE and do not re-research them. __PEOPLE_CLAUSE__
 
+        __DATE_CONTEXT__
+
         Spend web_search only on what is not already provided:
           - recent, dated news (EHR go-lives, M&A, leadership moves, funding,
             awards, expansions);
@@ -181,7 +184,9 @@ def _system_prompt(has_people: bool) -> str:
         Aim for 6-10 firmographic rows, 3-5 intent signals, 3-5 recent news
         items, 4-6 pain points, and 3-5 messaging angles.
     """)
-    return body.replace("__PEOPLE_CLAUSE__", people).strip()
+    return (body.replace("__PEOPLE_CLAUSE__", people)
+            .replace("__DATE_CONTEXT__", scoring_prompt_context())
+            .strip())
 
 
 def _user_message(account: Account, score: ScoreResult, people: list[dict]) -> str:

@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -58,14 +59,28 @@ BOLD, GREEN, YELLOW, RED, DIM, CYAN, RESET = (
 )
 
 # Connector registry — add a new source here and it joins the run for free.
-# `limit` is the per-source cost knob: records/page for SignalBase, rows/title
-# for Indeed.
+# `limit` is the per-source cost knob (records/page for SignalBase, rows/title
+# for Indeed). limit=None means "no artificial cap" — page deeply for a full
+# window pull (the daily cron), tunable via env so cost stays controllable.
+def _sb_kwargs(limit):
+    if limit is None:
+        return {
+            "max_pages": int(os.getenv("DISCOVERY_SIGNALBASE_MAX_PAGES", "50")),
+            "per_page": int(os.getenv("DISCOVERY_SIGNALBASE_PER_PAGE", "100")),
+        }
+    return {"max_pages": 1, "per_page": limit}
+
+
+def _jobs_rows(limit):
+    return limit if limit is not None else int(os.getenv("DISCOVERY_JOBS_MAX_ROWS", "200"))
+
+
 CONNECTORS = {
     "layoffs": lambda limit: WarnTrackerConnector(),
-    "leadership": lambda limit: LeadershipChangesConnector(max_pages=1, per_page=limit),
-    "acquisitions": lambda limit: AcquisitionsConnector(max_pages=1, per_page=limit),
-    "funding": lambda limit: FundingConnector(max_pages=1, per_page=limit),
-    "jobs": lambda limit: JobPostingsConnector(max_rows=limit),
+    "leadership": lambda limit: LeadershipChangesConnector(**_sb_kwargs(limit)),
+    "acquisitions": lambda limit: AcquisitionsConnector(**_sb_kwargs(limit)),
+    "funding": lambda limit: FundingConnector(**_sb_kwargs(limit)),
+    "jobs": lambda limit: JobPostingsConnector(max_rows=_jobs_rows(limit)),
 }
 
 
@@ -97,7 +112,7 @@ async def run_connector(
     since: datetime,
     repo,
     *,
-    limit: int,
+    limit: int | None,
     qualify: bool,
     prefilter=None,
 ) -> dict[str, int]:
@@ -207,6 +222,9 @@ async def main(args: argparse.Namespace) -> None:
         return
 
     since = datetime.now(UTC) - timedelta(days=args.days)
+    # --no-limit (or --limit 0) removes the artificial per-source cap: the daily
+    # cron pulls the full window and pages deeply (env-tunable).
+    limit = None if (args.no_limit or args.limit == 0) else args.limit
     if args.sources:
         selected = [s.strip() for s in args.sources.split(",") if s.strip()]
     elif args.only:
@@ -219,7 +237,7 @@ async def main(args: argparse.Namespace) -> None:
         return
 
     print(f"\n{BOLD}Discovery run{RESET}  since {since.date()} ({args.days}d), "
-          f"limit {args.limit}/source, sources={selected}, "
+          f"limit {'no cap' if limit is None else f'{limit}/source'}, sources={selected}, "
           f"{'QUALIFY' if not args.no_qualify else 'dry run (no Claude)'}")
     if not args.no_qualify:
         print(f"  {YELLOW}Cost: SignalBase per record + ~$0.10–0.15 Claude "
@@ -228,7 +246,7 @@ async def main(args: argparse.Namespace) -> None:
     totals: dict[str, int] = {}
     for name in selected:
         try:
-            connector = CONNECTORS[name](args.limit)
+            connector = CONNECTORS[name](limit)
             # The jobs source gets the cheap job-level qualifier as a pre-filter
             # (title + JD) so only genuine RCM postings reach company scoring.
             prefilter = (
@@ -238,7 +256,7 @@ async def main(args: argparse.Namespace) -> None:
             )
             counts = await run_connector(
                 name, connector, since, repo,
-                limit=args.limit, qualify=not args.no_qualify,
+                limit=limit, qualify=not args.no_qualify,
                 prefilter=prefilter,
             )
         except Exception as e:  # noqa: BLE001 — one source must not kill the cron
@@ -265,7 +283,12 @@ if __name__ == "__main__":
     p.add_argument("--days", type=int, default=7,
                    help="Lookback window per source (default 7)")
     p.add_argument("--limit", type=int, default=5,
-                   help="Max records/companies per source (cost knob, default 5)")
+                   help="Max records/companies per source (cost knob, default 5). "
+                        "Use 0 (or --no-limit) for no cap.")
+    p.add_argument("--no-limit", action="store_true",
+                   help="No artificial per-source cap — pull the full window and "
+                        "page deeply (the daily cron mode). Env-tunable: "
+                        "DISCOVERY_SIGNALBASE_MAX_PAGES/PER_PAGE, DISCOVERY_JOBS_MAX_ROWS.")
     p.add_argument("--only", choices=list(CONNECTORS),
                    help="Run a single source")
     p.add_argument("--sources",

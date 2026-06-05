@@ -23,6 +23,7 @@ from auto_search.scoring.frameworks import (
     Framework,
     framework_for_segment,
     resolve_tier,
+    scoring_prompt_context,
 )
 from auto_search.scoring.models import Account, Dimension, ScoreResult
 
@@ -100,6 +101,8 @@ async def score_account(account: Account, prior: ScoreResult | None = None) -> S
     logger.info("  -> %s %d/%d  (%d searches, $%.3f)",
                 result.tier_label, result.total, result.max_total,
                 len(queries), result.cost_usd)
+    if queries:
+        logger.info("  scorer searches for %s: %s", account.name, " | ".join(queries))
     return result
 
 
@@ -123,14 +126,24 @@ def _system_prompt(fw: Framework) -> str:
 
         {fw.intro}
 
+        {scoring_prompt_context()}
+
         Use the web_search tool sparingly to research the company. You have a
         small search budget, so spend it only on what you do NOT already have:
         competitor/automation vendors, pain signals, leadership changes, and
-        recent intent. When a fact is given to you as a KNOWN FACT, treat it as
-        authoritative and do NOT search for it. Use only publicly available
-        information. When a value is genuinely missing, infer logically from
-        size/specialty/patterns and flag it "inferred"; if it cannot be
-        reasonably inferred, score it low and flag it "unknown".
+        recent intent. When a fact is given to you as a KNOWN FACT (from a CSV
+        import), treat it as authoritative and do NOT search for it — those
+        CSV values are confirmed data, not "inferred".
+
+        FLAGS on each dimension (not on individual CSV fields):
+        - No flag: at least one named, dated public fact supports the score.
+        - "inferred": partial evidence only — a reasonable estimate for what
+          is NOT in KNOWN FACTS (e.g. RCM vendor, buying intent). Do NOT flag a
+          dimension "inferred" when KNOWN FACTS already supply the numbers for
+          that dimension (physicians, locations, Epic, Medicare allowed, etc.).
+          Do NOT use "inferred" on intent scores above 6/10.
+        - "unknown": no evidence and no reliable pattern — score that dimension
+          low (typically 4/10 or below).
 
         Score every dimension below. The score must not exceed the dimension's
         ceiling.

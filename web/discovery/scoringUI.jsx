@@ -163,11 +163,19 @@ function dimColor(ratio) {
   if (ratio >= 0.5) return { bar: 'bg-amber-500', text: 'text-amber-600' };
   return { bar: 'bg-rose-400', text: 'text-rose-500' };
 }
+const FLAG_LABELS = { inferred: 'Estimated', unknown: 'Unconfirmed' };
 function FlagChip({ flag }) {
-  const known = flag === 'inferred';
+  const estimated = flag === 'inferred';
+  const label = FLAG_LABELS[flag] || flag;
+  const title = flag === 'inferred'
+    ? 'Estimated from patterns — not a confirmed CSV or web fact'
+    : flag === 'unknown'
+      ? 'Could not confirm — score is conservative'
+      : flag;
   return (
-    <span className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10.5px] font-medium uppercase tracking-wide ring-1 ring-inset ${known ? 'bg-amber-50 text-amber-600 ring-amber-100' : 'bg-zinc-100 text-zinc-400 ring-zinc-200'}`}>
-      {flag}
+    <span title={title}
+      className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10.5px] font-medium uppercase tracking-wide ring-1 ring-inset ${estimated ? 'bg-amber-50 text-amber-600 ring-amber-100' : 'bg-zinc-100 text-zinc-400 ring-zinc-200'}`}>
+      {label}
     </span>
   );
 }

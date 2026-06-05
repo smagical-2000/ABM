@@ -50,11 +50,16 @@ class ScoringError(RuntimeError):
     """Raised when a score cannot be produced (the service marks it retryable)."""
 
 
-async def score_account(account: Account) -> ScoreResult:
-    """Score one account. Raises ScoringError on an unrecoverable failure."""
+async def score_account(account: Account, prior: ScoreResult | None = None) -> ScoreResult:
+    """Score one account. Raises ScoringError on an unrecoverable failure.
+
+    On a re-score, `prior` carries the account's last official scores so the
+    model holds them steady unless web_search finds new dated evidence - keeping
+    re-scores consistent on top of temperature 0.
+    """
     fw = _framework(account)
     system = _system_prompt(fw)
-    user = _user_message(account, fw)
+    user = _user_message(account, fw, prior)
 
     logger.info("scoring %r on %s rubric", account.name, fw.key)
     try:
@@ -157,9 +162,10 @@ def _system_prompt(fw: Framework) -> str:
     """).strip()
 
 
-def _user_message(account: Account, fw: Framework) -> str:
+def _user_message(account: Account, fw: Framework, prior: ScoreResult | None = None) -> str:
     known = _known_facts_block(account)
     signals = _signals_block(account)
+    prior_block = _prior_block(prior)
     ctx = {
         "company": account.name,
         "segment": account.segment,
@@ -174,9 +180,26 @@ def _user_message(account: Account, fw: Framework) -> str:
         ```json
         {json.dumps(ctx, indent=2, default=str)}
         ```
-        {known}{signals}
+        {known}{signals}{prior_block}
         Respond with ONLY the JSON object described in the system prompt.
     """).strip()
+
+
+def _prior_block(prior: ScoreResult | None) -> str:
+    if prior is None or not prior.dimensions:
+        return ""
+    dims = [
+        {"key": d.key, "label": d.label, "score": d.score, "max": d.max}
+        for d in prior.dimensions
+    ]
+    facts = json.dumps(dims, indent=2, default=str)
+    return (
+        "\nPRIOR OFFICIAL SCORES (this account was scored before):\n"
+        f"```json\n{facts}\n```\n"
+        "Change a dimension's score only if web_search finds NEW dated evidence "
+        "since the last score; otherwise return the same scores and summaries. "
+        "Do not re-research the KNOWN FACTS.\n"
+    )
 
 
 def _known_facts_block(account: Account) -> str:

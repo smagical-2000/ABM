@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import textwrap
+from datetime import UTC, datetime
 
 from auto_search import llm
 from auto_search.scoring.frameworks import Framework, resolve_tier
@@ -66,6 +67,10 @@ async def qa_account(
     status = data.get("status")
     if status not in ("verified", "discrepancy", "unverifiable"):
         status = "discrepancy" if corrections else "verified"
+    # A discrepancy must carry an actionable number; if QA flagged one without a
+    # corrected_score, there is nothing to apply, so treat it as unverifiable.
+    if status == "discrepancy" and not any(c.corrected_score is not None for c in corrections):
+        status = "unverifiable"
 
     qa = QAResult(
         status=status,
@@ -105,6 +110,46 @@ def mark_tier_changing(fw: Framework, score: ScoreResult, qa: QAResult) -> None:
     qa.tier_changing = new_band.band != score.tier_band
 
 
+def apply_qa_corrections(score: ScoreResult, qa: QAResult, fw: Framework) -> None:
+    """Apply QA's corrected scores to the OFFICIAL score, in place.
+
+    The persisted score becomes the QA-corrected one — not just a note in the
+    drawer. Verified / unverifiable / skipped, or a discrepancy whose corrections
+    carry no corrected_score, leave the score untouched. Otherwise: snapshot the
+    analyst pass once, set each corrected dimension (clamped to its ceiling),
+    recompute the total, re-resolve the tier, and mark applied.
+    """
+    if qa is None or qa.status in ("verified", "unverifiable", "skipped"):
+        return
+    actionable = [c for c in qa.corrections if c.corrected_score is not None]
+    if not actionable:
+        return
+
+    if not qa.applied:
+        qa.analyst_dimensions = [d.model_copy(deep=True) for d in score.dimensions]
+        qa.analyst_total = score.total
+    analyst_band = score.tier_band
+
+    by_key = {d.key: d for d in score.dimensions}
+    by_label = {d.label.lower(): d for d in score.dimensions}
+    changed = False
+    for c in actionable:
+        dim = by_key.get(c.dimension) or by_label.get((c.dimension or "").lower())
+        if dim is None:
+            continue
+        dim.score = max(0.0, min(float(c.corrected_score), float(dim.max)))
+        changed = True
+    if not changed:
+        return
+
+    score.total = int(round(sum(d.score for d in score.dimensions)))
+    band = resolve_tier(fw, score.total, [d.model_dump() for d in score.dimensions])
+    score.tier_band, score.tier_label = band.band, band.label
+    qa.applied = True
+    qa.applied_at = datetime.now(UTC).isoformat()
+    qa.tier_changing = band.band != analyst_band
+
+
 # ── prompt building ───────────────────────────────────────────────────
 
 
@@ -121,20 +166,30 @@ def _qa_system_prompt(fw: Framework, *, light: bool = False) -> str:
     )
     return textwrap.dedent(f"""
         You are an independent QA reviewer for Magical's ABM scoring. A first
-        analyst has scored an account on the {fw.label} rubric. You are given the
+        analyst scored an account on the {fw.label} rubric. You are given the
         account, its known facts, and the per-dimension scores the analyst
         assigned — but NOT their reasoning. Do not assume the analyst is right.
+        You are not a commentator: if you find a material error you MUST assign a
+        corrected_score. A discrepancy without a number is invalid.
 
         {scope} Dimensions: {ceilings}.
 
-        For any dimension where your finding would materially change the score,
-        add a correction: what the analyst's score implies, what you found, and
-        the score you believe is correct.
-
-        Decide a status:
-          - "verified": the checkable facts hold up.
-          - "discrepancy": one or more material disagreements (add corrections).
-          - "unverifiable": key facts cannot be confirmed from public sources.
+        Rules:
+        1. KNOWN FACTS from the CSV import are authoritative for firmographics -
+           organization size, locations, Epic/EMR, Medicare allowed. Only correct
+           a firmographic dimension if the CSV conflicts with a cited public
+           source (put the URL and date in "found").
+        2. Technographic: Epic from the CSV is confirmed modernization. Optum
+           advisory / encoder tools are NOT a deployed Magical competitor. Only
+           reduce technographic for a confirmed direct RCM-AI automation vendor
+           (e.g. Notable, ThoughtfulAI, AssortHealth) or clear "no modernization"
+           evidence.
+        3. Every correction MUST include corrected_score as an integer within the
+           dimension's 0..max. A null corrected_score is invalid.
+        4. status "verified" -> corrections must be [].
+        5. status "discrepancy" -> at least one correction with a corrected_score.
+        6. Be conservative: if the evidence is weak, status is "unverifiable",
+           not "discrepancy".
 
         Return ONLY this JSON object, no prose, no fences:
         {{
@@ -143,8 +198,8 @@ def _qa_system_prompt(fw: Framework, *, light: bool = False) -> str:
           "corrections": [
             {{ "dimension": "<dimension key>",
                "claimed": "<what the analyst's score implies>",
-               "found": "<what you found>",
-               "corrected_score": <number or null> }}
+               "found": "<what you found, with URL + date when you cite a source>",
+               "corrected_score": <integer within 0..max> }}
           ]
         }}
     """).strip()

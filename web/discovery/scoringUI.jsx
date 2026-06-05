@@ -173,9 +173,10 @@ function FlagChip({ flag }) {
 }
 window.FlagChip = FlagChip;
 
-function DimensionRow({ dim, correction }) {
+function DimensionRow({ dim, correction, analystScore }) {
   const ratio = dim.score / dim.max;
   const { bar, text } = dimColor(ratio);
+  const adjusted = analystScore != null && analystScore !== dim.score;
   return (
     <div className="py-3.5 border-b border-zinc-100 last:border-0">
       <div className="flex items-center justify-between gap-3">
@@ -183,7 +184,10 @@ function DimensionRow({ dim, correction }) {
           <span className="truncate text-[13.5px] font-medium text-zinc-800">{dim.label}</span>
           {(dim.flags || []).map((f, i) => <FlagChip key={i} flag={f} />)}
         </div>
-        <span className={`shrink-0 tabular-nums text-[13px] font-semibold ${text}`}>{dim.score}<span className="text-zinc-300 font-normal">/{dim.max}</span></span>
+        <span className={`shrink-0 tabular-nums text-[13px] font-semibold ${text}`}>
+          {adjusted && <span className="mr-1 font-normal text-zinc-300 line-through">{analystScore}</span>}
+          {dim.score}<span className="text-zinc-300 font-normal">/{dim.max}</span>
+        </span>
       </div>
       <div className="mt-2 h-1.5 rounded-full bg-zinc-100 overflow-hidden">
         <div className={`h-full rounded-full ${bar}`} style={{ width: `${ratio * 100}%`, transition: 'width 0.7s cubic-bezier(0.16,1,0.3,1)' }} />

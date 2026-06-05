@@ -78,6 +78,13 @@ class QAResult(BaseModel):
     notes: str = ""
     corrections: list[QACorrection] = Field(default_factory=list)
     tier_changing: bool = False
+    # When QA's corrections are applied to the official score, snapshot the
+    # analyst's original pass so the UI can show analyst -> official, and mark
+    # that the official total/tier reflect the correction.
+    applied: bool = False
+    applied_at: str | None = None
+    analyst_total: int | None = None
+    analyst_dimensions: list[Dimension] = Field(default_factory=list)
 
 
 class ScoreResult(BaseModel):

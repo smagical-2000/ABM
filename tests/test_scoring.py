@@ -167,6 +167,51 @@ def test_mark_tier_changing_detects_a_dropped_tier():
     assert qa_minor.tier_changing is False     # 19 -> 20, still Tier 2
 
 
+def test_apply_qa_corrections_updates_total_and_tier():
+    from auto_search.scoring.qa import apply_qa_corrections
+
+    hs = FRAMEWORKS["health_system"]
+    score = ScoreResult(
+        account_id="rv", framework="health_system", framework_version="v",
+        max_total=27, total=24, tier_band="high", tier_label="Tier 1",
+        dimensions=[
+            Dimension(key="npr", label="Net Patient Revenue", score=10, max=10),
+            Dimension(key="emr", label="EMR", score=5, max=5),
+            Dimension(key="competitor", label="Competitor", score=4, max=4),
+            Dimension(key="pain", label="Pain", score=3, max=5),
+            Dimension(key="ai_readiness", label="AI", score=1, max=2),
+            Dimension(key="leadership", label="Leadership", score=1, max=1),
+        ],
+    )
+    qa = QAResult(status="discrepancy", corrections=[
+        QACorrection(dimension="npr", claimed="10/10", found="far smaller", corrected_score=3),
+    ])
+    apply_qa_corrections(score, qa, hs)
+    assert qa.applied is True and qa.analyst_total == 24
+    assert score.total == 17                       # 24 - 7
+    assert score.tier_label == "Tier 2"            # 17 lands in 16-21
+    assert qa.tier_changing is True
+    assert next(d for d in qa.analyst_dimensions if d.key == "npr").score == 10  # snapshot kept
+    assert next(d for d in score.dimensions if d.key == "npr").score == 3        # official corrected
+
+
+def test_correction_without_corrected_score_does_not_change_total():
+    from auto_search.scoring.qa import apply_qa_corrections
+
+    hs = FRAMEWORKS["health_system"]
+    score = ScoreResult(
+        account_id="x", framework="health_system", framework_version="v",
+        max_total=27, total=24, tier_band="high", tier_label="Tier 1",
+        dimensions=[Dimension(key="npr", label="NPR", score=10, max=10),
+                    Dimension(key="emr", label="EMR", score=5, max=5)],
+    )
+    qa = QAResult(status="discrepancy", corrections=[
+        QACorrection(dimension="npr", claimed="10/10", found="unsure", corrected_score=None),
+    ])
+    apply_qa_corrections(score, qa, hs)
+    assert qa.applied is False and score.total == 24   # nothing actionable to apply
+
+
 # ── CSV import ────────────────────────────────────────────────────────
 
 _HS_CSV = (
@@ -218,7 +263,7 @@ class TestImports:
 # ── service (engine + QA monkeypatched) ───────────────────────────────
 
 
-async def _fake_hs_score(account):
+async def _fake_hs_score(account, prior=None):
     return ScoreResult(
         account_id=account.account_id, framework="health_system",
         framework_version="hs-2026.2", max_total=27, total=0,
@@ -270,7 +315,7 @@ async def test_service_marks_error_on_failure(monkeypatch, tmp_path):
     svc.enqueue_discovery({"company_key": "x", "name": "X", "segment": "payer"},
                           state="scoring")
 
-    async def boom(account):
+    async def boom(account, prior=None):
         raise ScoringError("LLM down")
     monkeypatch.setattr(svc_mod.engine, "score_account", boom)
 
@@ -340,8 +385,9 @@ def test_repo_recovers_orphaned_scoring(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_service_csv_skips_qa(monkeypatch, tmp_path):
-    """CSV imports trust the Definitive facts, so QA is skipped (cost saving)."""
+async def test_csv_high_fit_runs_qa(monkeypatch, tmp_path):
+    """High-fit CSV imports now get independent QA too (CEO accuracy); the QA
+    prompt is told the CSV facts are authoritative, so it checks judgement."""
     from auto_search.db.scoring_repository import ScoringJsonRepository
     from auto_search.scoring import service as svc_mod
     from auto_search.scoring.service import ScoringService
@@ -352,20 +398,43 @@ async def test_service_csv_skips_qa(monkeypatch, tmp_path):
         framework="health_system", source="csv",
         firmographics={"Net Patient Revenue": "$1.4B"})], state="scoring")
 
-    qa_called = False
+    depth_used = {}
+
+    async def fake_qa(account, score, fw, *, depth="full"):
+        depth_used["depth"] = depth
+        return QAResult(status="verified", notes="checks out"), 0.05
+    monkeypatch.setattr(svc_mod.engine, "score_account", _fake_hs_score)  # -> Tier 1
+    monkeypatch.setattr(svc_mod.qa, "qa_account", fake_qa)
+
+    scored = await svc.run_scoring("csv_x")
+    assert depth_used["depth"] == "full"              # high fit CSV runs full QA
+    assert scored["qa"]["status"] == "verified"
+    assert scored["state"] == "scored"
+
+
+@pytest.mark.asyncio
+async def test_csv_qa_disabled_by_env(monkeypatch, tmp_path):
+    """SCORING_QA_CSV=0 keeps the old cost-saving skip for CSV imports."""
+    from auto_search.db.scoring_repository import ScoringJsonRepository
+    from auto_search.scoring import service as svc_mod
+    from auto_search.scoring.service import ScoringService
+
+    monkeypatch.setenv("SCORING_QA_CSV", "0")
+    svc = ScoringService(ScoringJsonRepository(path=str(tmp_path / "s.json")))
+    svc.enqueue_csv([Account(account_id="csv_x", name="X", segment="health_system",
+                             framework="health_system", source="csv")], state="scoring")
+
+    called = False
 
     async def fake_qa(*a, **k):
-        nonlocal qa_called
-        qa_called = True
-        return QAResult(status="discrepancy"), 0.01
+        nonlocal called
+        called = True
+        return QAResult(status="verified"), 0.0
     monkeypatch.setattr(svc_mod.engine, "score_account", _fake_hs_score)
     monkeypatch.setattr(svc_mod.qa, "qa_account", fake_qa)
 
     scored = await svc.run_scoring("csv_x")
-    assert qa_called is False                         # QA skipped for CSV
-    assert scored["qa"]["status"] == "skipped"        # honest: not verified
-    assert "skipped" in scored["qa"]["notes"].lower()
-    assert scored["state"] == "scored"
+    assert called is False and scored["qa"]["status"] == "skipped"
 
 
 def test_discovery_known_facts_carry():
@@ -405,7 +474,7 @@ async def test_service_qa_depth_by_tier(monkeypatch, tmp_path):
     monkeypatch.setattr(svc_mod.qa, "qa_account", fake_qa)
 
     def hs_score(dims):
-        async def _s(account):
+        async def _s(account, prior=None):
             return ScoreResult(
                 account_id=account.account_id, framework="health_system",
                 framework_version="v", max_total=27, total=0,

@@ -48,6 +48,10 @@ function ScoreDrawer({ account, onClose, onRescore, onOpenLanding }) {
   // map corrections by dimension label for inline rendering
   const corrByDim = {};
   if (a && a.qa && a.qa.corrections) a.qa.corrections.forEach((c) => { corrByDim[c.dimension] = c; });
+  // analyst (pre-QA) score per dimension, so corrected rows show original -> official
+  const analystByKey = {};
+  const qaApplied = !!(a && a.qa && a.qa.applied);
+  if (qaApplied) (a.qa.analyst_dimensions || []).forEach((d) => { analystByKey[d.key] = d.score; });
 
   return (
     <div className={`fixed inset-0 z-40 ${open ? '' : 'pointer-events-none'}`}>
@@ -96,18 +100,26 @@ function ScoreDrawer({ account, onClose, onRescore, onOpenLanding }) {
               <div className="flex items-center gap-5 rounded-xl border border-zinc-200 bg-zinc-50/50 px-5 py-4">
                 <ScoreRing total={a.total} max={a.max_total} band={tier.band} size="lg" />
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <TierBadge band={tier.band} label={window.fitWord(tier.band)} size="lg" />
                     {a.segment === 'health_system' && tier.label && (
                       <span className="text-[12px] font-medium text-zinc-400">{tier.label}</span>
                     )}
+                    {qaApplied && (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700 ring-1 ring-inset ring-amber-100" title="Independent QA corrected the analyst's score">
+                        <window.Icons.shieldCheck className="h-3 w-3 text-amber-500" />Adjusted by QA
+                      </span>
+                    )}
                   </div>
                   <div className="mt-2 text-[13px] text-zinc-500">
+                    {qaApplied && a.qa.analyst_total != null && (
+                      <span className="mr-1 text-zinc-400 line-through">{a.qa.analyst_total}</span>
+                    )}
                     <span className="font-semibold text-zinc-800">{a.total}</span> of {a.max_total} points
                     <span className="text-zinc-300"> · </span>
                     {fw.dimensions.length} dimensions
                   </div>
-                  <div className="mt-0.5 text-[12px] text-zinc-400">Scored {relativeTime(a.scored_at)} · Sonnet</div>
+                  <div className="mt-0.5 text-[12px] text-zinc-400">Scored {relativeTime(a.scored_at)} · Sonnet{qaApplied ? ' · QA-corrected' : ''}</div>
                 </div>
               </div>
 
@@ -140,7 +152,8 @@ function ScoreDrawer({ account, onClose, onRescore, onOpenLanding }) {
                 <SectionLabel>Score breakdown</SectionLabel>
                 <div className="rounded-xl border border-zinc-200 px-4 py-1">
                   {a.dimensions.map((d, i) => (
-                    <DimensionRow key={i} dim={d} correction={corrByDim[d.label]} />
+                    <DimensionRow key={i} dim={d} correction={corrByDim[d.key] || corrByDim[d.label]}
+                      analystScore={analystByKey[d.key]} />
                   ))}
                 </div>
               </div>

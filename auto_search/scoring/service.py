@@ -12,6 +12,7 @@ shows the live "Scoring…" state, then resolves.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from auto_search.scoring import dossier, engine, qa
@@ -51,11 +52,14 @@ class ScoringService:
             return None
         account = _account_from_row(row)
         fw = FRAMEWORKS.get(account.framework) or framework_for_segment(account.segment)
+        # On a re-score, anchor to the prior official scores so they hold steady
+        # unless new dated evidence turns up.
+        prior = _score_from_row(row) if row.get("total") is not None else None
 
         self._repo.set_state(account_id, "scoring")
         self._repo.set_phase(account_id, "scoring")
         try:
-            score = await engine.score_account(account)
+            score = await engine.score_account(account, prior=prior)
         except engine.ScoringError as e:
             logger.error("scoring failed for %s: %s", account.name, e)
             self._repo.set_state(account_id, "error", error=str(e))
@@ -78,6 +82,9 @@ class ScoringService:
             qa_result, qa_cost = await self._verify(account_id, account, score, fw)
             score.qa = qa_result
             score.cost_usd = round(score.cost_usd + qa_cost, 4)
+            # Apply QA's corrections to the OFFICIAL score before persisting, so
+            # the stored total/tier reflect the verification - not just a note.
+            qa.apply_qa_corrections(score, score.qa, fw)
             saved = self._repo.save_score(account_id, score)
         except Exception as e:  # noqa: BLE001 — never leave an account stuck 'scoring'
             logger.exception("persisting score failed for %s", account.name)
@@ -90,22 +97,20 @@ class ScoringService:
         return saved
 
     async def _verify(self, account_id, account, score, fw) -> tuple[QAResult, float]:
-        """Decide how much independent QA an account earns, then run it.
-
-        Spend the verification budget where it matters, never on accounts no one
-        will demo:
-          - CSV imports: skip (Definitive firmographics are authoritative).
+        """Decide how much independent QA an account earns by fit tier, then run
+        it. This applies to CSV imports too (CEO accuracy): the QA prompt is told
+        the CSV firmographics are authoritative, so it verifies intent /
+        competitor judgement rather than re-checking imported facts.
           - High fit: full independent QA (every checkable fact).
-          - Medium fit: a focused QA (net patient revenue + EMR/RCM vendor only).
-          - Low fit / not a fit: skip (mark 'skipped', re-score on demand if it
-            ever needs to go to leadership).
-        QA never sees the scorer's reasoning, so independence is preserved.
+          - Medium fit: a focused QA (net patient revenue + EMR/RCM vendor).
+          - Low fit / not a fit: skip (mark 'skipped' for cost control).
+        SCORING_QA_CSV=0 disables QA for CSV imports (dev / cost). QA never sees
+        the scorer's reasoning, so independence is preserved.
         """
-        if account.source == "csv":
+        if account.source == "csv" and os.getenv("SCORING_QA_CSV") == "0":
             return QAResult(
                 status="skipped",
-                notes="Firmographics taken as authoritative from the Definitive "
-                      "import; independent QA skipped to save cost.",
+                notes="Independent QA disabled for CSV imports (SCORING_QA_CSV=0).",
                 corrections=[],
             ), 0.0
 

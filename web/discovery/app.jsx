@@ -463,20 +463,23 @@ function segLabel(seg) {
 }
 function buildAccountsCsv(accounts) {
   const head = ['Account', 'Domain', 'Segment', 'Sub-segment', 'Source', 'Import',
-    'Fit', 'Score', 'Max', 'Firmographic', 'Technographic', 'Business Intent',
-    'Recommendation', 'QA', 'Scored', 'Cost (USD)', 'Key facts'];
+    'Fit', 'Analyst Total', 'Official Total', 'Max', 'Firmographic', 'Technographic',
+    'Business Intent', 'Recommendation', 'QA Status', 'QA Notes', 'Scored',
+    'Cost (USD)', 'Key facts'];
   const lines = accounts.map((a) => {
     const tier = a.tier || window.tierFor(a.framework, a.total);
     const pillars = window.pillarsFor(a);
     const pill = (i) => (pillars[i] ? `${pillars[i].score}/${pillars[i].max}` : '');
     const facts = a.firmographics
       ? Object.entries(a.firmographics).map(([k, v]) => `${k}: ${v}`).join('; ') : '';
+    const qa = a.qa || {};
+    const analystTotal = (qa.applied && qa.analyst_total != null) ? qa.analyst_total : a.total;
     return [
       a.name, a.domain || '', segLabel(a.segment), a.sub_segment || '',
       a.source === 'csv' ? 'CSV import' : 'Discovery', a.import_label || '',
-      window.fitWord(tier.band), a.total, a.max_total,
+      window.fitWord(tier.band), analystTotal, a.total, a.max_total,
       pill(0), pill(1), pill(2),
-      a.recommendation || '', a.qa ? a.qa.status : '',
+      a.recommendation || '', qa.status || '', qa.notes || '',
       a.scored_at ? window.shortDate(a.scored_at) : '',
       a.cost_usd != null ? a.cost_usd : '', facts,
     ].map(csvCell).join(',');

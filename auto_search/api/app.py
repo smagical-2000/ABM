@@ -358,7 +358,11 @@ def create_app() -> FastAPI:
         try:
             keys = [c.company_key for c in companies]
             costs = app.state.scoring_repo.qualify_costs(keys) if keys else {}
-            return [c.model_copy(update={"qualify_cost_usd": costs.get(c.company_key)})
+            est = spend_guard.discovery_est_qual_cost()
+            return [c.model_copy(update={"qualify_cost_usd": (
+                costs.get(c.company_key)
+                if costs.get(c.company_key) is not None
+                else (est if c.qualified_at else None))})
                     for c in companies]
         except Exception:  # noqa: BLE001 — cost lookup must not break the panel
             logger.exception("panel qualify cost lookup failed")
@@ -381,8 +385,15 @@ def create_app() -> FastAPI:
         try:
             keys = [r["company_key"] for r in recent if r.get("company_key")]
             costs = app.state.scoring_repo.qualify_costs(keys) if keys else {}
+            est = spend_guard.discovery_est_qual_cost()
             for r in recent:
-                r["cost_usd"] = costs.get(r.get("company_key"))
+                key = r.get("company_key")
+                c = costs.get(key) if key else None
+                # Older runs logged one bulk event without company_key — show the
+                # estimate so historical rows aren't blank.
+                r["cost_usd"] = c if c is not None else (
+                    est if r.get("status") in ("qualified", "needs_review", "disqualified")
+                    else None)
         except Exception:  # noqa: BLE001 — cost lookup is best-effort for the log
             logger.exception("qualify cost lookup failed")
         ctrl = app.state.discovery_control

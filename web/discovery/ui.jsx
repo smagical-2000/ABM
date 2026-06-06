@@ -41,6 +41,9 @@ const Icons = {
   info: (p) => ic(<><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 8h.01" /></>, p),
   job: (p) => ic(<><rect x="3" y="7" width="18" height="13" rx="2" /><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /><path d="M3 12h18" /></>, p),
   dollar: (p) => ic(<><path d="M12 2v20" /><path d="M17 6.5C17 4.6 14.8 3.5 12 3.5S7 4.6 7 6.5 9.2 9.5 12 9.5s5 1.1 5 3-2.2 3-5 3-5-1.1-5-3" /></>, p),
+  play: (p) => ic(<path d="M6 4l14 8-14 8z" />, p),
+  pause: (p) => ic(<><path d="M8 5v14M16 5v14" /></>, p),
+  trash: (p) => ic(<><path d="M4 7h16" /><path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" /><path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13" /></>, p),
 };
 window.Icons = Icons;
 

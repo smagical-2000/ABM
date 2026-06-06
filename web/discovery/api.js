@@ -25,7 +25,18 @@ window.API = {
   stats: () => http('/api/stats'),
   activity: () => http('/api/activity'),
   // Manually pull the last 24h of signals into the panel (browserless sources).
-  runDiscovery: () => http('/api/discovery/run', { method: 'POST' }),
+  // Optional body { sources: ['jobs'], limit: 2 } for cost-controlled test runs.
+  runDiscovery: (body = {}) => http('/api/discovery/run', {
+    method: 'POST', body: JSON.stringify(body),
+  }),
+  // Live run controls: pause freezes spend, resume continues, cancel stops cleanly.
+  pauseDiscovery: () => http('/api/discovery/pause', { method: 'POST' }),
+  resumeDiscovery: () => http('/api/discovery/resume', { method: 'POST' }),
+  cancelDiscovery: () => http('/api/discovery/cancel', { method: 'POST' }),
+  // Delete discovered companies: { keys: [...] } or { all: true } for a clean slate.
+  deleteCompanies: (body) => http('/api/discovery/delete', {
+    method: 'POST', body: JSON.stringify(body),
+  }),
   panel: ({ status = 'qualified', segment, signal_type } = {}) => {
     const q = new URLSearchParams({ status });
     if (segment && segment !== 'all') q.set('segment', segment);

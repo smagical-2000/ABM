@@ -28,6 +28,13 @@ from auto_search.qualifier import qualify
 
 logger = logging.getLogger(__name__)
 
+# A cooperative checkpoint awaited BEFORE each (paid) company qualification.
+# Returns True to proceed, False to stop the run cleanly. An implementation can
+# also block inside it (await) to PAUSE the run between companies. Checked at the
+# company boundary because that is the expensive unit (one Claude call each), so
+# pause/cancel never interrupts a call mid-flight or wastes spend.
+RunGate = Callable[[], Awaitable[bool]]
+
 # A predicate: given a company_key, has it already been qualified before?
 # Typically `repo.already_qualified`. Kept as a bare callable so the pipeline
 # depends on a function shape, not on the repository class (looser coupling).
@@ -92,6 +99,7 @@ async def run(
     skip_already_qualified: AlreadyQualified | None = None,
     prefilter: SignalPrefilter | None = None,
     on_plan: Callable[[int], None] | None = None,
+    gate: RunGate | None = None,
 ) -> AsyncIterator[CompanyCandidate]:
     """Run the full discovery pipeline, yielding one candidate per company.
 
@@ -131,6 +139,13 @@ async def run(
             skipped += 1
             logger.debug("skip already-qualified company: %s", key)
             continue
+
+        # Cooperative pause/cancel checkpoint, BEFORE we spend on this company.
+        # The gate may block (pause) and returns False to stop the run cleanly.
+        if gate is not None and not await gate():
+            logger.info("run gate stopped the pipeline before %s — %d done, "
+                        "remaining skipped", key, 0)
+            break
 
         representative = max(signals, key=lambda s: s.signal_strength)
         verdict = await qualify(representative)

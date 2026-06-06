@@ -50,18 +50,28 @@ def _connector(name: str, limit):
     raise ValueError(f"unsupported on-demand source: {name}")
 
 
-async def run_once(repo, *, days: int = 1, sources=None, limit=None, on_cost=None) -> dict:
+async def run_once(repo, *, days: int = 1, sources=None, limit=None,
+                   on_cost=None, gate=None) -> dict:
     """Run the browserless sources for the last `days` into `repo`, deduped.
 
     Returns a per-source summary. `on_cost(evaluated)` lets the caller record the
-    qualify spend. Resilient: one source failing does not stop the others.
+    qualify spend. `gate` is an optional async checkpoint (pause/cancel) awaited
+    before each company and before each new source. Resilient: one source
+    failing does not stop the others.
     """
     since = datetime.now(UTC) - timedelta(days=days)
     selected = [s for s in (sources or BROWSERLESS_SOURCES) if s in BROWSERLESS_SOURCES]
     totals = {"qualified": 0, "needs_review": 0, "disqualified": 0,
-              "by_source": {}, "ran": 0, "since": since.isoformat()}
+              "by_source": {}, "ran": 0, "since": since.isoformat(),
+              "cancelled": False}
 
     for name in selected:
+        # Don't even start a new source if the run was cancelled (or wait here
+        # while paused). gate() returning False == cancelled.
+        if gate is not None and not await gate():
+            totals["cancelled"] = True
+            logger.info("discovery run cancelled before source %s", name)
+            break
         counts = {"qualified": 0, "needs_review": 0, "disqualified": 0}
         run_id = _start_run(repo, name)
         err: str | None = None
@@ -72,6 +82,7 @@ async def run_once(repo, *, days: int = 1, sources=None, limit=None, on_cost=Non
                 connector, since, limit=limit,
                 skip_already_qualified=repo.already_qualified, prefilter=prefilter,
                 on_plan=lambda n, rid=run_id: _update_run(repo, rid, planned=n),
+                gate=gate,
             ):
                 repo.save_candidate(cand)
                 status = cand.qualification.to_status()

@@ -102,6 +102,46 @@ class TestWorkflow:
         assert set(out["sources"]) == {"leadership", "acquisitions", "funding", "jobs"}
         assert "layoffs" not in out["sources"]
 
+    def test_discovery_run_accepts_scope_and_limit(self, client, monkeypatch):
+        """A cost-controlled test run passes jobs-only + a per-source cap through."""
+        seen = {}
+
+        async def fake_run(repo, **kw):
+            seen.update(kw)
+            return {"ran": 1, "qualified": 0, "needs_review": 0,
+                    "disqualified": 0, "by_source": {}}
+        monkeypatch.setattr(_app_module.discovery_runner, "run_once", fake_run)
+        out = client.post("/api/discovery/run",
+                          json={"sources": ["jobs"], "limit": 2}).json()
+        assert out["started"] is True
+        assert out["sources"] == ["jobs"] and out["limit"] == 2
+        assert seen["sources"] == ["jobs"] and seen["limit"] == 2
+        assert "gate" in seen          # pause/cancel gate is wired in
+
+    def test_discovery_run_rejects_unknown_source(self, client):
+        r = client.post("/api/discovery/run", json={"sources": ["bogus"]})
+        assert r.status_code == 400
+
+    def test_discovery_controls_when_idle(self, client):
+        # Nothing running: pause/resume/cancel are safe no-ops.
+        assert client.post("/api/discovery/pause").json()["running"] is False
+        assert client.post("/api/discovery/resume").json()["paused"] is False
+        assert client.post("/api/discovery/cancel").json()["cancelling"] is True
+
+    def test_delete_by_keys(self, client):
+        out = client.post("/api/discovery/delete",
+                          json={"keys": ["acmehealth"]}).json()
+        assert out["deleted"] == 1
+        assert client.get("/api/panel").json() == []
+
+    def test_delete_all(self, client):
+        out = client.post("/api/discovery/delete", json={"all": True}).json()
+        assert out["deleted"] == 1 and out["all"] is True
+        assert client.get("/api/panel").json() == []
+
+    def test_delete_requires_keys_or_all(self, client):
+        assert client.post("/api/discovery/delete", json={}).status_code == 400
+
     def test_reject_requires_reason(self, client):
         # missing body → 422 validation
         assert client.post("/api/company/acmehealth/reject").status_code == 422

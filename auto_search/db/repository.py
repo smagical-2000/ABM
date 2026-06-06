@@ -84,6 +84,15 @@ class DiscoveryRepository(Protocol):
         """
         ...
 
+    def delete(self, keys: list[str] | None) -> int:
+        """Delete companies (and their signals) by normalized key.
+
+        `keys=None` wipes the entire discovery store (clean slate). Returns the
+        number of company rows removed. Deleting a company also removes it from
+        the dedup ledger, so it can be re-discovered on a later run.
+        """
+        ...
+
     # -- run heartbeat (powers the live "processing" marker) --
 
     def start_run(self, source: str) -> int:
@@ -244,6 +253,23 @@ class JsonFileRepository:
             row["rejection_reason"] = reason
         self._flush()
         return row
+
+    def delete(self, keys: list[str] | None) -> int:
+        """Remove companies by key (signals are nested, so they go too).
+        `keys=None` clears the whole store."""
+        if keys is None:
+            n = len(self._store)
+            self._store = {}
+            self._flush()
+            return n
+        n = 0
+        for k in keys:
+            if k in self._store:
+                del self._store[k]
+                n += 1
+        if n:
+            self._flush()
+        return n
 
     # -- run heartbeat (file-backed so the API process sees the runner's runs) --
 

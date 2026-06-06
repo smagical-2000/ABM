@@ -11,6 +11,7 @@ import pytest
 
 from auto_search.clients.apify_jobs import IndeedJob, LinkedInJob
 from auto_search.connectors.job_postings import (
+    ESSENTIAL_RCM_TITLES,
     JobPostingsConnector,
     _domain_from_url,
     _indeed_domain,
@@ -19,9 +20,25 @@ from auto_search.connectors.job_postings import (
     _looks_rcm,
     _since_to_from_days,
     _split_loc,
+    select_titles,
 )
 
 SINCE = datetime(2026, 6, 1, tzinfo=UTC)
+
+
+class TestSelectTitles:
+    def test_empty_returns_all(self):
+        assert select_titles("") == ESSENTIAL_RCM_TITLES
+        assert select_titles(None) == ESSENTIAL_RCM_TITLES
+
+    def test_restricts_to_named_roles(self):
+        sel = select_titles("revenue cycle, medical coder, medical biller")
+        buckets = {t[1] for t in sel}
+        assert buckets == {"Revenue Cycle", "Coder", "Biller"}
+
+    def test_unmatched_falls_back_to_all(self):
+        # Never silently search zero titles.
+        assert select_titles("nonsense-role") == ESSENTIAL_RCM_TITLES
 
 
 def _job(**over) -> IndeedJob:

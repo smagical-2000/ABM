@@ -37,6 +37,7 @@ essential titles below.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from collections import Counter
 from collections.abc import AsyncIterator
@@ -65,6 +66,33 @@ ESSENTIAL_RCM_TITLES: list[EssentialTitle] = [
     ('"revenue cycle"', "Revenue Cycle", 0.75),
     ('"patient access representative"', "Patient Access", 0.72),
 ]
+
+
+def select_titles(env_value: str | None = None) -> list[EssentialTitle]:
+    """Pick which RCM titles to search, from DISCOVERY_JOBS_TITLES.
+
+    The env var is a comma-separated allowlist matched (case-insensitively) against
+    each title's role bucket OR its query text, so values like
+    "revenue cycle, medical coder, biller" narrow the search to just those roles.
+    This is the main jobs cost knob for controlled test runs — fewer titles means
+    fewer Apify rows AND fewer downstream qualifications. Unset/empty → all titles.
+    An allowlist that matches nothing falls back to all (never silently search 0).
+    """
+    raw = (env_value if env_value is not None
+           else os.getenv("DISCOVERY_JOBS_TITLES", "")).strip()
+    if not raw:
+        return ESSENTIAL_RCM_TITLES
+    wanted = [t.strip().lower() for t in raw.split(",") if t.strip()]
+    selected = [
+        t for t in ESSENTIAL_RCM_TITLES
+        if any(w in t[1].lower() or w in t[0].lower() for w in wanted)
+    ]
+    if not selected:
+        logger.warning("DISCOVERY_JOBS_TITLES=%r matched no titles — using all", raw)
+        return ESSENTIAL_RCM_TITLES
+    logger.info("jobs titles restricted to %s via DISCOVERY_JOBS_TITLES",
+                [t[1] for t in selected])
+    return selected
 
 # RCM-keyword sanity gate: a returned title must contain one of these to count
 # as an actual revenue-cycle role (drops the occasional off-topic match the
@@ -102,7 +130,7 @@ class JobPostingsConnector:
         country: str = "us",
     ) -> None:
         self._client = client or ApifyJobsClient()
-        self._titles = titles or ESSENTIAL_RCM_TITLES
+        self._titles = titles or select_titles()
         self._sources = sources
         self._max_rows = max_rows
         self._country = country

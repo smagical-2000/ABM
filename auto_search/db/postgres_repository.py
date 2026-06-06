@@ -234,6 +234,21 @@ class PostgresRepository:
         counts["total"] = sum(counts.values())
         return counts
 
+    def delete(self, keys: list[str] | None) -> int:
+        """Delete companies by normalized_name; signals cascade (FK ON DELETE
+        CASCADE). `keys=None` truncates the whole discovery store."""
+        with self._pool.connection() as conn:
+            if keys is None:
+                cur = conn.execute("DELETE FROM discovery_companies")
+            else:
+                if not keys:
+                    return 0
+                cur = conn.execute(
+                    "DELETE FROM discovery_companies WHERE normalized_name = ANY(%s)",
+                    (list(keys),),
+                )
+            return cur.rowcount or 0
+
     # ── run heartbeat (powers the live "processing" marker) ──────────────
 
     def start_run(self, source: str) -> int:

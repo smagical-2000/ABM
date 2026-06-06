@@ -40,6 +40,7 @@ from auto_search.db.scoring_repository import (
     STALE_SCORING_SECONDS,
     get_scoring_repository,
 )
+from auto_search.run_control import RunControl
 from auto_search.runtime import is_production
 from auto_search.scoring import budget as budget_guard
 from auto_search.scoring import imports as csv_imports
@@ -266,6 +267,7 @@ async def lifespan(app: FastAPI):
     app.state.scoring_inflight = set()        # account_ids being scored (dedupe lock)
     app.state.batch_running = False           # one queued batch at a time
     app.state.discovery_running = False       # one on-demand discovery run at a time
+    app.state.discovery_control = RunControl()  # live pause/cancel for that run
     app.state.last_discovery = None
     app.state.loop = asyncio.get_running_loop()
     # No scoring task can be alive at boot, so anything still marked 'scoring'
@@ -373,19 +375,29 @@ def create_app() -> FastAPI:
         repo = app.state.repo
         active = repo.active_runs() if hasattr(repo, "active_runs") else []
         recent = repo.recent_decisions() if hasattr(repo, "recent_decisions") else []
+        ctrl = app.state.discovery_control
         return {"active": active, "recent": recent,
                 "running": bool(getattr(app.state, "discovery_running", False)),
+                "paused": ctrl.paused,
+                "cancelling": ctrl.cancelled,
                 "last_run": getattr(app.state, "last_discovery", None)}
 
     @app.post("/api/discovery/run")
-    def discovery_run():
+    async def discovery_run(request: Request):
         """Manually pull the last 24h of signals into the panel, on demand.
 
         Runs the browserless sources (leadership, acquisitions, funding, jobs) in
         the background, deduped; the existing activity poll shows it processing
         and qualified companies stream into the panel. Layoffs (WARN) needs a
         browser the web image omits, so it stays with the cron worker. One run at
-        a time so a double click can't double-spend."""
+        a time so a double click can't double-spend.
+
+        Optional JSON body for cost-controlled test runs:
+          {"sources": ["jobs"], "limit": 2}
+        `sources` restricts which browserless sources run; `limit` caps unique
+        companies qualified PER SOURCE (the spend knob). Omit both for a full
+        24h pull.
+        """
         if getattr(app.state, "discovery_running", False):
             return {"started": False, "busy": True}
         # Cost control for panel 1: refuse a manual run once this month's
@@ -401,6 +413,22 @@ def create_app() -> FastAPI:
                         "discovery_budget": disc_budget}
         except Exception:  # noqa: BLE001 — never let the meter block a run by erroring
             logger.exception("discovery budget check failed; allowing run")
+
+        body = await _json_body(request)
+        raw_sources = body.get("sources")
+        sources = None
+        if isinstance(raw_sources, list) and raw_sources:
+            sources = [s for s in raw_sources if s in discovery_runner.BROWSERLESS_SOURCES]
+            if not sources:
+                raise HTTPException(status_code=400, detail=(
+                    "sources must be a subset of "
+                    f"{list(discovery_runner.BROWSERLESS_SOURCES)}"))
+        limit = body.get("limit")
+        if not isinstance(limit, int) or limit <= 0:
+            limit = None
+
+        ctrl = app.state.discovery_control
+        ctrl.reset()
         app.state.discovery_running = True
 
         async def _run() -> None:
@@ -414,7 +442,8 @@ def create_app() -> FastAPI:
 
             try:
                 summary = await discovery_runner.run_once(
-                    app.state.repo, days=1, on_cost=on_cost)
+                    app.state.repo, days=1, sources=sources, limit=limit,
+                    on_cost=on_cost, gate=ctrl.gate)
                 app.state.last_discovery = {**summary, "at": datetime.now(UTC).isoformat()}
             except Exception:  # noqa: BLE001 — never crash the loop
                 logger.exception("on-demand discovery run failed")
@@ -423,7 +452,58 @@ def create_app() -> FastAPI:
                 app.state.discovery_running = False
 
         _schedule_coro(app, _run())
-        return {"started": True, "sources": list(discovery_runner.BROWSERLESS_SOURCES)}
+        return {"started": True,
+                "sources": sources or list(discovery_runner.BROWSERLESS_SOURCES),
+                "limit": limit}
+
+    @app.post("/api/discovery/pause")
+    def discovery_pause():
+        """Pause the in-flight discovery run at the next company boundary — no
+        new Claude qualification starts, so spend freezes until resumed."""
+        if not getattr(app.state, "discovery_running", False):
+            return {"running": False, "paused": False}
+        app.state.discovery_control.pause()
+        return {"running": True, "paused": True}
+
+    @app.post("/api/discovery/resume")
+    def discovery_resume():
+        """Resume a paused run from exactly where it stopped."""
+        app.state.discovery_control.resume()
+        return {"running": bool(getattr(app.state, "discovery_running", False)),
+                "paused": False}
+
+    @app.post("/api/discovery/cancel")
+    def discovery_cancel():
+        """Cancel the in-flight run. It stops cleanly at the next company
+        boundary (any in-flight call finishes). Re-running later 'smart resumes':
+        already-qualified companies are skipped by the dedup ledger, so it picks
+        up where it left off without paying twice."""
+        app.state.discovery_control.cancel()
+        return {"cancelling": True,
+                "running": bool(getattr(app.state, "discovery_running", False))}
+
+    @app.post("/api/discovery/delete")
+    async def discovery_delete(request: Request):
+        """Delete discovered companies (and their signals) from the panel store.
+
+        Body: {"keys": ["acmehealth", ...]} to delete specific companies, or
+        {"all": true} to wipe the whole discovery store — useful for a clean
+        slate between cost-control test runs. Deletion removes the dedup-ledger
+        row too, so a deleted company CAN be re-discovered (and re-qualified) on
+        the next run.
+        """
+        if not hasattr(app.state.repo, "delete"):
+            raise HTTPException(status_code=501, detail="delete not supported by repo")
+        body = await _json_body(request)
+        if body.get("all") is True:
+            n = app.state.repo.delete(None)
+            return {"deleted": n, "all": True}
+        keys = body.get("keys")
+        if not isinstance(keys, list) or not keys:
+            raise HTTPException(status_code=400,
+                                detail="provide keys: [...] or all: true")
+        n = app.state.repo.delete([str(k) for k in keys])
+        return {"deleted": n}
 
     @app.get("/api/company/{key}", response_model=PanelCompany)
     def get_company(key: str):

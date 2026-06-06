@@ -93,41 +93,56 @@ function ActivityFeed({ items }) {
 // Shows true progress when the run has reported how many companies it plans to
 // qualify (`planned`, the denominator): "42% · 21 of 50 evaluated". Until that
 // lands (sources still being pulled), it falls back to the indeterminate copy.
-function ActivityBanner({ runs }) {
+function fmtElapsed(sec) {
+  if (sec == null || sec < 0) return null;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+function ActivityBanner({ runs, paused, cancelling }) {
   const qualified = runs.reduce((n, r) => n + (r.companies_qualified || 0), 0);
   const evaluated = runs.reduce((n, r) => n + (r.new_companies || 0), 0);
   const planned = runs.reduce((n, r) => n + (r.planned || 0), 0);
+  const elapsed = fmtElapsed(Math.max(0, ...runs.map((r) => r.elapsed_seconds || 0)));
   const sources = [...new Set(runs.map((r) => r.source))].join(', ');
   const hasPlan = planned > 0;
   // Cap at 99% until the run actually finishes, so it never reads "100%" while
   // the last company is still being qualified.
   const pct = hasPlan ? Math.min(99, Math.round((evaluated / planned) * 100)) : null;
+  // Paused/cancelling re-skin the banner so the state is unmistakable.
+  const tone = cancelling
+    ? { wrap: 'border-rose-100 from-rose-50 to-rose-50/40', dot: 'bg-rose-500', text: 'text-rose-700', sub: 'text-rose-600' }
+    : paused
+    ? { wrap: 'border-amber-100 from-amber-50 to-amber-50/40', dot: 'bg-amber-500', text: 'text-amber-700', sub: 'text-amber-600' }
+    : { wrap: 'border-indigo-100 from-indigo-50 to-violet-50/50', dot: 'bg-indigo-500', text: 'text-indigo-700', sub: 'text-indigo-600' };
+  const verb = cancelling ? 'Stopping' : paused ? 'Paused' : 'Discovering';
   return (
-    <div className="border-b border-indigo-100 bg-gradient-to-r from-indigo-50 to-violet-50/50">
+    <div className={`border-b bg-gradient-to-r ${tone.wrap}`}>
       <div className="mx-auto flex max-w-6xl items-center gap-3 px-8 py-2.5">
         <span className="relative flex h-2.5 w-2.5">
-          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-indigo-400 opacity-75"></span>
-          <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-indigo-500"></span>
+          {!paused && !cancelling && <span className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-75 ${tone.dot}`}></span>}
+          <span className={`relative inline-flex h-2.5 w-2.5 rounded-full ${tone.dot}`}></span>
         </span>
-        <span className="text-[13px] font-medium text-indigo-700">Discovering — {sources}</span>
-        <span className="text-indigo-300">·</span>
+        <span className={`text-[13px] font-medium ${tone.text}`}>{verb} — {sources}</span>
+        <span className="text-zinc-300">·</span>
         {hasPlan ? (
           <>
-            <span className="text-[13px] font-semibold tabular-nums text-indigo-700">{pct}%</span>
-            <div className="hidden h-1.5 w-40 overflow-hidden rounded-full bg-indigo-100 sm:block">
-              <div className="h-full rounded-full bg-indigo-500 transition-all duration-500" style={{ width: `${pct}%` }} />
+            <span className={`text-[13px] font-semibold tabular-nums ${tone.text}`}>{pct}%</span>
+            <div className="hidden h-1.5 w-40 overflow-hidden rounded-full bg-black/5 sm:block">
+              <div className={`h-full rounded-full transition-all duration-500 ${tone.dot}`} style={{ width: `${pct}%` }} />
             </div>
-            <span className="text-[13px] tabular-nums text-indigo-600">
+            <span className={`text-[13px] tabular-nums ${tone.sub}`}>
               {evaluated} of {planned} evaluated · {qualified} qualified
             </span>
           </>
         ) : (
-          <span className="text-[13px] tabular-nums text-indigo-600">
+          <span className={`text-[13px] tabular-nums ${tone.sub}`}>
             {evaluated > 0 ? `${qualified} qualified of ${evaluated} evaluated` : 'scanning sources…'}
           </span>
         )}
-        <span className="ml-auto hidden items-center gap-1.5 text-[12px] text-indigo-400 sm:flex">
-          <Icons.refresh className="h-3.5 w-3.5 animate-spin" />updating live
+        {elapsed && <><span className="text-zinc-300">·</span><span className={`text-[12px] tabular-nums ${tone.sub}`}>{elapsed}</span></>}
+        <span className="ml-auto hidden items-center gap-1.5 text-[12px] text-zinc-400 sm:flex">
+          {paused ? 'spend frozen' : <><Icons.refresh className="h-3.5 w-3.5 animate-spin" />updating live</>}
         </span>
       </div>
     </div>
@@ -168,6 +183,79 @@ function DiscoverySpendMeter({ spend }) {
       ) : near ? (
         <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-600 ring-1 ring-inset ring-amber-100">Near budget</span>
       ) : null}
+    </div>
+  );
+}
+
+// ── RunConfigPopover — cost-controlled run setup (scope + per-source cap) ─────
+// The qualifier costs ~$0.12/company, so a run's spend is (sources × limit).
+// This little form makes that explicit before you spend: pick "Jobs only" or
+// "All sources", set the per-source company cap, see the worst-case estimate.
+function RunConfigPopover({ scope, onScope, limit, onLimit, onRun, onClose }) {
+  const n = Number(limit) > 0 ? Number(limit) : 0;
+  const sources = scope === 'jobs' ? 1 : 4;
+  const estCompanies = n ? n * sources : null;
+  const estCost = estCompanies != null ? (estCompanies * 0.12).toFixed(2) : null;
+  return (
+    <div className="absolute right-0 top-full z-40 mt-2 w-72 rounded-xl border border-zinc-200 bg-white p-3.5 shadow-xl shadow-zinc-900/10">
+      <div className="text-[13px] font-semibold text-zinc-800">Run discovery</div>
+      <p className="mt-0.5 text-[11.5px] leading-relaxed text-zinc-500">
+        Pulls the last 24h. Layoffs (WARN) runs only on the scheduled cron.
+      </p>
+      <label className="mt-3 block text-[12px] font-medium text-zinc-600">Sources</label>
+      <div className="mt-1 grid grid-cols-2 gap-1.5">
+        {[['jobs', 'Jobs only'], ['all', 'All sources']].map(([v, lbl]) => (
+          <button key={v} onClick={() => onScope(v)}
+            className={`rounded-lg px-2.5 py-1.5 text-[12.5px] font-medium ring-1 ring-inset transition-colors ${scope === v ? 'bg-indigo-600 text-white ring-indigo-600' : 'bg-white text-zinc-600 ring-zinc-200 hover:bg-zinc-50'}`}>
+            {lbl}
+          </button>
+        ))}
+      </div>
+      <label className="mt-3 block text-[12px] font-medium text-zinc-600">
+        Companies per source (cost cap)
+      </label>
+      <input type="number" min="1" max="500" value={limit}
+        onChange={(e) => onLimit(e.target.value)}
+        className="mt-1 w-full rounded-lg border border-zinc-200 px-3 py-1.5 text-[13px] text-zinc-800 focus:border-zinc-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200" />
+      <div className="mt-2.5 rounded-lg bg-zinc-50 px-3 py-2 text-[11.5px] text-zinc-500">
+        {estCompanies != null
+          ? <>Up to <span className="font-semibold text-zinc-700">{estCompanies}</span> companies · est <span className="font-semibold text-zinc-700">${estCost}</span></>
+          : 'No cap — runs the full 24h window (higher spend).'}
+      </div>
+      <div className="mt-3 flex items-center justify-end gap-2">
+        <button onClick={onClose} className="rounded-lg px-3 py-1.5 text-[12.5px] font-medium text-zinc-500 transition-colors hover:bg-zinc-100">Cancel</button>
+        <button onClick={onRun} className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-[12.5px] font-medium text-white transition-colors hover:bg-indigo-700">
+          <Icons.zap className="h-3.5 w-3.5" />Run
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── ConfirmDeleteModal — guard a destructive bulk delete ─────────────────────
+function ConfirmDeleteModal({ count, onCancel, onConfirm }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-zinc-900/30 backdrop-blur-[2px] animate-fade" onClick={onCancel} />
+      <div className="relative w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-6 shadow-xl animate-pop">
+        <h3 className="text-[16px] font-semibold text-zinc-900">
+          Delete {count} {count === 1 ? 'company' : 'companies'}?
+        </h3>
+        <p className="mt-1 text-[13px] leading-relaxed text-zinc-500">
+          This removes them and their signals from Discovery. They leave the dedup
+          ledger too, so they can be re-discovered (and re-qualified) on a later run.
+        </p>
+        <div className="mt-5 flex items-center justify-end gap-2">
+          <button onClick={onCancel}
+            className="rounded-lg px-3.5 py-2 text-[13px] font-medium text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-700">
+            Cancel
+          </button>
+          <button onClick={onConfirm}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3.5 py-2 text-[13px] font-medium text-white transition-colors hover:bg-rose-700">
+            <Icons.trash className="h-4 w-4" />Delete
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -225,6 +313,14 @@ function App() {
   const [openKey, setOpenKey] = useState(null);
   const [leaving, setLeaving] = useState({});
   const [rejectFor, setRejectFor] = useState(null);
+  // Cost-controlled test-run config + live run state.
+  const [runScope, setRunScope] = useState('jobs');        // 'jobs' | 'all'
+  const [runLimit, setRunLimit] = useState(2);             // companies/source cap
+  const [paused, setPaused] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  // Multi-select for bulk delete (set of company_key).
+  const [selected, setSelected] = useState(() => new Set());
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const [autoEnabled, setAutoEnabled] = useState(false);
   const [scoreHour, setScoreHour] = useState(15);
@@ -280,7 +376,11 @@ function App() {
         const active = (a && a.active) || [];
         const recent = (a && a.recent) || [];
         setActivity(active);
-        setDiscoRunning(!!(a && a.running) || active.length > 0);
+        const running = !!(a && a.running) || active.length > 0;
+        setDiscoRunning(running);
+        setPaused(!!(a && a.paused));
+        setCancelling(!!(a && a.cancelling));
+        if (!running) { setPaused(false); setCancelling(false); }
         if (lastSeenRef.current === null) {
           lastSeenRef.current = recent.length ? recent[0].at : '';
         } else {
@@ -300,16 +400,57 @@ function App() {
   async function handleRunDiscovery() {
     setConfirmRun(false);
     setDiscoRunning(true);
+    const body = { limit: Number(runLimit) > 0 ? Number(runLimit) : undefined };
+    if (runScope === 'jobs') body.sources = ['jobs'];
     try {
-      const res = await window.API.runDiscovery();
+      const res = await window.API.runDiscovery(body);
       if (res && res.busy) { setDiscoRunning(false); pushToast('A discovery run is already in progress.', 'muted'); return; }
       if (res && res.budget_blocked) {
         setDiscoRunning(false);
         pushToast(`Discovery budget reached ($${res.month_discovery_cost} of $${res.discovery_budget}). Raise DISCOVERY_MONTHLY_BUDGET or wait.`, 'danger');
         return;
       }
-      pushToast('Discovery running — pulling the last 24h…', 'success');
+      const scopeLabel = body.sources ? 'jobs only' : 'all sources';
+      const capLabel = body.limit ? `, ${body.limit}/source` : '';
+      pushToast(`Discovery running — ${scopeLabel}${capLabel}…`, 'success');
     } catch (e) { setDiscoRunning(false); pushToast(`Couldn't start: ${e.message}`, 'danger'); }
+  }
+
+  async function handlePauseResume() {
+    try {
+      if (paused) { await window.API.resumeDiscovery(); setPaused(false); pushToast('Resumed', 'success'); }
+      else { await window.API.pauseDiscovery(); setPaused(true); pushToast('Paused — spend frozen', 'muted'); }
+    } catch (e) { pushToast(`Couldn't ${paused ? 'resume' : 'pause'}: ${e.message}`, 'danger'); }
+  }
+
+  async function handleCancelRun() {
+    setCancelling(true);
+    try { await window.API.cancelDiscovery(); pushToast('Cancelling — finishing the current company, then stopping.', 'muted'); }
+    catch (e) { setCancelling(false); pushToast(`Couldn't cancel: ${e.message}`, 'danger'); }
+  }
+
+  function toggleSelect(key) {
+    setSelected((prev) => {
+      const n = new Set(prev);
+      if (n.has(key)) n.delete(key); else n.add(key);
+      return n;
+    });
+  }
+
+  async function handleDeleteSelected() {
+    const keys = [...selected];
+    if (!keys.length) return;
+    setConfirmDelete(false);
+    keys.forEach((k) => setLeaving((l) => ({ ...l, [k]: true })));
+    try {
+      const res = await window.API.deleteCompanies({ keys });
+      setSelected(new Set());
+      setTimeout(() => loadAll(true), 320);
+      pushToast(`Deleted ${res.deleted} ${res.deleted === 1 ? 'company' : 'companies'}`, 'success');
+    } catch (e) {
+      keys.forEach((k) => setLeaving((l) => { const n = { ...l }; delete n[k]; return n; }));
+      pushToast(`Delete failed: ${e.message}`, 'danger');
+    }
   }
 
   function removeCompany(key) {
@@ -384,7 +525,19 @@ function App() {
   }), [companies, tab, segment, signalType]);
 
   const openCompany = companies.find((c) => c.company_key === openKey) || null;
-  const visibleCount = filtered.filter((c) => !leaving[c.company_key]).length;
+  const visibleRows = filtered.filter((c) => !leaving[c.company_key]);
+  const visibleCount = visibleRows.length;
+  const visibleKeys = visibleRows.map((c) => c.company_key);
+  const selectedVisible = visibleKeys.filter((k) => selected.has(k)).length;
+  const allSelected = visibleCount > 0 && selectedVisible === visibleCount;
+  function toggleSelectAll() {
+    setSelected((prev) => {
+      const n = new Set(prev);
+      if (allSelected) visibleKeys.forEach((k) => n.delete(k));
+      else visibleKeys.forEach((k) => n.add(k));
+      return n;
+    });
+  }
   const qualifiedCount = companies.filter((c) => c.bucket === 'qualified' && !leaving[c.company_key]).length;
   const needsCount = companies.filter((c) => c.bucket === 'needs_review' && !leaving[c.company_key]).length;
   const deferredCount = companies.filter((c) => c.bucket === 'deferred' && !leaving[c.company_key]).length;
@@ -427,18 +580,33 @@ function App() {
                       deadline={deadline} queued={queuedCount} onPreview={previewCountdown} onClose={() => setAutoOpen(false)} />
                   )}
                 </div>
-                {confirmRun ? (
-                  <span className="inline-flex items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2 py-1 text-[12.5px]">
-                    <span className="px-1 text-zinc-500" title="Layoffs (WARN) runs via the scheduled cron — it needs a browser the API image omits.">Pull last 24h? (leadership · M&A · funding · jobs)</span>
-                    <button onClick={() => setConfirmRun(false)} className="rounded-md px-2 py-1 font-medium text-zinc-500 transition-colors hover:bg-zinc-100">Cancel</button>
-                    <button onClick={handleRunDiscovery} className="rounded-md bg-indigo-600 px-2.5 py-1 font-medium text-white transition-colors hover:bg-indigo-700">Run</button>
+                {discoRunning ? (
+                  <span className="inline-flex items-center gap-1.5">
+                    <button onClick={handlePauseResume} disabled={cancelling}
+                      title={paused ? 'Resume the run from where it paused' : 'Pause the run — no new qualification starts, spend freezes'}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50">
+                      {paused ? <><Icons.play className="h-4 w-4" />Resume</> : <><Icons.pause className="h-4 w-4" />Pause</>}
+                    </button>
+                    <button onClick={handleCancelRun} disabled={cancelling}
+                      title="Stop the run cleanly at the next company boundary"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-[13px] font-medium text-rose-600 transition-colors hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50">
+                      <Icons.x className="h-4 w-4" />{cancelling ? 'Stopping…' : 'Cancel'}
+                    </button>
                   </span>
                 ) : (
-                  <button onClick={() => setConfirmRun(true)} disabled={discoRunning}
-                    title="Pull the last 24h of signals into the panel now (browserless sources)"
-                    className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-1.5 text-[13px] font-medium text-white shadow-sm transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">
-                    {discoRunning ? <><Icons.refresh className="h-4 w-4 animate-spin" />Running…</> : <><Icons.zap className="h-4 w-4" />Run 24h</>}
-                  </button>
+                  <div className="relative">
+                    <button onClick={() => setConfirmRun((o) => !o)}
+                      title="Configure and run a discovery pull now (browserless sources)"
+                      className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-1.5 text-[13px] font-medium text-white shadow-sm transition-colors hover:bg-indigo-700">
+                      <Icons.zap className="h-4 w-4" />Run
+                    </button>
+                    {confirmRun && (
+                      <RunConfigPopover
+                        scope={runScope} onScope={setRunScope}
+                        limit={runLimit} onLimit={setRunLimit}
+                        onRun={handleRunDiscovery} onClose={() => setConfirmRun(false)} />
+                    )}
+                  </div>
                 )}
                 <button onClick={() => { setLoading(true); loadAll(); pushToast('Refreshed', 'muted'); }}
                   className="inline-flex items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[13px] font-medium text-zinc-600 transition-colors hover:bg-zinc-50">
@@ -454,7 +622,7 @@ function App() {
         </div>
       </header>
 
-      {discovery && activity.length > 0 && <ActivityBanner runs={activity} />}
+      {discovery && activity.length > 0 && <ActivityBanner runs={activity} paused={paused} cancelling={cancelling} />}
 
       {discovery ? (
         <main className="mx-auto max-w-6xl px-8 py-8">
@@ -486,10 +654,37 @@ function App() {
                 <Dropdown label="Signal" value={signalType} onChange={setSignalType}
                   options={[{ value: 'all', label: 'All' }, { value: 'job_posting', label: 'Hiring' }, { value: 'layoff', label: 'Layoff' }, { value: 'leadership_change', label: 'Leadership change' }, { value: 'acquisition', label: 'Acquisition' }, { value: 'funding_round', label: 'Funding' }]} />
               </div>
-              <span className="text-[13px] text-zinc-400">
-                {loading ? 'Loading…' : `${visibleCount} ${visibleCount === 1 ? 'company' : 'companies'}`}
-              </span>
+              <div className="flex items-center gap-3">
+                {!loading && visibleCount > 0 && (
+                  <label className="inline-flex cursor-pointer items-center gap-1.5 text-[13px] text-zinc-500 select-none">
+                    <input type="checkbox" checked={allSelected} onChange={toggleSelectAll}
+                      className="h-3.5 w-3.5 rounded border-zinc-300 text-indigo-600 focus:ring-indigo-300" />
+                    Select all
+                  </label>
+                )}
+                <span className="text-[13px] text-zinc-400">
+                  {loading ? 'Loading…' : `${visibleCount} ${visibleCount === 1 ? 'company' : 'companies'}`}
+                </span>
+              </div>
             </div>
+
+            {selected.size > 0 && (
+              <div className="flex items-center justify-between gap-3 border-b border-rose-100 bg-rose-50/60 px-6 py-2.5">
+                <span className="text-[13px] font-medium text-rose-700">
+                  {selected.size} selected
+                </span>
+                <div className="flex items-center gap-2">
+                  <button onClick={() => setSelected(new Set())}
+                    className="rounded-lg px-3 py-1.5 text-[12.5px] font-medium text-zinc-500 transition-colors hover:bg-white">
+                    Clear
+                  </button>
+                  <button onClick={() => setConfirmDelete(true)}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 text-[12.5px] font-medium text-white transition-colors hover:bg-rose-700">
+                    <Icons.trash className="h-3.5 w-3.5" />Delete {selected.size}
+                  </button>
+                </div>
+              </div>
+            )}
 
             {!loading && tab === 'needs_review' && visibleCount > 0 && (
               <div className="flex items-center gap-2.5 border-b border-zinc-100 bg-zinc-50/70 px-6 py-2.5 text-[13px] text-zinc-500">
@@ -507,6 +702,8 @@ function App() {
             ) : (
               filtered.map((c) => (
                 <CompanyRow key={c.company_key} company={c} leaving={!!leaving[c.company_key]}
+                  selected={selected.has(c.company_key)}
+                  onToggleSelect={() => toggleSelect(c.company_key)}
                   onOpen={() => setOpenKey(c.company_key)}
                   onPromote={() => handlePromote(c.company_key)}
                   onDefer={() => handleDefer(c.company_key)}
@@ -531,6 +728,10 @@ function App() {
       )}
       {discovery && rejectFor && (
         <RejectReasonModal company={rejectFor} onCancel={() => setRejectFor(null)} onConfirm={(reason) => handleReject(rejectFor.company_key, reason)} />
+      )}
+      {discovery && confirmDelete && (
+        <ConfirmDeleteModal count={selected.size}
+          onCancel={() => setConfirmDelete(false)} onConfirm={handleDeleteSelected} />
       )}
       {discovery && <ActivityFeed items={feed} />}
 

@@ -43,15 +43,23 @@ window.RejectButton = RejectButton;
 window.RestoreButton = RestoreButton;
 
 // ── CompanyRow ──────────────────────────────────────────────────────────────
-function CompanyRow({ company, leaving, onOpen, onPromote, onDefer, onReject, onRestore }) {
+function CompanyRow({ company, leaving, selected, onToggleSelect, onOpen, onPromote, onDefer, onReject, onRestore }) {
   const stop = (fn) => (e) => { e.stopPropagation(); fn(); };
   const deferred = company.bucket === 'deferred';
   return (
     <div
       onClick={onOpen}
       className={`group relative cursor-pointer border-b border-zinc-100 px-6 transition-all duration-300 hover:bg-zinc-50/70
+        ${selected ? 'bg-indigo-50/40' : ''}
         ${leaving ? 'max-h-0 -translate-x-2 overflow-hidden border-b-0 py-0 opacity-0' : 'max-h-[200px] py-4 opacity-100'}`}>
       <div className="flex items-center gap-4">
+        {/* Select for bulk delete */}
+        {onToggleSelect && (
+          <input type="checkbox" checked={!!selected}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => { e.stopPropagation(); onToggleSelect(); }}
+            className="h-4 w-4 shrink-0 cursor-pointer rounded border-zinc-300 text-indigo-600 focus:ring-indigo-300" />
+        )}
         {/* Left: identity + signals */}
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2.5">

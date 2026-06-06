@@ -381,7 +381,7 @@ def create_app() -> FastAPI:
         repo = app.state.repo
         active = repo.active_runs() if hasattr(repo, "active_runs") else []
         recent = repo.recent_decisions(limit=20) if hasattr(repo, "recent_decisions") else []
-        # Attach per-company qualify spend from cost_events (estimate until real tokens).
+        # Attach per-company qualify spend from cost_events (measured tokens).
         try:
             keys = [r["company_key"] for r in recent if r.get("company_key")]
             costs = app.state.scoring_repo.qualify_costs(keys) if keys else {}
@@ -466,11 +466,7 @@ def create_app() -> FastAPI:
             )
 
             def on_company(cand) -> None:
-                cost = spend_guard.qualify_cost_usd(
-                    decided_by=cand.qualification.decided_by)
-                op.record(step="qualify", actual_usd=cost,
-                          company_key=cand.company_key)
-                op.accounts_done += 1
+                spend_guard.record_company_qualify(op, cand)
 
             try:
                 summary = await discovery_runner.run_once(

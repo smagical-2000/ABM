@@ -66,7 +66,7 @@ class PanelCompany(BaseModel):
     icp_status: str | None = None       # qualified | needs_review | disqualified | error
     first_seen_at: str | None = None
     qualified_at: str | None = None     # when the AI verdict landed (absolute timestamp)
-    qualify_cost_usd: float | None = None  # from cost_events; estimate until real tokens
+    qualify_cost_usd: float | None = None  # from cost_events (measured tokens)
     signal_count: int = 0
     signals: list[PanelSignal] = []
 

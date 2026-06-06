@@ -205,7 +205,7 @@ async def qualify_with_llm(signal: RawSignal) -> QualificationResult:
 
         Signal context:
         ```json
-        {json.dumps(context, indent=2, default=str)}
+        {json.dumps(context, separators=(",", ":"), default=str)}
         ```
 
         Respond with ONLY the JSON object — no prose, no fences.
@@ -227,6 +227,8 @@ async def qualify_with_llm(signal: RawSignal) -> QualificationResult:
 
     text = llm.extract_text(response)
     web_searches = llm.extract_web_searches(response)
+    spend = llm.spend_from_response(
+        response, searches=len(web_searches), model=_MODEL)
     if web_searches:
         logger.info(
             "  → %d web search(es): %s",
@@ -271,6 +273,8 @@ async def qualify_with_llm(signal: RawSignal) -> QualificationResult:
                 decided_by="llm",
             )
 
+    verdict = verdict.model_copy(update={"llm_spend": spend})
+
     # Persist trace for prompt debugging — independent of verdict success
     _write_trace(
         signal=signal,
@@ -281,6 +285,12 @@ async def qualify_with_llm(signal: RawSignal) -> QualificationResult:
         verdict=verdict,
         parse_error=parse_error,
         schema_error=schema_error,
+        spend=spend,
+    )
+
+    logger.info(
+        "  → cost $%.4f  in=%d out=%d  searches=%d",
+        spend.cost_usd, spend.input_tokens, spend.output_tokens, spend.searches,
     )
 
     # Surface verdict reasoning at INFO — visible without --verbose
@@ -361,6 +371,7 @@ def _write_trace(
     verdict: QualificationResult,
     parse_error: str | None,
     schema_error: str | None,
+    spend: Any = None,
 ) -> None:
     """Write a JSON trace per qualification so prompt failures are debuggable.
 
@@ -382,12 +393,12 @@ def _write_trace(
 
         fname = f"{slugify(signal.company_name_raw)}__{now.strftime('%H%M%S')}.json"
 
-        usage = getattr(response, "usage", None)
         usage_data = None
-        if usage:
+        if spend is not None:
             usage_data = {
-                "input_tokens":  getattr(usage, "input_tokens", None),
-                "output_tokens": getattr(usage, "output_tokens", None),
+                "input_tokens":  spend.input_tokens,
+                "output_tokens": spend.output_tokens,
+                "cost_usd":      spend.cost_usd,
             }
 
         trace = {

@@ -19,6 +19,10 @@ from __future__ import annotations
 import logging
 import os
 import uuid
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from auto_search.models import CompanyCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -41,15 +45,32 @@ def discovery_est_qual_cost() -> float: return _f("DISCOVERY_EST_QUAL_COST", "0.
 def discovery_monthly_budget() -> float: return _f("DISCOVERY_MONTHLY_BUDGET", "50")
 
 
-def qualify_cost_usd(*, decided_by: str | None) -> float:
-    """USD attributed to one discovery qualification for cost_events.
+def record_company_qualify(op: Operation, candidate: CompanyCandidate) -> None:
+    """Persist measured qualify spend for one company (real tokens, not estimate).
 
-    Rule-only pre-filters cost nothing (no LLM). Anything that reached the
-    website qualifier is billed at the flat estimate until we wire real tokens.
+    Rules-only pre-filters have no llm_spend → $0. LLM paths must attach
+    llm_spend on QualificationResult before this is called.
     """
-    if decided_by == "rules":
-        return 0.0
-    return discovery_est_qual_cost()
+    spend = candidate.qualification.llm_spend
+    actual = round(float(spend.cost_usd), 6) if spend else 0.0
+    meta = None
+    if spend and (spend.input_tokens or spend.output_tokens):
+        meta = {
+            "input_tokens": spend.input_tokens,
+            "output_tokens": spend.output_tokens,
+            "measured": True,
+        }
+    est = discovery_est_qual_cost() if actual > 0 else 0.0
+    op.record(
+        step="qualify",
+        actual_usd=actual,
+        company_key=candidate.company_key,
+        estimated_usd=est,
+        model=spend.model if spend else "",
+        searches=spend.searches if spend else 0,
+        metadata=meta,
+    )
+    op.accounts_done += 1
 
 
 class OverheatError(RuntimeError):
@@ -93,7 +114,8 @@ class Operation:
 
     def record(self, *, step: str, actual_usd: float, account_id: str | None = None,
                company_key: str | None = None, estimated_usd: float = 0.0,
-               model: str = "", searches: int = 0) -> None:
+               model: str = "", searches: int = 0,
+               metadata: dict | None = None) -> None:
         """Record one paid step (score|qa|dossier|qualify) and accumulate."""
         amt = round(float(actual_usd or 0), 6)
         self.actual = round(self.actual + amt, 6)
@@ -105,6 +127,7 @@ class Operation:
             "company_key": company_key, "step": step,
             "estimated_usd": round(float(estimated_usd or 0), 4), "actual_usd": amt,
             "model": model, "searches": int(searches or 0),
+            "metadata": metadata,
         })
 
     def account_cost(self, account_id: str) -> float:

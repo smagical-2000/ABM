@@ -66,6 +66,21 @@ IcpStatus = Literal["pending", "qualified", "needs_review", "disqualified", "err
 DecidedBy = Literal["rules", "llm", "rules+llm"]
 
 
+class LlmSpend(BaseModel):
+    """Measured USD + token usage for one Claude call.
+
+    Filled by llm.spend_from_response() after each paid call. Flows through
+    QualificationResult → cost_events so discovery billing is real tokens, not
+    the flat DISCOVERY_EST_QUAL_COST guess.
+    """
+
+    cost_usd: float = 0.0
+    model: str = ""
+    searches: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
 # ── core models ───────────────────────────────────────────────────────
 
 
@@ -155,6 +170,8 @@ class QualificationResult(BaseModel):
     needs_human_review: bool = False
     is_error: bool = False
     decided_by: DecidedBy = "llm"
+    # Populated after a paid LLM call; rules-only pre-filters leave this None.
+    llm_spend: LlmSpend | None = None
 
     @field_validator("approximate_employees", mode="before")
     @classmethod

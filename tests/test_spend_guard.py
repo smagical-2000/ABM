@@ -4,6 +4,8 @@ No live LLM: the engine + QA are monkeypatched so the guard logic is exercised
 deterministically.
 """
 
+from datetime import UTC, datetime
+
 import pytest
 
 from auto_search.db.scoring_repository import ScoringJsonRepository
@@ -15,10 +17,55 @@ def _repo(tmp_path):
     return ScoringJsonRepository(path=str(tmp_path / "s.json"))
 
 
-def test_qualify_cost_usd_rules_are_free(monkeypatch):
+def test_record_company_qualify_rules_are_free(tmp_path):
+    from auto_search.models import CompanyCandidate, QualificationResult, RawSignal
+
+    repo = _repo(tmp_path)
+    op = spend_guard.Operation(repo, "discovery_manual", estimated_usd=1.0)
+    cand = CompanyCandidate(
+        company_key="acme",
+        company_name="Acme",
+        signals=[RawSignal(
+            source="warntracker", source_external_id="acme::1",
+            signal_type="layoff", company_name_raw="Acme",
+            observed_at=datetime(2025, 1, 1, tzinfo=UTC), payload={})],
+        qualification=QualificationResult(
+            qualified=False, confidence=0.95,
+            reasoning="Pre-filter", decided_by="rules"),
+    )
+    spend_guard.record_company_qualify(op, cand)
+    assert op.actual == 0.0
+    assert repo._events[-1]["actual_usd"] == 0.0
+    assert repo._events[-1].get("metadata") is None
+
+
+def test_record_company_qualify_measured_tokens(tmp_path, monkeypatch):
+    from auto_search.models import CompanyCandidate, LlmSpend, QualificationResult, RawSignal
+
     monkeypatch.setenv("DISCOVERY_EST_QUAL_COST", "0.12")
-    assert spend_guard.qualify_cost_usd(decided_by="rules") == 0.0
-    assert spend_guard.qualify_cost_usd(decided_by="rules+llm") == 0.12
+    repo = _repo(tmp_path)
+    op = spend_guard.Operation(repo, "discovery_manual", estimated_usd=1.0)
+    cand = CompanyCandidate(
+        company_key="cardiology",
+        company_name="Cardiology Group",
+        signals=[RawSignal(
+            source="signalbase_jobs", source_external_id="card::1",
+            signal_type="job", company_name_raw="Cardiology Group",
+            observed_at=datetime(2025, 1, 1, tzinfo=UTC), payload={})],
+        qualification=QualificationResult(
+            qualified=False, confidence=0.8, reasoning="review",
+            decided_by="rules+llm",
+            llm_spend=LlmSpend(
+                cost_usd=0.0842, model="claude-sonnet-4-5",
+                searches=2, input_tokens=1200, output_tokens=400),
+        ),
+    )
+    spend_guard.record_company_qualify(op, cand)
+    assert op.actual == 0.0842
+    ev = repo._events[-1]
+    assert ev["company_key"] == "cardiology"
+    assert ev["metadata"]["measured"] is True
+    assert ev["estimated_usd"] == 0.12
 
 
 def test_operation_account_cap_and_cost_events(tmp_path):

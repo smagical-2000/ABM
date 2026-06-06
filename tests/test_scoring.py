@@ -740,3 +740,15 @@ class TestCallCost:
 
         from auto_search import llm
         assert llm.call_cost(SimpleNamespace(), searches=2) == 0.0
+
+    def test_spend_from_response(self):
+        from auto_search import llm
+
+        resp = self._resp(input_tokens=10_000, output_tokens=2_000,
+                          cache_creation_input_tokens=0, cache_read_input_tokens=0)
+        spend = llm.spend_from_response(resp, searches=3, model="claude-sonnet-4-5")
+        assert spend.cost_usd == 0.09
+        assert spend.model == "claude-sonnet-4-5"
+        assert spend.searches == 3
+        assert spend.input_tokens == 10_000
+        assert spend.output_tokens == 2_000

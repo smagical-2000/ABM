@@ -128,24 +128,54 @@ def _cached_system(system: str) -> list[dict]:
     return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
 
 
+def _usage_fields(response: Any) -> dict[str, int]:
+    """Token counts from an Anthropic response.usage block."""
+    u = getattr(response, "usage", None)
+    if u is None:
+        return {"input_tokens": 0, "output_tokens": 0,
+                "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
+
+    def g(name: str) -> int:
+        return int(getattr(u, name, 0) or 0)
+
+    return {
+        "input_tokens": g("input_tokens"),
+        "output_tokens": g("output_tokens"),
+        "cache_creation_input_tokens": g("cache_creation_input_tokens"),
+        "cache_read_input_tokens": g("cache_read_input_tokens"),
+    }
+
+
 def call_cost(response: Any, *, searches: int = 0) -> float:
     """Best-effort USD cost of one call, from the response usage + search count.
 
     Server-side web_search runs inside one create() call, so the usage already
     aggregates every internal turn's tokens.
     """
-    u = getattr(response, "usage", None)
-    if u is None:
-        return 0.0
-    def g(name: str) -> int:
-        return getattr(u, name, 0) or 0
+    u = _usage_fields(response)
     cost = (
-        g("input_tokens") * _PRICE_IN
-        + g("output_tokens") * _PRICE_OUT
-        + g("cache_creation_input_tokens") * _PRICE_CACHE_WRITE
-        + g("cache_read_input_tokens") * _PRICE_CACHE_READ
+        u["input_tokens"] * _PRICE_IN
+        + u["output_tokens"] * _PRICE_OUT
+        + u["cache_creation_input_tokens"] * _PRICE_CACHE_WRITE
+        + u["cache_read_input_tokens"] * _PRICE_CACHE_READ
     ) / 1_000_000 + searches * _PRICE_PER_SEARCH
     return round(cost, 4)
+
+
+def spend_from_response(
+    response: Any, *, searches: int = 0, model: str = "",
+) -> "LlmSpend":
+    """Build a measured LlmSpend from an Anthropic response (scoring + discovery)."""
+    from auto_search.models import LlmSpend
+
+    u = _usage_fields(response)
+    return LlmSpend(
+        cost_usd=call_cost(response, searches=searches),
+        model=model or "",
+        searches=int(searches or 0),
+        input_tokens=u["input_tokens"],
+        output_tokens=u["output_tokens"],
+    )
 
 
 async def call_with_web_search(

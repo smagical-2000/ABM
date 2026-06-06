@@ -51,6 +51,7 @@ from auto_search.connectors.job_postings import JobPostingsConnector
 from auto_search.connectors.leadership_changes import LeadershipChangesConnector
 from auto_search.connectors.warntracker import WarnTrackerConnector
 from auto_search.db import get_repository
+from auto_search.scoring import spend_guard
 
 load_dotenv(override=True)
 
@@ -115,6 +116,7 @@ async def run_connector(
     limit: int | None,
     qualify: bool,
     prefilter=None,
+    spend_op=None,
 ) -> dict[str, int]:
     """Run one connector through the pipeline and persist results.
 
@@ -148,6 +150,8 @@ async def run_connector(
             on_plan=lambda n: _update_run(repo, run_id, planned=n),
         ):
             repo.save_candidate(cand)
+            if spend_op is not None:
+                spend_guard.record_company_qualify(spend_op, cand)
             evaluated += 1
             status = cand.qualification.to_status()
             counts[status] = counts.get(status, 0) + 1
@@ -249,6 +253,20 @@ async def main(args: argparse.Namespace) -> int:
 
     totals: dict[str, int] = {}
     ran = failed = 0
+    spend_op = None
+    if not args.no_qualify:
+        try:
+            from auto_search.db.scoring_repository import get_scoring_repository
+            scoring_repo = get_scoring_repository()
+            if hasattr(scoring_repo, "ensure_schema"):
+                scoring_repo.ensure_schema()
+            spend_op = spend_guard.Operation(
+                scoring_repo, "discovery_cron",
+                estimated_usd=0.0, accounts_planned=0,
+            )
+        except Exception:  # noqa: BLE001 — cost tracking must not break discovery
+            logging.getLogger(__name__).exception("discovery spend op init failed")
+
     for name in selected:
         try:
             connector = CONNECTORS[name](limit)
@@ -262,7 +280,7 @@ async def main(args: argparse.Namespace) -> int:
             counts = await run_connector(
                 name, connector, since, repo,
                 limit=limit, qualify=not args.no_qualify,
-                prefilter=prefilter,
+                prefilter=prefilter, spend_op=spend_op,
             )
         except Exception as e:  # noqa: BLE001 — one source must not kill the cron
             failed += 1
@@ -282,9 +300,8 @@ async def main(args: argparse.Namespace) -> int:
         print(f"  {RED}errors:        {totals.get('error', 0)}{RESET}")
         print(f"\n  store totals: {repo.stats()}")
         print(f"  {DIM}panel (qualified) → python scripts/run_discovery.py --panel{RESET}")
-        evaluated = (totals.get("qualified", 0) + totals.get("needs_review", 0)
-                     + totals.get("disqualified", 0))
-        _record_discovery_cost(evaluated)
+        if spend_op is not None:
+            spend_op.finish(status="completed")
 
     # Production exit code: a single source failing keeps exit 0 (resilient), but
     # a TOTAL failure (every selected source errored) exits non-zero so the
@@ -295,33 +312,6 @@ async def main(args: argparse.Namespace) -> int:
     if failed:
         print(f"  {YELLOW}{failed} of {len(selected)} source(s) failed (others ran){RESET}")
     return 0
-
-
-def _record_discovery_cost(evaluated: int) -> None:
-    """Make discovery's qualify spend visible in the scoring cost meter.
-
-    Estimate-based (the qualifier's exact per-call cost isn't surfaced), written
-    as a 'qualify' cost_event so it lands in month_discovery_cost. Best-effort:
-    never break the run if the scoring store is unavailable.
-    """
-    if evaluated <= 0:
-        return
-    try:
-        from auto_search.db.scoring_repository import get_scoring_repository
-        from auto_search.scoring import spend_guard
-        repo = get_scoring_repository()
-        if hasattr(repo, "ensure_schema"):
-            repo.ensure_schema()
-        est = round(evaluated * spend_guard.discovery_est_qual_cost(), 4)
-        op = spend_guard.Operation(repo, "discovery_cron",
-                                   estimated_usd=est, accounts_planned=evaluated)
-        op.record(step="qualify", actual_usd=est)
-        op.accounts_done = evaluated
-        op.finish(status="completed")
-        logging.getLogger(__name__).info("recorded discovery qual cost ~$%.2f (%d evaluated)",
-                                         est, evaluated)
-    except Exception:  # noqa: BLE001 — accounting must never break discovery
-        logging.getLogger(__name__).warning("discovery cost recording skipped", exc_info=False)
 
 
 if __name__ == "__main__":

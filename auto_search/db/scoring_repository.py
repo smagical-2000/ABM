@@ -421,16 +421,18 @@ class ScoringPostgresRepository:
                 (status, actual_usd, accounts_done, error, op_id))
 
     def record_cost_event(self, event: dict) -> None:
+        payload = {**event, "metadata": json.dumps(event["metadata"])
+                   if event.get("metadata") else None}
         with self._pool.connection() as conn:
             conn.execute(
                 """
                 INSERT INTO cost_events
                   (id, operation_id, op_type, account_id, company_key, step,
-                   estimated_usd, actual_usd, model, searches)
+                   estimated_usd, actual_usd, model, searches, metadata)
                 VALUES (%(id)s, %(operation_id)s, %(op_type)s, %(account_id)s,
                         %(company_key)s, %(step)s, %(estimated_usd)s, %(actual_usd)s,
-                        %(model)s, %(searches)s)
-                """, event)
+                        %(model)s, %(searches)s, %(metadata)s::jsonb)
+                """, payload)
 
     def spend_rollup(self) -> dict:
         with self._pool.connection() as conn:

@@ -63,7 +63,10 @@ class PanelCompany(BaseModel):
     evidence_url: str | None = None
     domain: str | None = None
     review_status: str = "pending"
+    icp_status: str | None = None       # qualified | needs_review | disqualified | error
     first_seen_at: str | None = None
+    qualified_at: str | None = None     # when the AI verdict landed (absolute timestamp)
+    qualify_cost_usd: float | None = None  # from cost_events; estimate until real tokens
     signal_count: int = 0
     signals: list[PanelSignal] = []
 
@@ -107,7 +110,12 @@ class ReviewService:
         rows = self._repo.panel(statuses=statuses)
         out: list[PanelCompany] = []
         for row in rows:
-            if row.get("review_status", "pending") != review_status:
+            rs = row.get("review_status", "pending")
+            # Deferred is folded back into the queue — no separate tab.
+            if review_status == "pending":
+                if rs not in ("pending", "deferred"):
+                    continue
+            elif rs != review_status:
                 continue
             if segment and row.get("segment") != segment:
                 continue
@@ -207,7 +215,9 @@ def _to_panel_company(row: dict) -> PanelCompany:
         evidence_url=row.get("evidence_url"),
         domain=row.get("domain"),
         review_status=row.get("review_status", "pending"),
+        icp_status=row.get("icp_status"),
         first_seen_at=row.get("first_seen_at"),
+        qualified_at=row.get("qualified_at"),
         signal_count=len(signals),
         signals=signals,
     )

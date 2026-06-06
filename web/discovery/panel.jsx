@@ -43,9 +43,8 @@ window.RejectButton = RejectButton;
 window.RestoreButton = RestoreButton;
 
 // ── CompanyRow ──────────────────────────────────────────────────────────────
-function CompanyRow({ company, leaving, selected, onToggleSelect, onOpen, onPromote, onDefer, onReject, onRestore }) {
+function CompanyRow({ company, leaving, selected, onToggleSelect, onOpen, onPromote, onReject }) {
   const stop = (fn) => (e) => { e.stopPropagation(); fn(); };
-  const deferred = company.bucket === 'deferred';
   return (
     <div
       onClick={onOpen}
@@ -64,15 +63,26 @@ function CompanyRow({ company, leaving, selected, onToggleSelect, onOpen, onProm
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2.5">
             <h3 className="truncate text-[15px] font-semibold text-zinc-900">{company.name}</h3>
+            {company.icp_status && <VerdictBadge status={company.icp_status} />}
             <SegmentBadge segment={company.segment} />
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <SignalChips signals={company.signals} />
           </div>
-          <div className="mt-2 flex items-center gap-1.5 text-[12px] text-zinc-400">
+          <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[12px] text-zinc-400">
             <span>{company.signal_count} {company.signal_count === 1 ? 'signal' : 'signals'}</span>
-            <span className="text-zinc-300">·</span>
-            <span>seen {relativeTime(company.first_seen_at)}</span>
+            {company.qualified_at && (
+              <>
+                <span className="text-zinc-300">·</span>
+                <span title={company.qualified_at}>evaluated {formatDateTime(company.qualified_at)}</span>
+              </>
+            )}
+            {company.qualify_cost_usd != null && company.qualify_cost_usd > 0 && (
+              <>
+                <span className="text-zinc-300">·</span>
+                <span className="tabular-nums text-zinc-500">${company.qualify_cost_usd.toFixed(2)}</span>
+              </>
+            )}
             {company.approximate_employees && (
               <>
                 <span className="text-zinc-300">·</span>
@@ -90,17 +100,10 @@ function CompanyRow({ company, leaving, selected, onToggleSelect, onOpen, onProm
 
         {/* Right: actions */}
         <div className="flex shrink-0 items-center gap-1.5">
-          {deferred ? (
-            <RestoreButton onClick={stop(onRestore)} />
-          ) : (
-            <>
-              <div className="flex items-center gap-1.5 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
-                <RejectButton onClick={stop(onReject)} />
-                <DeferButton onClick={stop(onDefer)} />
-              </div>
-              <PromoteButton onClick={stop(onPromote)} />
-            </>
-          )}
+          <div className="flex items-center gap-1.5 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+            <RejectButton onClick={stop(onReject)} />
+          </div>
+          <PromoteButton onClick={stop(onPromote)} />
           <span className="ml-1 text-zinc-300 transition-colors group-hover:text-zinc-500">
             <Icons.arrowRight className="h-4 w-4" />
           </span>

@@ -118,8 +118,8 @@ class DiscoveryRepository(Protocol):
         """Recently-started runs still in progress (drives the UI marker)."""
         ...
 
-    def recent_decisions(self, *, limit: int = 12) -> list[dict]:
-        """Most recently decided companies (any verdict) for the live feed."""
+    def recent_decisions(self, *, limit: int = 20) -> list[dict]:
+        """Most recently decided companies (any verdict) for the run log."""
         ...
 
 
@@ -350,14 +350,24 @@ class JsonFileRepository:
         out.sort(key=lambda x: x["started_at"], reverse=True)
         return out
 
-    def recent_decisions(self, *, limit: int = 12) -> list[dict]:
+    def recent_decisions(self, *, limit: int = 20) -> list[dict]:
         rows = [r for r in self._store.values() if r.get("qualified_at")]
         rows.sort(key=lambda r: r.get("qualified_at") or "", reverse=True)
-        return [
-            {"name": r.get("display_name"), "status": r.get("icp_status"),
-             "segment": r.get("segment"), "at": r.get("qualified_at")}
-            for r in rows[:limit]
-        ]
+        out: list[dict] = []
+        for r in rows[:limit]:
+            sigs = r.get("signals") or []
+            top = sigs[0] if sigs else {}
+            payload = top.get("payload") or {}
+            out.append({
+                "company_key": r.get("normalized_name"),
+                "name": r.get("display_name"),
+                "status": r.get("icp_status"),
+                "segment": r.get("segment"),
+                "at": r.get("qualified_at"),
+                "signal_type": top.get("signal_type"),
+                "signal_summary": top.get("summary") or payload.get("role"),
+            })
+        return out
 
     # -- internals --
 

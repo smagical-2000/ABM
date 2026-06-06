@@ -13,8 +13,32 @@ function relativeTime(iso) {
 function shortDate(iso) {
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
+function formatDateTime(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleString('en-US', {
+    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+  });
+}
 window.relativeTime = relativeTime;
 window.shortDate = shortDate;
+window.formatDateTime = formatDateTime;
+
+// ── VerdictBadge — AI outcome chip (qualified / needs review / disqualified) ─
+const VERDICT_META = {
+  qualified:    { label: 'Qualified',    cls: 'bg-emerald-50 text-emerald-700 ring-emerald-200' },
+  needs_review: { label: 'Needs review', cls: 'bg-amber-50 text-amber-700 ring-amber-200' },
+  disqualified: { label: 'Disqualified', cls: 'bg-zinc-100 text-zinc-500 ring-zinc-200' },
+  error:        { label: 'Error',        cls: 'bg-rose-50 text-rose-600 ring-rose-200' },
+};
+function VerdictBadge({ status }) {
+  const m = VERDICT_META[status] || VERDICT_META.disqualified;
+  return (
+    <span className={`shrink-0 rounded-md px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset ${m.cls}`}>
+      {m.label}
+    </span>
+  );
+}
+window.VerdictBadge = VerdictBadge;
 
 // ── Icons (simple stroke SVGs) ──────────────────────────────────────────────
 const ic = (paths, props = {}) => (

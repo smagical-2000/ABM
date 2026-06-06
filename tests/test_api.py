@@ -117,6 +117,7 @@ class TestWorkflow:
         assert out["sources"] == ["jobs"] and out["limit"] == 2
         assert seen["sources"] == ["jobs"] and seen["limit"] == 2
         assert "gate" in seen          # pause/cancel gate is wired in
+        assert "on_company" in seen    # per-company cost hook is wired in
 
     def test_discovery_run_rejects_unknown_source(self, client):
         r = client.post("/api/discovery/run", json={"sources": ["bogus"]})
@@ -150,7 +151,9 @@ class TestWorkflow:
 
     def test_defer(self, client):
         assert client.post("/api/company/acmehealth/defer").status_code == 200
-        assert client.get("/api/panel").json() == []
+        # Deferred folds into the main queue (no separate tab).
+        row = client.get("/api/panel").json()
+        assert len(row) == 1 and row[0]["name"] == "Acme Health"
 
 
 _HS_CSV = (

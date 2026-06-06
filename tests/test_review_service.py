@@ -79,10 +79,11 @@ class TestWorkflow:
         assert "Charlie Behavioral" not in {c.name for c in svc.list_panel()}
         assert svc.get_company("charlie").review_status == "rejected"
 
-    def test_defer_removes_from_panel(self, svc):
+    def test_defer_stays_in_panel(self, svc):
+        """Deferred is folded into the main queue — no separate tab."""
         svc.defer("alpha")
         assert svc.get_company("alpha").review_status == "deferred"
-        assert "Alpha Health" not in {c.name for c in svc.list_panel()}
+        assert "Alpha Health" in {c.name for c in svc.list_panel()}
 
     def test_promote_unknown_raises(self, svc):
         with pytest.raises(KeyError):
@@ -90,11 +91,9 @@ class TestWorkflow:
 
 
 class TestDeferredAndRestore:
-    def test_deferred_appears_in_deferred_view_not_main_panel(self, svc):
+    def test_deferred_visible_in_main_panel(self, svc):
         svc.defer("alpha")
-        # gone from the main (pending) panel…
-        assert "Alpha Health" not in {c.name for c in svc.list_panel()}
-        # …but visible in the deferred view (the fix: no longer a black hole)
+        assert "Alpha Health" in {c.name for c in svc.list_panel()}
         assert {c.name for c in svc.list_deferred()} == {"Alpha Health"}
 
     def test_restore_moves_back_to_pending_queue(self, svc):

@@ -51,13 +51,14 @@ def _connector(name: str, limit):
 
 
 async def run_once(repo, *, days: int = 1, sources=None, limit=None,
-                   on_cost=None, gate=None) -> dict:
+                   on_company=None, gate=None) -> dict:
     """Run the browserless sources for the last `days` into `repo`, deduped.
 
-    Returns a per-source summary. `on_cost(evaluated)` lets the caller record the
-    qualify spend. `gate` is an optional async checkpoint (pause/cancel) awaited
-    before each company and before each new source. Resilient: one source
-    failing does not stop the others.
+    Returns a per-source summary. `on_company(candidate)` is called after each
+    company is saved so the caller can record per-company qualify spend.
+    `gate` is an optional async checkpoint (pause/cancel) awaited before each
+    company and before each new source. Resilient: one source failing does not
+    stop the others.
     """
     since = datetime.now(UTC) - timedelta(days=days)
     selected = [s for s in (sources or BROWSERLESS_SOURCES) if s in BROWSERLESS_SOURCES]
@@ -87,6 +88,11 @@ async def run_once(repo, *, days: int = 1, sources=None, limit=None,
                 repo.save_candidate(cand)
                 status = cand.qualification.to_status()
                 counts[status] = counts.get(status, 0) + 1
+                if on_company is not None:
+                    try:
+                        on_company(cand)
+                    except Exception:  # noqa: BLE001 — cost hook must not break a run
+                        logger.exception("on_company hook failed for %s", cand.company_key)
                 _update_run(repo, run_id, new_companies=sum(counts.values()),
                             companies_qualified=counts["qualified"])
             totals["ran"] += 1
@@ -100,11 +106,7 @@ async def run_once(repo, *, days: int = 1, sources=None, limit=None,
             totals[k] += counts.get(k, 0)
 
     evaluated = totals["qualified"] + totals["needs_review"] + totals["disqualified"]
-    if on_cost is not None and evaluated:
-        try:
-            on_cost(evaluated)
-        except Exception:  # noqa: BLE001 — cost accounting must not break the run
-            logger.exception("discovery cost hook failed")
+    totals["evaluated"] = evaluated
     logger.info("on-demand discovery: %d sources ran, %d qualified, %d evaluated",
                 totals["ran"], totals["qualified"], evaluated)
     return totals

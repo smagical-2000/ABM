@@ -64,6 +64,7 @@ class ScoringRepository(Protocol):
     def record_cost_event(self, event: dict) -> None: ...
     def spend_rollup(self) -> dict: ...
     def recent_operations(self, limit: int = 10) -> list[dict]: ...
+    def qualify_costs(self, company_keys: list[str]) -> dict[str, float]: ...
 
 
 # ── shared row shaping ────────────────────────────────────────────────
@@ -454,6 +455,20 @@ class ScoringPostgresRepository:
                 "ORDER BY started_at DESC LIMIT %s", (limit,)).fetchall()
         return [_op_row(r) for r in rows]
 
+    def qualify_costs(self, company_keys: list[str]) -> dict[str, float]:
+        """Per-company discovery qualify spend from cost_events (step=qualify)."""
+        if not company_keys:
+            return {}
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                """SELECT company_key, COALESCE(SUM(actual_usd), 0) AS usd
+                     FROM cost_events
+                    WHERE step = 'qualify' AND company_key = ANY(%s)
+                    GROUP BY company_key""",
+                (list(company_keys),),
+            ).fetchall()
+        return {r["company_key"]: round(float(r["usd"]), 4) for r in rows}
+
 
 # ── JSON file (local/dev) ─────────────────────────────────────────────
 
@@ -671,6 +686,20 @@ class ScoringJsonRepository:
     def recent_operations(self, limit: int = 10) -> list[dict]:
         rows = sorted(self._ops, key=lambda o: o.get("started_at") or "", reverse=True)
         return [_op_row(o) for o in rows[:limit]]
+
+    def qualify_costs(self, company_keys: list[str]) -> dict[str, float]:
+        if not company_keys:
+            return {}
+        want = set(company_keys)
+        totals: dict[str, float] = {}
+        for ev in self._events:
+            if ev.get("step") != "qualify":
+                continue
+            key = ev.get("company_key")
+            if key not in want:
+                continue
+            totals[key] = round(totals.get(key, 0.0) + float(ev.get("actual_usd") or 0), 4)
+        return totals
 
     # -- internals --
 

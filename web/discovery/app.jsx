@@ -150,10 +150,7 @@ function ActivityBanner({ runs, paused, cancelling }) {
 }
 
 // ── DiscoverySpendMeter — month-to-date qualify spend vs the discovery budget ─
-// Cost control for panel 1: the qualifier is cheap-but-not-free (~$0.12/company),
-// so this shows what this month's discovery has spent against its budget and
-// warns as it approaches it. The server hard-blocks a manual run at the budget.
-function DiscoverySpendMeter({ spend }) {
+function DiscoverySpendMeter({ spend, lastRun }) {
   if (!spend) return null;
   const spent = spend.month_discovery_cost || 0;
   const budget = spend.discovery_budget || 0;
@@ -163,8 +160,12 @@ function DiscoverySpendMeter({ spend }) {
   const near = !over && budget && spent >= budget * 0.8;
   const bar = over ? 'bg-rose-500' : near ? 'bg-amber-500' : 'bg-indigo-500';
   const tone = over ? 'text-rose-600' : near ? 'text-amber-600' : 'text-zinc-500';
+  const runCost = lastRun && lastRun.cost_usd;
+  const runEval = lastRun && (lastRun.evaluated ?? (
+    (lastRun.qualified || 0) + (lastRun.needs_review || 0) + (lastRun.disqualified || 0)
+  ));
   return (
-    <div className="mt-3 flex items-center gap-3 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 shadow-sm shadow-zinc-900/[0.02]">
+    <div className="mt-3 flex flex-wrap items-center gap-3 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 shadow-sm shadow-zinc-900/[0.02]">
       <Icons.zap className="h-4 w-4 shrink-0 text-zinc-400" />
       <span className="text-[12.5px] font-medium text-zinc-600">Discovery spend</span>
       <span className={`text-[12.5px] font-semibold tabular-nums ${tone}`}>
@@ -175,6 +176,11 @@ function DiscoverySpendMeter({ spend }) {
           <div className={`h-full rounded-full transition-all duration-500 ${bar}`} style={{ width: `${pct}%` }} />
         </div>
       )}
+      {runEval > 0 && (
+        <span className="text-[11.5px] tabular-nums text-indigo-600">
+          Last run: {runEval} evaluated{runCost != null ? ` · $${Number(runCost).toFixed(2)}` : ''}
+        </span>
+      )}
       <span className="ml-auto text-[11.5px] tabular-nums text-zinc-400">
         ~${est.toFixed(2)}/company · month to date
       </span>
@@ -183,6 +189,103 @@ function DiscoverySpendMeter({ spend }) {
       ) : near ? (
         <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-600 ring-1 ring-inset ring-amber-100">Near budget</span>
       ) : null}
+    </div>
+  );
+}
+
+// ── LastRunSummary — what the most recent manual run produced, per source ─────
+function LastRunSummary({ lastRun }) {
+  if (!lastRun || !lastRun.at) return null;
+  const sources = lastRun.by_source || {};
+  const entries = Object.entries(sources);
+  if (!entries.length && !lastRun.evaluated) return null;
+  const evaluated = lastRun.evaluated ?? (
+    (lastRun.qualified || 0) + (lastRun.needs_review || 0) + (lastRun.disqualified || 0)
+  );
+  return (
+    <div className="mt-3 rounded-xl border border-indigo-100 bg-indigo-50/40 px-4 py-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[13px] font-semibold text-indigo-800">Last run</span>
+        <span className="text-[12px] text-indigo-600">{formatDateTime(lastRun.at)}</span>
+        {lastRun.cancelled && (
+          <span className="rounded-md bg-rose-100 px-2 py-0.5 text-[11px] font-medium text-rose-700">Cancelled</span>
+        )}
+      </div>
+      <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-[12.5px] text-indigo-700">
+        <span><span className="font-semibold tabular-nums">{evaluated}</span> evaluated</span>
+        <span><span className="font-semibold tabular-nums text-emerald-700">{lastRun.qualified || 0}</span> qualified</span>
+        <span><span className="font-semibold tabular-nums text-amber-700">{lastRun.needs_review || 0}</span> needs review</span>
+        <span><span className="font-semibold tabular-nums text-zinc-500">{lastRun.disqualified || 0}</span> disqualified</span>
+        {lastRun.cost_usd != null && (
+          <span className="tabular-nums">${Number(lastRun.cost_usd).toFixed(2)} charged</span>
+        )}
+      </div>
+      {entries.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {entries.map(([src, c]) => {
+            const n = (c.qualified || 0) + (c.needs_review || 0) + (c.disqualified || 0);
+            if (!n && !c.error) return null;
+            return (
+              <span key={src} className="rounded-lg bg-white/80 px-2.5 py-1 text-[11.5px] text-indigo-700 ring-1 ring-inset ring-indigo-100">
+                {src}: {n || '0'}
+                {c.qualified ? ` · ${c.qualified}✓` : ''}
+                {c.needs_review ? ` · ${c.needs_review}~` : ''}
+                {c.disqualified ? ` · ${c.disqualified}✕` : ''}
+                {c.error ? ' · error' : ''}
+              </span>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const SIGNAL_LABELS = {
+  job_posting: 'Hiring', layoff: 'Layoff', leadership_change: 'Leadership',
+  acquisition: 'M&A', funding_round: 'Funding',
+};
+
+// ── RunActivityLog — persistent feed of recent evaluations (incl. disqualified) ─
+function RunActivityLog({ items }) {
+  if (!items || !items.length) return null;
+  return (
+    <div className="mt-6 overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm shadow-zinc-900/[0.02]">
+      <div className="border-b border-zinc-100 px-5 py-3">
+        <h2 className="text-[14px] font-semibold text-zinc-800">Recent evaluations</h2>
+        <p className="mt-0.5 text-[12px] text-zinc-500">
+          Everything the qualifier decided recently — including disqualified. Newest first.
+        </p>
+      </div>
+      <div className="max-h-72 divide-y divide-zinc-50 overflow-y-auto">
+        {items.map((item, i) => (
+          <div key={`${item.company_key || item.name}-${item.at}-${i}`}
+            className="flex items-start gap-3 px-5 py-2.5 hover:bg-zinc-50/60">
+            <VerdictBadge status={item.status} />
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[13px] font-medium text-zinc-800">{item.name}</div>
+              <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11.5px] text-zinc-400">
+                <span>{formatDateTime(item.at)}</span>
+                {item.signal_type && (
+                  <>
+                    <span className="text-zinc-300">·</span>
+                    <span>{SIGNAL_LABELS[item.signal_type] || item.signal_type}</span>
+                  </>
+                )}
+                {item.signal_summary && (
+                  <>
+                    <span className="text-zinc-300">·</span>
+                    <span className="max-w-[240px] truncate">{item.signal_summary}</span>
+                  </>
+                )}
+              </div>
+            </div>
+            {item.cost_usd != null && item.cost_usd > 0 && (
+              <span className="shrink-0 text-[12px] tabular-nums text-zinc-500">${item.cost_usd.toFixed(2)}</span>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -333,17 +436,15 @@ function App() {
   async function loadAll(soft = false) {
     if (!soft) setLoading(true);
     try {
-      const [qualified, needsReview, deferred, s] = await Promise.all([
+      const [qualified, needsReview, s] = await Promise.all([
         window.API.panel({ status: 'qualified' }),
         window.API.panel({ status: 'needs_review' }),
-        window.API.panel({ status: 'deferred' }),
         window.API.stats(),
       ]);
       const tagged = [
         ...qualified.map((c) => ({ ...c, bucket: 'qualified' })),
         ...needsReview.map((c) => ({ ...c, bucket: 'needs_review' })),
-        ...deferred.map((c) => ({ ...c, bucket: 'deferred' })),
-      ].sort((a, b) => new Date(b.first_seen_at) - new Date(a.first_seen_at));
+      ].sort((a, b) => new Date(b.qualified_at || b.first_seen_at) - new Date(a.qualified_at || a.first_seen_at));
       setCompanies(tagged);
       setStats(s);
     } catch (e) {
@@ -355,18 +456,11 @@ function App() {
   useEffect(() => { loadAll(); }, []);
 
   const [activity, setActivity] = useState([]);
+  const [lastRun, setLastRun] = useState(null);
+  const [runLog, setRunLog] = useState([]);
   const [discoRunning, setDiscoRunning] = useState(false);   // on-demand run in flight
   const [confirmRun, setConfirmRun] = useState(false);
-  const [feed, setFeed] = useState([]);
   const wasActiveRef = useRef(false);
-  const lastSeenRef = useRef(null);
-  const feedIdRef = useRef(0);
-  function pushFeedItem(entry) {
-    const id = ++feedIdRef.current;
-    setFeed((f) => [...f, { id, leaving: false, ...entry }].slice(-5));
-    setTimeout(() => setFeed((f) => f.map((x) => (x.id === id ? { ...x, leaving: true } : x))), 5200);
-    setTimeout(() => setFeed((f) => f.filter((x) => x.id !== id)), 5700);
-  }
   useEffect(() => {
     let alive = true;
     async function poll() {
@@ -374,22 +468,25 @@ function App() {
         const a = await window.API.activity();
         if (!alive) return;
         const active = (a && a.active) || [];
-        const recent = (a && a.recent) || [];
         setActivity(active);
+        setLastRun((a && a.last_run) || null);
+        setRunLog((a && a.recent) || []);
         const running = !!(a && a.running) || active.length > 0;
         setDiscoRunning(running);
         setPaused(!!(a && a.paused));
         setCancelling(!!(a && a.cancelling));
         if (!running) { setPaused(false); setCancelling(false); }
-        if (lastSeenRef.current === null) {
-          lastSeenRef.current = recent.length ? recent[0].at : '';
-        } else {
-          const fresh = [];
-          for (const r of recent) { if (r.at > lastSeenRef.current) fresh.push(r); else break; }
-          if (fresh.length) { lastSeenRef.current = fresh[0].at; fresh.reverse().forEach(pushFeedItem); }
-        }
         if (active.length > 0) { wasActiveRef.current = true; loadAll(true); }
-        else if (wasActiveRef.current) { wasActiveRef.current = false; loadAll(true); pushToast('Discovery run complete', 'success'); }
+        else if (wasActiveRef.current) {
+          wasActiveRef.current = false;
+          loadAll(true);
+          window.API.scoringStats().then((s) => { if (alive && s) setSpend(s); }).catch(() => {});
+          const lr = a && a.last_run;
+          const n = lr && (lr.evaluated ?? ((lr.qualified || 0) + (lr.needs_review || 0) + (lr.disqualified || 0)));
+          pushToast(n != null
+            ? `Run complete — ${n} evaluated, $${(lr.cost_usd || 0).toFixed(2)} charged`
+            : 'Discovery run complete', 'success');
+        }
       } catch (_) { /* ignore */ }
     }
     poll();
@@ -540,7 +637,6 @@ function App() {
   }
   const qualifiedCount = companies.filter((c) => c.bucket === 'qualified' && !leaving[c.company_key]).length;
   const needsCount = companies.filter((c) => c.bucket === 'needs_review' && !leaving[c.company_key]).length;
-  const deferredCount = companies.filter((c) => c.bucket === 'deferred' && !leaving[c.company_key]).length;
   const remainingMs = deadline - now;
   const queuedCount = qualifiedCount;
   const urgent = autoEnabled && remainingMs <= 10 * 60 * 1000 && queuedCount > 0;
@@ -628,23 +724,23 @@ function App() {
         <main className="mx-auto max-w-6xl px-8 py-8">
           <div className="mb-6">
             <h1 className="text-[24px] font-semibold tracking-tight text-zinc-900">Discovery Panel</h1>
-            <p className="mt-1 text-[14px] text-zinc-500">Review AI-qualified companies and route each one. Promote, defer, or reject.</p>
+            <p className="mt-1 text-[14px] text-zinc-500">Review AI-qualified companies and route each one. Promote or reject.</p>
           </div>
 
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <StatTile value={stats.panel_pending} label="In queue" emphasized />
             <StatTile value={stats.qualified} label="Qualified" />
             <StatTile value={stats.needs_review} label="Needs review" />
-            <StatTile value={stats.total} label="Total surfaced" />
+            <StatTile value={stats.disqualified} label="Disqualified (hidden)" />
           </div>
 
-          <DiscoverySpendMeter spend={spend} />
+          <DiscoverySpendMeter spend={spend} lastRun={lastRun} />
+          <LastRunSummary lastRun={lastRun} />
 
           <div className="mt-8 overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm shadow-zinc-900/[0.02]">
             <div className="flex items-center gap-1 border-b border-zinc-100 px-4 pt-1.5">
               <TabButton active={tab === 'qualified'} onClick={() => setTab('qualified')} label="Qualified" count={qualifiedCount} accent="indigo" />
               <TabButton active={tab === 'needs_review'} onClick={() => setTab('needs_review')} label="Needs review" count={needsCount} accent="amber" />
-              <TabButton active={tab === 'deferred'} onClick={() => setTab('deferred')} label="Deferred" count={deferredCount} accent="indigo" />
             </div>
 
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-100 px-6 py-3.5">
@@ -706,15 +802,15 @@ function App() {
                   onToggleSelect={() => toggleSelect(c.company_key)}
                   onOpen={() => setOpenKey(c.company_key)}
                   onPromote={() => handlePromote(c.company_key)}
-                  onDefer={() => handleDefer(c.company_key)}
-                  onReject={() => setRejectFor(c)}
-                  onRestore={() => handleRestore(c.company_key)} />
+                  onReject={() => setRejectFor(c)} />
               ))
             )}
           </div>
 
+          <RunActivityLog items={runLog} />
+
           <p className="mt-4 text-center text-[12px] text-zinc-400">
-            Sorted by most recently surfaced · Disqualified companies are filtered out upstream
+            Sorted by most recently evaluated · Disqualified rows appear in Recent evaluations below
           </p>
         </main>
       ) : (
@@ -733,8 +829,6 @@ function App() {
         <ConfirmDeleteModal count={selected.size}
           onCancel={() => setConfirmDelete(false)} onConfirm={handleDeleteSelected} />
       )}
-      {discovery && <ActivityFeed items={feed} />}
-
       <ToastStack toasts={toasts} />
     </div>
   );

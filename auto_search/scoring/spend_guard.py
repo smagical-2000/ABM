@@ -41,6 +41,17 @@ def discovery_est_qual_cost() -> float: return _f("DISCOVERY_EST_QUAL_COST", "0.
 def discovery_monthly_budget() -> float: return _f("DISCOVERY_MONTHLY_BUDGET", "50")
 
 
+def qualify_cost_usd(*, decided_by: str | None) -> float:
+    """USD attributed to one discovery qualification for cost_events.
+
+    Rule-only pre-filters cost nothing (no LLM). Anything that reached the
+    website qualifier is billed at the flat estimate until we wire real tokens.
+    """
+    if decided_by == "rules":
+        return 0.0
+    return discovery_est_qual_cost()
+
+
 class OverheatError(RuntimeError):
     """An operation's actual spend ran past its envelope."""
 

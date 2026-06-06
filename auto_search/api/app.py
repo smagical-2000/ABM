@@ -351,16 +351,18 @@ def create_app() -> FastAPI:
         # `status` selects the tab:
         #   qualified (default) / needs_review → pending queue for that verdict
         #   deferred                          → snoozed companies (restorable)
-        if status == "deferred":
-            return svc(app).list_panel(
-                statuses=("qualified", "needs_review"),
-                review_status="deferred",
-                segment=segment, signal_type=signal_type,
-            )
         statuses = ("needs_review",) if status == "needs_review" else ("qualified",)
-        return svc(app).list_panel(
+        companies = svc(app).list_panel(
             statuses=statuses, segment=segment, signal_type=signal_type
         )
+        try:
+            keys = [c.company_key for c in companies]
+            costs = app.state.scoring_repo.qualify_costs(keys) if keys else {}
+            return [c.model_copy(update={"qualify_cost_usd": costs.get(c.company_key)})
+                    for c in companies]
+        except Exception:  # noqa: BLE001 — cost lookup must not break the panel
+            logger.exception("panel qualify cost lookup failed")
+            return companies
 
     @app.get("/api/activity")
     def get_activity():
@@ -374,7 +376,15 @@ def create_app() -> FastAPI:
         """
         repo = app.state.repo
         active = repo.active_runs() if hasattr(repo, "active_runs") else []
-        recent = repo.recent_decisions() if hasattr(repo, "recent_decisions") else []
+        recent = repo.recent_decisions(limit=20) if hasattr(repo, "recent_decisions") else []
+        # Attach per-company qualify spend from cost_events (estimate until real tokens).
+        try:
+            keys = [r["company_key"] for r in recent if r.get("company_key")]
+            costs = app.state.scoring_repo.qualify_costs(keys) if keys else {}
+            for r in recent:
+                r["cost_usd"] = costs.get(r.get("company_key"))
+        except Exception:  # noqa: BLE001 — cost lookup is best-effort for the log
+            logger.exception("qualify cost lookup failed")
         ctrl = app.state.discovery_control
         return {"active": active, "recent": recent,
                 "running": bool(getattr(app.state, "discovery_running", False)),
@@ -431,19 +441,31 @@ def create_app() -> FastAPI:
         ctrl.reset()
         app.state.discovery_running = True
 
-        async def _run() -> None:
-            op = spend_guard.Operation(app.state.scoring_repo, "discovery_manual",
-                                       estimated_usd=0.0, accounts_planned=0)
+        # Worst-case estimate for the spend guard envelope (prevents false "overheated").
+        n_sources = len(sources or discovery_runner.BROWSERLESS_SOURCES)
+        est_companies = (limit or 0) * n_sources if limit else 0
+        est_usd = round(est_companies * spend_guard.discovery_est_qual_cost(), 4) if est_companies else 0.0
 
-            def on_cost(evaluated: int) -> None:
-                op.record(step="qualify",
-                          actual_usd=round(evaluated * spend_guard.discovery_est_qual_cost(), 4))
-                op.accounts_done = evaluated
+        async def _run() -> None:
+            op = spend_guard.Operation(
+                app.state.scoring_repo, "discovery_manual",
+                estimated_usd=est_usd, accounts_planned=est_companies or 0,
+                metadata={"sources": sources or list(discovery_runner.BROWSERLESS_SOURCES),
+                          "limit": limit},
+            )
+
+            def on_company(cand) -> None:
+                cost = spend_guard.qualify_cost_usd(
+                    decided_by=cand.qualification.decided_by)
+                op.record(step="qualify", actual_usd=cost,
+                          company_key=cand.company_key)
+                op.accounts_done += 1
 
             try:
                 summary = await discovery_runner.run_once(
                     app.state.repo, days=1, sources=sources, limit=limit,
-                    on_cost=on_cost, gate=ctrl.gate)
+                    on_company=on_company, gate=ctrl.gate)
+                summary["cost_usd"] = round(op.actual, 4)
                 app.state.last_discovery = {**summary, "at": datetime.now(UTC).isoformat()}
             except Exception:  # noqa: BLE001 — never crash the loop
                 logger.exception("on-demand discovery run failed")

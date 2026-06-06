@@ -52,14 +52,15 @@ async def test_run_once_qualifies_browserless_sources(monkeypatch):
     monkeypatch.setattr(dr, "_connector", lambda name, limit: object())  # no real connector
     monkeypatch.setattr(dr.pipeline, "run", fake_pipeline_run)
 
-    costs = []
-    summary = await dr.run_once(repo, days=1, on_cost=lambda n: costs.append(n))
+    companies = []
+    summary = await dr.run_once(repo, days=1, on_company=lambda c: companies.append(c))
 
     assert summary["ran"] == 4                    # leadership, acquisitions, funding, jobs
     assert summary["qualified"] == 4
+    assert summary["evaluated"] == 4
     assert len(repo.saved) == 4                   # candidates persisted to the panel repo
     assert "layoffs" not in repo.runs             # never the browser source
-    assert costs == [4]                           # qualify cost recorded for 4 evaluated
+    assert len(companies) == 4                    # per-company hook fired each time
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,12 @@ def _repo(tmp_path):
     return ScoringJsonRepository(path=str(tmp_path / "s.json"))
 
 
+def test_qualify_cost_usd_rules_are_free(monkeypatch):
+    monkeypatch.setenv("DISCOVERY_EST_QUAL_COST", "0.12")
+    assert spend_guard.qualify_cost_usd(decided_by="rules") == 0.0
+    assert spend_guard.qualify_cost_usd(decided_by="rules+llm") == 0.12
+
+
 def test_operation_account_cap_and_cost_events(tmp_path):
     """A single account past $10 trips the per-account cap; every step is a
     persisted cost_event; finish records the operation."""

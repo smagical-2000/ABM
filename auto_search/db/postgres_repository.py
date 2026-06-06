@@ -303,22 +303,35 @@ class PostgresRepository:
             r["started_at"] = _iso(r["started_at"])
         return rows
 
-    def recent_decisions(self, *, limit: int = 12) -> list[dict]:
-        """Most recently decided companies (any verdict) — drives the live
-        per-account activity feed. Includes disqualified so the feed shows
-        every action taken, not just the wins."""
+    def recent_decisions(self, *, limit: int = 20) -> list[dict]:
+        """Most recently decided companies (any verdict) — drives the run log.
+
+        Includes disqualified so the feed shows every evaluation, not just wins.
+        Carries the top signal so the UI can show what triggered the company."""
         with self._pool.connection() as conn:
             rows = conn.execute(
-                """SELECT display_name, icp_status, segment, qualified_at
-                     FROM discovery_companies
-                    WHERE qualified_at IS NOT NULL
-                    ORDER BY qualified_at DESC
+                """SELECT dc.normalized_name, dc.display_name, dc.icp_status,
+                          dc.segment, dc.qualified_at,
+                          ds.signal_type, ds.summary AS signal_summary
+                     FROM discovery_companies dc
+                LEFT JOIN LATERAL (
+                    SELECT signal_type, summary
+                      FROM discovery_signals
+                     WHERE company_id = dc.id
+                     ORDER BY observed_at DESC
+                     LIMIT 1
+                ) ds ON true
+                    WHERE dc.qualified_at IS NOT NULL
+                    ORDER BY dc.qualified_at DESC
                     LIMIT %s""",
                 (limit,),
             ).fetchall()
         return [
-            {"name": r["display_name"], "status": r["icp_status"],
-             "segment": r.get("segment"), "at": _iso(r["qualified_at"])}
+            {"company_key": r["normalized_name"], "name": r["display_name"],
+             "status": r["icp_status"], "segment": r.get("segment"),
+             "at": _iso(r["qualified_at"]),
+             "signal_type": r.get("signal_type"),
+             "signal_summary": r.get("signal_summary")}
             for r in rows
         ]
 

@@ -118,6 +118,16 @@ class DiscoveryRepository(Protocol):
         """Recently-started runs still in progress (drives the UI marker)."""
         ...
 
+    def cleanup_stale_runs(self) -> int:
+        """Mark any still-'running' rows as failed; returns how many.
+
+        Run state (the live coroutine) is in-memory, so on a restart/crash a
+        run row can be left 'running' forever with no process behind it. Calling
+        this at startup clears those orphans so the panel can't show a phantom
+        in-progress run with dead pause/cancel controls.
+        """
+        ...
+
     def recent_decisions(self, *, limit: int = 20) -> list[dict]:
         """Most recently decided companies (any verdict) for the run log."""
         ...
@@ -349,6 +359,19 @@ class JsonFileRepository:
             })
         out.sort(key=lambda x: x["started_at"], reverse=True)
         return out
+
+    def cleanup_stale_runs(self) -> int:
+        runs = self._load_runs()
+        n = 0
+        for r in runs:
+            if r.get("status") == "running":
+                r["status"] = "failed"
+                r["error_message"] = "orphaned by restart"
+                r["finished_at"] = datetime.now(UTC).isoformat()
+                n += 1
+        if n:
+            self._flush_runs(runs)
+        return n
 
     def recent_decisions(self, *, limit: int = 20) -> list[dict]:
         rows = [r for r in self._store.values() if r.get("qualified_at")]

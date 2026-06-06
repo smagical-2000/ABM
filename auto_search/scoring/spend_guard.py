@@ -45,6 +45,21 @@ def discovery_est_qual_cost() -> float: return _f("DISCOVERY_EST_QUAL_COST", "0.
 def discovery_monthly_budget() -> float: return _f("DISCOVERY_MONTHLY_BUDGET", "50")
 
 
+def discovery_manual_default_limit() -> int:
+    """Per-source company cap applied to a MANUAL panel run when none is given.
+
+    A manual run must never be silently unlimited — that is how a single click
+    turns into dozens of paid website qualifications. The scheduled cron is the
+    only place that does a deliberate full-window pull (`--no-limit`); the API
+    always falls back to this cap unless the caller passes an explicit limit (or
+    an explicit no_cap flag). Tunable via DISCOVERY_MANUAL_DEFAULT_LIMIT.
+    """
+    try:
+        return max(1, int(os.getenv("DISCOVERY_MANUAL_DEFAULT_LIMIT", "10")))
+    except (TypeError, ValueError):
+        return 10
+
+
 def record_company_qualify(op: Operation, candidate: CompanyCandidate) -> None:
     """Persist measured qualify spend for one company (real tokens, not estimate).
 

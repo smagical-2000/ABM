@@ -303,6 +303,15 @@ class PostgresRepository:
             r["started_at"] = _iso(r["started_at"])
         return rows
 
+    def cleanup_stale_runs(self) -> int:
+        """Fail any rows left 'running' (no live process can own them at boot)."""
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "UPDATE connector_runs SET status = 'failed', "
+                "error_message = 'orphaned by restart', finished_at = now() "
+                "WHERE status = 'running'")
+            return cur.rowcount or 0
+
     def recent_decisions(self, *, limit: int = 20) -> list[dict]:
         """Most recently decided companies (any verdict) — drives the run log.
 

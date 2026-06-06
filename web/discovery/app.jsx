@@ -1,5 +1,10 @@
 const { useState, useEffect, useMemo, useRef } = React;
 
+// Per-source company cap applied when the run form is left blank. A manual run
+// is never silently unlimited (that's the runaway-spend footgun) — keep this in
+// sync with the server's DISCOVERY_MANUAL_DEFAULT_LIMIT.
+const DEFAULT_RUN_LIMIT = 10;
+
 // ── Skeleton loading row ────────────────────────────────────────────────────
 function SkeletonRow() {
   return (
@@ -297,8 +302,9 @@ function RunActivityLog({ items }) {
 function RunConfigPopover({ scope, onScope, limit, onLimit, onRun, onClose }) {
   const n = Number(limit) > 0 ? Number(limit) : 0;
   const sources = scope === 'jobs' ? 1 : 4;
-  const estCompanies = n ? n * sources : null;
-  const estCost = estCompanies != null ? (estCompanies * 0.12).toFixed(2) : null;
+  const effective = n || DEFAULT_RUN_LIMIT;     // blank → safe default, never "no cap"
+  const estCompanies = effective * sources;
+  const estCost = (estCompanies * 0.12).toFixed(2);
   return (
     <div className="absolute right-0 top-full z-40 mt-2 w-72 rounded-xl border border-zinc-200 bg-white p-3.5 shadow-xl shadow-zinc-900/10">
       <div className="text-[13px] font-semibold text-zinc-800">Run discovery</div>
@@ -321,9 +327,8 @@ function RunConfigPopover({ scope, onScope, limit, onLimit, onRun, onClose }) {
         onChange={(e) => onLimit(e.target.value)}
         className="mt-1 w-full rounded-lg border border-zinc-200 px-3 py-1.5 text-[13px] text-zinc-800 focus:border-zinc-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200" />
       <div className="mt-2.5 rounded-lg bg-zinc-50 px-3 py-2 text-[11.5px] text-zinc-500">
-        {estCompanies != null
-          ? <>Up to <span className="font-semibold text-zinc-700">{estCompanies}</span> companies · est <span className="font-semibold text-zinc-700">${estCost}</span></>
-          : 'No cap — runs the full 24h window (higher spend).'}
+        Up to <span className="font-semibold text-zinc-700">{estCompanies}</span> companies · est <span className="font-semibold text-zinc-700">${estCost}</span>
+        {n === 0 && <span className="text-zinc-400"> · blank uses default cap {DEFAULT_RUN_LIMIT}/source</span>}
       </div>
       <div className="mt-3 flex items-center justify-end gap-2">
         <button onClick={onClose} className="rounded-lg px-3 py-1.5 text-[12.5px] font-medium text-zinc-500 transition-colors hover:bg-zinc-100">Cancel</button>
@@ -461,6 +466,9 @@ function App() {
   const [discoRunning, setDiscoRunning] = useState(false);   // on-demand run in flight
   const [confirmRun, setConfirmRun] = useState(false);
   const wasActiveRef = useRef(false);
+  // Timestamp of the last pause/resume/cancel click, so the 4s poll doesn't
+  // stomp the optimistic UI before the backend reflects the action.
+  const controlActionAt = useRef(0);
   useEffect(() => {
     let alive = true;
     async function poll() {
@@ -471,10 +479,15 @@ function App() {
         setActivity(active);
         setLastRun((a && a.last_run) || null);
         setRunLog((a && a.recent) || []);
-        const running = !!(a && a.running) || active.length > 0;
+        // The live coroutine (a.running) is the source of truth for "a run is
+        // active" — NOT stale connector_runs rows, which can linger after a
+        // crash/restart and show a phantom in-progress run.
+        const running = !!(a && a.running);
         setDiscoRunning(running);
-        setPaused(!!(a && a.paused));
-        setCancelling(!!(a && a.cancelling));
+        if (Date.now() - controlActionAt.current > 5000) {
+          setPaused(!!(a && a.paused));
+          setCancelling(!!(a && a.cancelling));
+        }
         if (!running) { setPaused(false); setCancelling(false); }
         if (active.length > 0) { wasActiveRef.current = true; loadAll(true); }
         else if (wasActiveRef.current) {
@@ -497,7 +510,10 @@ function App() {
   async function handleRunDiscovery() {
     setConfirmRun(false);
     setDiscoRunning(true);
-    const body = { limit: Number(runLimit) > 0 ? Number(runLimit) : undefined };
+    // Never send an empty/zero limit — that would be an unlimited (expensive)
+    // run. Fall back to the default cap so a manual run is always bounded.
+    const lim = Number(runLimit) > 0 ? Math.floor(Number(runLimit)) : DEFAULT_RUN_LIMIT;
+    const body = { limit: lim };
     if (runScope === 'jobs') body.sources = ['jobs'];
     try {
       const res = await window.API.runDiscovery(body);
@@ -514,6 +530,7 @@ function App() {
   }
 
   async function handlePauseResume() {
+    controlActionAt.current = Date.now();
     try {
       if (paused) { await window.API.resumeDiscovery(); setPaused(false); pushToast('Resumed', 'success'); }
       else { await window.API.pauseDiscovery(); setPaused(true); pushToast('Paused — spend frozen', 'muted'); }
@@ -521,6 +538,7 @@ function App() {
   }
 
   async function handleCancelRun() {
+    controlActionAt.current = Date.now();
     setCancelling(true);
     try { await window.API.cancelDiscovery(); pushToast('Cancelling — finishing the current company, then stopping.', 'muted'); }
     catch (e) { setCancelling(false); pushToast(`Couldn't cancel: ${e.message}`, 'danger'); }

@@ -51,13 +51,14 @@ def _connector(name: str, limit):
 
 
 async def run_once(repo, *, days: int = 1, sources=None, limit=None,
-                   on_company=None, gate=None) -> dict:
+                   on_company=None, gate=None, on_prefilter_spend=None) -> dict:
     """Run the browserless sources for the last `days` into `repo`, deduped.
 
     Returns a per-source summary. `on_company(candidate)` is called after each
     company is saved so the caller can record per-company qualify spend.
     `gate` is an optional async checkpoint (pause/cancel) awaited before each
-    company and before each new source. Resilient: one source failing does not
+    company and before each new source. `on_prefilter_spend(LlmSpend)` records
+    the job-qualifier prefilter cost. Resilient: one source failing does not
     stop the others.
     """
     since = datetime.now(UTC) - timedelta(days=days)
@@ -78,7 +79,12 @@ async def run_once(repo, *, days: int = 1, sources=None, limit=None,
         err: str | None = None
         try:
             connector = _connector(name, limit)
-            prefilter = job_qualifier.filter_job_signals if name == "jobs" else None
+            # Bind the gate + spend hook into the jobs prefilter so pause/cancel
+            # reach it and its cost is recorded (it makes paid Claude calls too).
+            prefilter = None
+            if name == "jobs":
+                def prefilter(sigs, _g=gate, _s=on_prefilter_spend):
+                    return job_qualifier.filter_job_signals(sigs, gate=_g, on_spend=_s)
             async for cand in pipeline.run(
                 connector, since, limit=limit,
                 skip_already_qualified=repo.already_qualified, prefilter=prefilter,

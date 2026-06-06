@@ -152,6 +152,8 @@ def call_cost(response: Any, *, searches: int = 0) -> float:
     Server-side web_search runs inside one create() call, so the usage already
     aggregates every internal turn's tokens.
     """
+    if getattr(response, "usage", None) is None:
+        return 0.0
     u = _usage_fields(response)
     cost = (
         u["input_tokens"] * _PRICE_IN

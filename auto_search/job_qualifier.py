@@ -97,24 +97,42 @@ class JobRelevance(BaseModel):
     reason: str = ""
 
 
-async def qualify_jobs(signals: list[RawSignal]) -> dict[str, JobRelevance]:
+async def qualify_jobs(
+    signals: list[RawSignal], *, gate=None, on_spend=None,
+) -> dict[str, JobRelevance]:
     """Return id → verdict for each job_posting signal. Batched Sonnet calls.
 
     Keyed by `source_external_id`. Missing/failed verdicts are simply absent
     from the map; callers should treat absence as fail-open (keep).
+
+    `gate` (optional async checkpoint) is awaited BETWEEN batches so pause/cancel
+    freeze or stop the prefilter mid-way — without it, pausing a jobs run keeps
+    paying for prefilter calls. `on_spend(LlmSpend)` is called per batch so the
+    (otherwise invisible) prefilter cost can be recorded.
     """
     out: dict[str, JobRelevance] = {}
     batches = [signals[i:i + _BATCH_SIZE] for i in range(0, len(signals), _BATCH_SIZE)]
-    for batch in batches:
+    for i, batch in enumerate(batches):
+        # Block while paused / stop when cancelled, before spending on this batch.
+        if gate is not None and not await gate():
+            logger.info("job qualifier stopped by run gate after %d/%d batches",
+                        i, len(batches))
+            break
         try:
-            out.update(await _qualify_batch(batch))
+            verdicts, spend = await _qualify_batch(batch)
+            out.update(verdicts)
+            if on_spend is not None and spend is not None:
+                try:
+                    on_spend(spend)
+                except Exception:  # noqa: BLE001 — accounting must not break the run
+                    logger.exception("job-qualifier on_spend hook failed")
         except Exception as e:  # noqa: BLE001 — a bad batch must not fail the run
             logger.warning("job qualifier batch failed (%s) — keeping %d postings",
                            e, len(batch))
     return out
 
 
-async def _qualify_batch(batch: list[RawSignal]) -> dict[str, JobRelevance]:
+async def _qualify_batch(batch: list[RawSignal]):
     items = [{
         "id": s.source_external_id,
         "role": s.payload.get("role"),
@@ -132,6 +150,7 @@ async def _qualify_batch(batch: list[RawSignal]) -> dict[str, JobRelevance]:
         system=SYSTEM_PROMPT, user_message=user_message,
         max_tokens=_MAX_TOKENS, model=_MODEL,
     )
+    spend = llm.spend_from_response(response, model=_MODEL)
     rows = llm.parse_json_array(llm.extract_text(response))
 
     verdicts: dict[str, JobRelevance] = {}
@@ -143,22 +162,27 @@ async def _qualify_batch(batch: list[RawSignal]) -> dict[str, JobRelevance]:
         except Exception:  # noqa: BLE001 — skip a malformed row, keep the rest
             continue
         verdicts[v.id] = v
-    return verdicts
+    return verdicts, spend
 
 
-async def filter_job_signals(signals: list[RawSignal]) -> list[RawSignal]:
+async def filter_job_signals(
+    signals: list[RawSignal], *, gate=None, on_spend=None,
+) -> list[RawSignal]:
     """Pipeline pre-filter: drop job_posting signals the JOB qualifier rejects.
 
     Non-job signals pass through untouched. Job signals are qualified in
     batches; a posting is dropped only on a confident `relevant=false`
     verdict — missing verdicts and errors keep the posting (fail-open), since
     the company/ICP qualifier downstream is the real backstop.
+
+    `gate`/`on_spend` are threaded to `qualify_jobs` so a paused run freezes the
+    prefilter and its spend is recorded.
     """
     jobs = [s for s in signals if s.signal_type == "job_posting"]
     if not jobs:
         return signals
 
-    verdicts = await qualify_jobs(jobs)
+    verdicts = await qualify_jobs(jobs, gate=gate, on_spend=on_spend)
 
     kept: list[RawSignal] = []
     dropped = 0

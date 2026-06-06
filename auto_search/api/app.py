@@ -276,6 +276,14 @@ async def lifespan(app: FastAPI):
     orphaned = scoring_repo.recover_orphaned_scoring()
     if orphaned:
         logger.warning("recovered %d orphaned 'scoring' account(s) -> queued", orphaned)
+    # A discovery run lives in-memory; rows left 'running' by a prior crash/restart
+    # have no process behind them. Clear them so the panel can't show a phantom
+    # in-progress run (stale progress, dead pause/cancel).
+    cleanup = getattr(repo, "cleanup_stale_runs", None)
+    if callable(cleanup):
+        stale = cleanup()
+        if stale:
+            logger.warning("cleared %d orphaned discovery run(s) from a prior process", stale)
     logger.info("discovery + scoring API ready (repo=%s)", type(repo).__name__)
     try:
         yield
@@ -444,9 +452,17 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=400, detail=(
                     "sources must be a subset of "
                     f"{list(discovery_runner.BROWSERLESS_SOURCES)}"))
-        limit = body.get("limit")
-        if not isinstance(limit, int) or limit <= 0:
+        # A manual run is NEVER silently unlimited (that is the runaway-spend
+        # footgun). An explicit positive limit is honoured; an explicit
+        # {"no_cap": true} opts into a deliberate full pull; anything else
+        # (missing/blank/invalid) falls back to the safe per-source default.
+        raw_limit = body.get("limit")
+        if isinstance(raw_limit, int) and raw_limit > 0:
+            limit = raw_limit
+        elif body.get("no_cap") is True:
             limit = None
+        else:
+            limit = spend_guard.discovery_manual_default_limit()
 
         ctrl = app.state.discovery_control
         ctrl.reset()
@@ -468,10 +484,21 @@ def create_app() -> FastAPI:
             def on_company(cand) -> None:
                 spend_guard.record_company_qualify(op, cand)
 
+            def on_prefilter_spend(spend) -> None:
+                # Job-qualifier prefilter is a paid call with no company; record
+                # it as a 'qualify' cost_event (no company_key) so it lands in the
+                # discovery meter without polluting per-company costs.
+                op.record(step="qualify", actual_usd=spend.cost_usd,
+                          model=spend.model,
+                          metadata={"input_tokens": spend.input_tokens,
+                                    "output_tokens": spend.output_tokens,
+                                    "measured": True, "phase": "job_prefilter"})
+
             try:
                 summary = await discovery_runner.run_once(
                     app.state.repo, days=1, sources=sources, limit=limit,
-                    on_company=on_company, gate=ctrl.gate)
+                    on_company=on_company, gate=ctrl.gate,
+                    on_prefilter_spend=on_prefilter_spend)
                 summary["cost_usd"] = round(op.actual, 4)
                 app.state.last_discovery = {**summary, "at": datetime.now(UTC).isoformat()}
             except Exception:  # noqa: BLE001 — never crash the loop

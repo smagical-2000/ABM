@@ -156,6 +156,22 @@ def test_failed_run_records_error_and_is_inactive(tmp_path):
     assert last["status"] == "failed" and last["error_message"] == "boom"
 
 
+def test_cleanup_stale_runs_clears_orphans(tmp_path):
+    """A run left 'running' by a crash is failed on cleanup so the UI can't show
+    a phantom in-progress run with dead controls."""
+    path = tmp_path / "store.json"
+    repo = JsonFileRepository(path)
+    repo.start_run("jobs")
+    repo.start_run("funding")
+    assert len(repo.active_runs()) == 2
+
+    cleared = JsonFileRepository(path).cleanup_stale_runs()
+    assert cleared == 2
+    assert JsonFileRepository(path).active_runs() == []
+    # A second pass clears nothing (idempotent).
+    assert JsonFileRepository(path).cleanup_stale_runs() == 0
+
+
 def test_runs_stored_separately_from_company_store(tmp_path):
     repo = JsonFileRepository(tmp_path / "store.json")
     repo.start_run("jobs")

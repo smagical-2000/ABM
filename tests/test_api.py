@@ -123,6 +123,34 @@ class TestWorkflow:
         r = client.post("/api/discovery/run", json={"sources": ["bogus"]})
         assert r.status_code == 400
 
+    def test_discovery_run_blank_limit_uses_default_cap(self, client, monkeypatch):
+        """A run with no limit must NOT be unlimited — it gets the default cap."""
+        from auto_search.scoring import spend_guard
+        seen = {}
+
+        async def fake_run(repo, **kw):
+            seen.update(kw)
+            return {"ran": 1, "by_source": {}}
+        monkeypatch.setattr(_app_module.discovery_runner, "run_once", fake_run)
+        out = client.post("/api/discovery/run", json={"sources": ["jobs"]}).json()
+        assert out["started"] is True
+        assert seen["limit"] == spend_guard.discovery_manual_default_limit()
+        assert seen["limit"] is not None
+
+    def test_discovery_run_explicit_no_cap_is_unlimited(self, client, monkeypatch):
+        """Only an explicit no_cap opts into a full (unlimited) pull."""
+        seen = {}
+
+        async def fake_run(repo, **kw):
+            seen.update(kw)
+            return {"ran": 1, "by_source": {}}
+        monkeypatch.setattr(_app_module.discovery_runner, "run_once", fake_run)
+        out = client.post("/api/discovery/run",
+                          json={"sources": ["jobs"], "no_cap": True}).json()
+        assert out["started"] is True
+        assert seen["limit"] is None
+        assert "on_prefilter_spend" in seen   # prefilter cost hook wired in
+
     def test_discovery_controls_when_idle(self, client):
         # Nothing running: pause/resume/cancel are safe no-ops.
         assert client.post("/api/discovery/pause").json()["running"] is False

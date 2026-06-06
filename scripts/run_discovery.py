@@ -272,11 +272,20 @@ async def main(args: argparse.Namespace) -> int:
             connector = CONNECTORS[name](limit)
             # The jobs source gets the cheap job-level qualifier as a pre-filter
             # (title + JD) so only genuine RCM postings reach company scoring.
-            prefilter = (
-                job_qualifier.filter_job_signals
-                if name == "jobs" and not args.no_job_filter
-                else None
-            )
+            # Record the prefilter's (paid) spend on the same op so the meter is
+            # accurate, not just the per-company website qualification.
+            def _on_prefilter_spend(spend, _op=spend_op):
+                if _op is not None:
+                    _op.record(step="qualify", actual_usd=spend.cost_usd,
+                               model=spend.model,
+                               metadata={"input_tokens": spend.input_tokens,
+                                         "output_tokens": spend.output_tokens,
+                                         "measured": True, "phase": "job_prefilter"})
+
+            prefilter = None
+            if name == "jobs" and not args.no_job_filter:
+                def prefilter(sigs, _s=_on_prefilter_spend):
+                    return job_qualifier.filter_job_signals(sigs, on_spend=_s)
             counts = await run_connector(
                 name, connector, since, repo,
                 limit=limit, qualify=not args.no_qualify,

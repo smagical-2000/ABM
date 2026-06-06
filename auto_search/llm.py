@@ -18,7 +18,10 @@ import logging
 import os
 import random
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from auto_search.models import LlmSpend
 
 from anthropic import (
     APIConnectionError,
@@ -166,7 +169,7 @@ def call_cost(response: Any, *, searches: int = 0) -> float:
 
 def spend_from_response(
     response: Any, *, searches: int = 0, model: str = "",
-) -> "LlmSpend":
+) -> LlmSpend:
     """Build a measured LlmSpend from an Anthropic response (scoring + discovery)."""
     from auto_search.models import LlmSpend
 

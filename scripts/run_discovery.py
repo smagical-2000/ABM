@@ -145,6 +145,7 @@ async def run_connector(
             connector, since, limit=limit,
             skip_already_qualified=repo.already_qualified,
             prefilter=prefilter,
+            on_plan=lambda n: _update_run(repo, run_id, planned=n),
         ):
             repo.save_candidate(cand)
             evaluated += 1

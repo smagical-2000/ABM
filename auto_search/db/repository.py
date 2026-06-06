@@ -91,7 +91,12 @@ class DiscoveryRepository(Protocol):
         ...
 
     def update_run(self, run_id: int, **counts: int) -> None:
-        """Update live counts on a running row (absolute values)."""
+        """Update live counts on a running row (absolute values).
+
+        Accepts any of planned/rows_fetched/new_companies/signals_added/
+        companies_qualified. `planned` is the run's qualification denominator,
+        set once the unique-company set is known, so the UI can show progress %.
+        """
         ...
 
     def finish_run(
@@ -267,8 +272,8 @@ class JsonFileRepository:
         runs.append({
             "id": run_id, "source": source, "status": "running",
             "started_at": datetime.now(UTC).isoformat(), "finished_at": None,
-            "rows_fetched": 0, "new_companies": 0, "signals_added": 0,
-            "companies_qualified": 0, "error_message": None,
+            "planned": 0, "rows_fetched": 0, "new_companies": 0,
+            "signals_added": 0, "companies_qualified": 0, "error_message": None,
         })
         self._flush_runs(runs[-200:])  # cap history
         return run_id
@@ -277,8 +282,8 @@ class JsonFileRepository:
         runs = self._load_runs()
         for r in runs:
             if r["id"] == run_id:
-                for c in ("rows_fetched", "new_companies", "signals_added",
-                          "companies_qualified"):
+                for c in ("planned", "rows_fetched", "new_companies",
+                          "signals_added", "companies_qualified"):
                     if counts.get(c) is not None:
                         r[c] = counts[c]
         self._flush_runs(runs)
@@ -309,6 +314,7 @@ class JsonFileRepository:
                 continue
             out.append({
                 "source": r["source"], "started_at": r["started_at"],
+                "planned": r.get("planned", 0),
                 "rows_fetched": r.get("rows_fetched", 0),
                 "new_companies": r.get("new_companies", 0),
                 "signals_added": r.get("signals_added", 0),

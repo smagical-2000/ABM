@@ -91,6 +91,7 @@ async def run(
     limit: int | None = None,
     skip_already_qualified: AlreadyQualified | None = None,
     prefilter: SignalPrefilter | None = None,
+    on_plan: Callable[[int], None] | None = None,
 ) -> AsyncIterator[CompanyCandidate]:
     """Run the full discovery pipeline, yielding one candidate per company.
 
@@ -109,6 +110,20 @@ async def run(
     """
     groups = await collect_unique_companies(
         connector, since, limit=limit, prefilter=prefilter)
+
+    # The qualification denominator: unique companies MINUS the ones already
+    # decided in a prior run (those cost nothing and stream past instantly).
+    # Reported once, up front, so the UI can show "X of N · Y%" while the
+    # expensive per-company Claude calls run.
+    if on_plan is not None:
+        planned = sum(
+            1 for key in groups
+            if skip_already_qualified is None or not skip_already_qualified(key)
+        )
+        try:
+            on_plan(planned)
+        except Exception:  # noqa: BLE001 — progress reporting must never break a run
+            logger.exception("on_plan hook failed")
 
     skipped = 0
     for key, signals in groups.items():

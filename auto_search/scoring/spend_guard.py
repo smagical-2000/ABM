@@ -38,6 +38,7 @@ def op_hard_cap() -> float:        return _f("SPEND_OP_HARD_CAP_USD", "200")
 def daily_warn() -> float:         return _f("SPEND_DAILY_WARN_USD", "50")
 def daily_cap() -> float:          return _f("SPEND_DAILY_CAP_USD", "0")
 def discovery_est_qual_cost() -> float: return _f("DISCOVERY_EST_QUAL_COST", "0.12")
+def discovery_monthly_budget() -> float: return _f("DISCOVERY_MONTHLY_BUDGET", "50")
 
 
 class OverheatError(RuntimeError):

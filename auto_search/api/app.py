@@ -388,6 +388,19 @@ def create_app() -> FastAPI:
         a time so a double click can't double-spend."""
         if getattr(app.state, "discovery_running", False):
             return {"started": False, "busy": True}
+        # Cost control for panel 1: refuse a manual run once this month's
+        # discovery (qualify) spend has hit its budget, so the cheap-but-not-free
+        # qualifier can't be clicked into a runaway. Tune DISCOVERY_MONTHLY_BUDGET.
+        try:
+            rollup = app.state.scoring_repo.spend_rollup()
+            disc_budget = spend_guard.discovery_monthly_budget()
+            disc_spent = float(rollup.get("month_discovery_cost") or 0)
+            if disc_budget and disc_spent >= disc_budget:
+                return {"started": False, "budget_blocked": True,
+                        "month_discovery_cost": round(disc_spent, 2),
+                        "discovery_budget": disc_budget}
+        except Exception:  # noqa: BLE001 — never let the meter block a run by erroring
+            logger.exception("discovery budget check failed; allowing run")
         app.state.discovery_running = True
 
         async def _run() -> None:

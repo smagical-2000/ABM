@@ -246,9 +246,9 @@ class PostgresRepository:
         return row["id"]
 
     def update_run(self, run_id: int, **counts: int) -> None:
-        """Set any of rows_fetched/new_companies/signals_added/
+        """Set any of planned/rows_fetched/new_companies/signals_added/
         companies_qualified on the running row (absolute values)."""
-        cols = ("rows_fetched", "new_companies", "signals_added",
+        cols = ("planned", "rows_fetched", "new_companies", "signals_added",
                 "companies_qualified")
         sets = {c: counts[c] for c in cols if counts.get(c) is not None}
         if not sets:
@@ -275,7 +275,7 @@ class PostgresRepository:
         ignored after max_age_minutes so the marker can't get stuck on."""
         with self._pool.connection() as conn:
             rows = conn.execute(
-                """SELECT source, started_at, rows_fetched, new_companies,
+                """SELECT source, started_at, planned, rows_fetched, new_companies,
                           signals_added, companies_qualified,
                           EXTRACT(EPOCH FROM (now() - started_at))::int AS elapsed_seconds
                      FROM connector_runs

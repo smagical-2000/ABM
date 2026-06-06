@@ -71,6 +71,7 @@ async def run_once(repo, *, days: int = 1, sources=None, limit=None, on_cost=Non
             async for cand in pipeline.run(
                 connector, since, limit=limit,
                 skip_already_qualified=repo.already_qualified, prefilter=prefilter,
+                on_plan=lambda n, rid=run_id: _update_run(repo, rid, planned=n),
             ):
                 repo.save_candidate(cand)
                 status = cand.qualification.to_status()

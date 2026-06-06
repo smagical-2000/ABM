@@ -90,10 +90,18 @@ function ActivityFeed({ items }) {
 }
 
 // ── ActivityBanner — live "processing" marker shown while a run is in flight ─
+// Shows true progress when the run has reported how many companies it plans to
+// qualify (`planned`, the denominator): "42% · 21 of 50 evaluated". Until that
+// lands (sources still being pulled), it falls back to the indeterminate copy.
 function ActivityBanner({ runs }) {
   const qualified = runs.reduce((n, r) => n + (r.companies_qualified || 0), 0);
   const evaluated = runs.reduce((n, r) => n + (r.new_companies || 0), 0);
+  const planned = runs.reduce((n, r) => n + (r.planned || 0), 0);
   const sources = [...new Set(runs.map((r) => r.source))].join(', ');
+  const hasPlan = planned > 0;
+  // Cap at 99% until the run actually finishes, so it never reads "100%" while
+  // the last company is still being qualified.
+  const pct = hasPlan ? Math.min(99, Math.round((evaluated / planned) * 100)) : null;
   return (
     <div className="border-b border-indigo-100 bg-gradient-to-r from-indigo-50 to-violet-50/50">
       <div className="mx-auto flex max-w-6xl items-center gap-3 px-8 py-2.5">
@@ -103,13 +111,63 @@ function ActivityBanner({ runs }) {
         </span>
         <span className="text-[13px] font-medium text-indigo-700">Discovering — {sources}</span>
         <span className="text-indigo-300">·</span>
-        <span className="text-[13px] tabular-nums text-indigo-600">
-          {evaluated > 0 ? `${qualified} qualified of ${evaluated} evaluated` : 'scanning sources…'}
-        </span>
+        {hasPlan ? (
+          <>
+            <span className="text-[13px] font-semibold tabular-nums text-indigo-700">{pct}%</span>
+            <div className="hidden h-1.5 w-40 overflow-hidden rounded-full bg-indigo-100 sm:block">
+              <div className="h-full rounded-full bg-indigo-500 transition-all duration-500" style={{ width: `${pct}%` }} />
+            </div>
+            <span className="text-[13px] tabular-nums text-indigo-600">
+              {evaluated} of {planned} evaluated · {qualified} qualified
+            </span>
+          </>
+        ) : (
+          <span className="text-[13px] tabular-nums text-indigo-600">
+            {evaluated > 0 ? `${qualified} qualified of ${evaluated} evaluated` : 'scanning sources…'}
+          </span>
+        )}
         <span className="ml-auto hidden items-center gap-1.5 text-[12px] text-indigo-400 sm:flex">
           <Icons.refresh className="h-3.5 w-3.5 animate-spin" />updating live
         </span>
       </div>
+    </div>
+  );
+}
+
+// ── DiscoverySpendMeter — month-to-date qualify spend vs the discovery budget ─
+// Cost control for panel 1: the qualifier is cheap-but-not-free (~$0.12/company),
+// so this shows what this month's discovery has spent against its budget and
+// warns as it approaches it. The server hard-blocks a manual run at the budget.
+function DiscoverySpendMeter({ spend }) {
+  if (!spend) return null;
+  const spent = spend.month_discovery_cost || 0;
+  const budget = spend.discovery_budget || 0;
+  const est = spend.discovery_est_qual_cost || 0.12;
+  const pct = budget ? Math.min(100, Math.round((spent / budget) * 100)) : 0;
+  const over = budget && spent >= budget;
+  const near = !over && budget && spent >= budget * 0.8;
+  const bar = over ? 'bg-rose-500' : near ? 'bg-amber-500' : 'bg-indigo-500';
+  const tone = over ? 'text-rose-600' : near ? 'text-amber-600' : 'text-zinc-500';
+  return (
+    <div className="mt-3 flex items-center gap-3 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 shadow-sm shadow-zinc-900/[0.02]">
+      <Icons.zap className="h-4 w-4 shrink-0 text-zinc-400" />
+      <span className="text-[12.5px] font-medium text-zinc-600">Discovery spend</span>
+      <span className={`text-[12.5px] font-semibold tabular-nums ${tone}`}>
+        ${spent.toFixed(2)}{budget ? ` / $${budget.toFixed(0)}` : ''}
+      </span>
+      {budget > 0 && (
+        <div className="hidden h-1.5 w-32 overflow-hidden rounded-full bg-zinc-100 sm:block">
+          <div className={`h-full rounded-full transition-all duration-500 ${bar}`} style={{ width: `${pct}%` }} />
+        </div>
+      )}
+      <span className="ml-auto text-[11.5px] tabular-nums text-zinc-400">
+        ~${est.toFixed(2)}/company · month to date
+      </span>
+      {over ? (
+        <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-600 ring-1 ring-inset ring-rose-100">Budget reached</span>
+      ) : near ? (
+        <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-600 ring-1 ring-inset ring-amber-100">Near budget</span>
+      ) : null}
     </div>
   );
 }
@@ -138,6 +196,7 @@ function App() {
   // pulse the nav badge so the transition reads.
   const [scoredRefreshKey, setScoredRefreshKey] = useState(0);
   const [scoredCount, setScoredCount] = useState(0);
+  const [spend, setSpend] = useState(null);   // scoring stats rollup (for the discovery cost meter)
   const [navPulse, setNavPulse] = useState(false);
   function bumpScored() {
     setScoredRefreshKey((k) => k + 1);
@@ -149,7 +208,7 @@ function App() {
   useEffect(() => {
     let alive = true;
     const load = () => window.API.scoringStats()
-      .then((s) => { if (alive && s) setScoredCount(s.scored_count); })
+      .then((s) => { if (alive && s) { setScoredCount(s.scored_count); setSpend(s); } })
       .catch(() => {});
     load();
     const id = setInterval(load, 8000);
@@ -243,7 +302,12 @@ function App() {
     setDiscoRunning(true);
     try {
       const res = await window.API.runDiscovery();
-      if (res && res.busy) { pushToast('A discovery run is already in progress.', 'muted'); return; }
+      if (res && res.busy) { setDiscoRunning(false); pushToast('A discovery run is already in progress.', 'muted'); return; }
+      if (res && res.budget_blocked) {
+        setDiscoRunning(false);
+        pushToast(`Discovery budget reached ($${res.month_discovery_cost} of $${res.discovery_budget}). Raise DISCOVERY_MONTHLY_BUDGET or wait.`, 'danger');
+        return;
+      }
       pushToast('Discovery running — pulling the last 24h…', 'success');
     } catch (e) { setDiscoRunning(false); pushToast(`Couldn't start: ${e.message}`, 'danger'); }
   }
@@ -405,6 +469,8 @@ function App() {
             <StatTile value={stats.needs_review} label="Needs review" />
             <StatTile value={stats.total} label="Total surfaced" />
           </div>
+
+          <DiscoverySpendMeter spend={spend} />
 
           <div className="mt-8 overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm shadow-zinc-900/[0.02]">
             <div className="flex items-center gap-1 border-b border-zinc-100 px-4 pt-1.5">

@@ -120,12 +120,16 @@ CREATE TABLE IF NOT EXISTS connector_runs (
     status                TEXT NOT NULL DEFAULT 'running'
         CHECK (status IN ('running','success','failed')),
 
+    planned               INTEGER NOT NULL DEFAULT 0,   -- companies to qualify this run (progress denominator)
     rows_fetched          INTEGER NOT NULL DEFAULT 0,   -- raw rows from source
     new_companies         INTEGER NOT NULL DEFAULT 0,   -- not seen before
     signals_added         INTEGER NOT NULL DEFAULT 0,   -- new signal rows
     companies_qualified   INTEGER NOT NULL DEFAULT 0,   -- Claude said yes
     error_message         TEXT
 );
+
+-- Backfill for tables created before `planned` existed (idempotent).
+ALTER TABLE connector_runs ADD COLUMN IF NOT EXISTS planned INTEGER NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS idx_runs_source_started
     ON connector_runs (source, started_at DESC);

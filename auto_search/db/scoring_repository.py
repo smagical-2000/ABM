@@ -726,6 +726,7 @@ def _rollup(month_scoring, month_discovery, daily) -> dict:
     md = _as_float(month_discovery)
     dt = _as_float(daily)
     warn = _as_float(os.getenv("SPEND_DAILY_WARN_USD")) or 50.0
+    disc_budget = _as_float(os.getenv("DISCOVERY_MONTHLY_BUDGET")) or 50.0
     return {
         "month_scoring_cost": ms,
         "month_discovery_cost": md,
@@ -733,6 +734,9 @@ def _rollup(month_scoring, month_discovery, daily) -> dict:
         "daily_total_cost": dt,
         "daily_warn": warn,
         "daily_over_warn": bool(warn and dt >= warn),
+        "discovery_budget": disc_budget,
+        "discovery_over_budget": bool(disc_budget and md >= disc_budget),
+        "discovery_est_qual_cost": _as_float(os.getenv("DISCOVERY_EST_QUAL_COST")) or 0.12,
     }
 
 

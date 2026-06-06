@@ -5,7 +5,8 @@ does not need a browser. Storage is Railway Postgres; the app self-initialises
 its schema on first boot.
 
 Config already in the repo:
-- `railway.json` — start command + `/api/health` healthcheck
+- `railway.api.json` — API start command + `/api/health` healthcheck (set as the
+  `discovery-api` service config file path in Railway Settings)
 - `nixpacks.toml` — Python 3.12, `pip install -r requirements.txt`, uvicorn
 - schema auto-init — the API runs `schema.sql` (idempotent) on startup
 

@@ -21,9 +21,16 @@ logs, and it bills only for the minutes it runs. The web service is untouched.
 at **9:00 AM** local; bump to `0 15 * * 1-5` if you need 10:00 AM year-round
 in winter.
 
-Config lives in `railway.cron.json` (cron schedule + Dockerfile path). Point the
-`discovery-cron` service at it in **Settings → Config file path**:
-`/railway.cron.json`.
+Config lives in service-specific files (the root `railway.json` is intentionally
+minimal so it does not force the API healthcheck onto the cron container):
+
+| Service | Config file path |
+|---------|------------------|
+| `discovery-api` | `/railway.api.json` |
+| `discovery-cron` | `/railway.cron.json` |
+
+Set each in **Settings → Config file path** before the first deploy of that
+service.
 
 ## Option A — Railway Cron Service (recommended), via CLI (reproducible)
 
@@ -38,10 +45,10 @@ railway link
 railway add --service discovery-cron
 railway service link discovery-cron
 
-# 3. In the dashboard (discovery-cron → Settings):
-#    - Config file path: /railway.cron.json
-#    (Sets Dockerfile.cron + weekday cron 0 14 * * 1-5 — see railway.cron.json)
-#    Or set RAILWAY_DOCKERFILE_PATH=Dockerfile.cron and Cron Schedule manually.
+# 3. In the dashboard (one-time per service):
+#    discovery-api  → Settings → Config file path: /railway.api.json
+#    discovery-cron → Settings → Config file path: /railway.cron.json
+#    (cron file sets Dockerfile.cron + weekday schedule 0 14 * * 1-5)
 
 # 4. Copy secrets from discovery-api (same Postgres, same Claude/Apify keys).
 for key in DATABASE_URL ANTHROPIC_API_KEY ANTHROPIC_MODEL APIFY_API_KEY \

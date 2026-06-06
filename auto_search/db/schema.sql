@@ -133,3 +133,22 @@ ALTER TABLE connector_runs ADD COLUMN IF NOT EXISTS planned INTEGER NOT NULL DEF
 
 CREATE INDEX IF NOT EXISTS idx_runs_source_started
     ON connector_runs (source, started_at DESC);
+
+
+-- ── ABM target list ───────────────────────────────────────────────────────
+-- The sales team's uploaded target accounts (the Q2 workbook). Discovery
+-- companies are matched against this list; a match that also has a live buying
+-- signal is the highest-value lead there is. Replaced wholesale on each upload.
+CREATE TABLE IF NOT EXISTS abm_targets (
+    id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name           TEXT NOT NULL,
+    aliases        JSONB NOT NULL DEFAULT '[]',
+    keys           JSONB NOT NULL DEFAULT '[]',   -- normalized match keys (name + aliases)
+    domain         TEXT,
+    state          TEXT,
+    segment        TEXT,
+    source_sheet   TEXT,
+    definitive_id  TEXT,
+    uploaded_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_abm_targets_domain ON abm_targets (domain);

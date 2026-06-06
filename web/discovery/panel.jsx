@@ -42,6 +42,24 @@ window.DeferButton = DeferButton;
 window.RejectButton = RejectButton;
 window.RestoreButton = RestoreButton;
 
+// ── AbmBadge: this company is on the uploaded ABM target list ────────────────
+function AbmBadge({ match }) {
+  if (!match) return null;
+  const confirmed = match.tier === 'confirmed';
+  const where = [match.source_sheet, match.state].filter(Boolean).join(', ');
+  const title = `On ABM target list: ${match.target_name}${where ? ` (${where})` : ''}`
+    + (confirmed ? '' : ' — name-only match, verify location');
+  return (
+    <span title={title}
+      className={`inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[10.5px] font-semibold uppercase tracking-wide ring-1 ring-inset
+        ${confirmed ? 'bg-amber-100 text-amber-700 ring-amber-200' : 'bg-amber-50 text-amber-600/70 ring-amber-100'}`}>
+      <Icons.sparkle className="h-3 w-3" />
+      {confirmed ? 'ABM target' : 'ABM?'}
+    </span>
+  );
+}
+window.AbmBadge = AbmBadge;
+
 // ── CompanyRow ──────────────────────────────────────────────────────────────
 function CompanyRow({ company, leaving, selected, onToggleSelect, onOpen, onPromote, onReject }) {
   const stop = (fn) => (e) => { e.stopPropagation(); fn(); };
@@ -65,6 +83,7 @@ function CompanyRow({ company, leaving, selected, onToggleSelect, onOpen, onProm
             <h3 className="truncate text-[15px] font-semibold text-zinc-900">{company.name}</h3>
             {company.icp_status && <VerdictBadge status={company.icp_status} />}
             <SegmentBadge segment={company.segment} />
+            <AbmBadge match={company.abm_match} />
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <SignalChips signals={company.signals} />

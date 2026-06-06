@@ -34,6 +34,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from auto_search import discovery_runner
+from auto_search.abm import AbmIndex, TargetAccount, parse_workbook
+from auto_search.abm.util import extract_state
 from auto_search.api.auth import install_basic_auth
 from auto_search.db import get_repository
 from auto_search.db.scoring_repository import (
@@ -248,6 +250,12 @@ def _preview_payload(app: FastAPI, result: csv_imports.ImportResult) -> dict:
     }
 
 
+def _load_abm_index(repo) -> AbmIndex:
+    """Build the ABM match index from the persisted target list (empty if none)."""
+    rows = repo.abm_targets() if hasattr(repo, "abm_targets") else []
+    return AbmIndex([TargetAccount(**r) for r in rows])
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Build the service once; the repo (Postgres pool or JSON file) lives for
@@ -263,6 +271,7 @@ async def lifespan(app: FastAPI):
     app.state.scoring = ScoringService(scoring_repo)
     app.state.repo = repo
     app.state.scoring_repo = scoring_repo
+    app.state.abm_index = _load_abm_index(repo)   # ABM target list -> match index
     app.state.scoring_tasks = set()           # keep background score tasks alive
     app.state.scoring_inflight = set()        # account_ids being scored (dedupe lock)
     app.state.batch_running = False           # one queued batch at a time
@@ -344,6 +353,32 @@ def create_app() -> FastAPI:
     def svc(app: FastAPI) -> ReviewService:
         return app.state.service
 
+    def _annotate_panel(companies: list[PanelCompany]) -> list[PanelCompany]:
+        """Add measured qualify cost + ABM-target match to each panel company.
+
+        Both are best-effort: a failure here must never break the panel read."""
+        try:
+            keys = [c.company_key for c in companies]
+            costs = app.state.scoring_repo.qualify_costs(keys) if keys else {}
+            est = spend_guard.discovery_est_qual_cost()
+        except Exception:  # noqa: BLE001 — cost lookup must not break the panel
+            logger.exception("panel qualify cost lookup failed")
+            costs, est = {}, None
+        index = getattr(app.state, "abm_index", None)
+        out: list[PanelCompany] = []
+        for c in companies:
+            cost = costs.get(c.company_key)
+            updates: dict = {
+                "qualify_cost_usd": cost if cost is not None
+                else (est if c.qualified_at else None)
+            }
+            if index is not None and index.size:
+                states = [st for st in
+                          (extract_state(s.location) for s in (c.signals or [])) if st]
+                updates["abm_match"] = index.match(c.name, domain=c.domain, states=states)
+            out.append(c.model_copy(update=updates))
+        return out
+
     # ── reads ──────────────────────────────────────────────────────────
 
     @app.get("/api/stats", response_model=DiscoveryStats)
@@ -355,26 +390,58 @@ def create_app() -> FastAPI:
         status: str = "qualified",
         segment: str | None = None,
         signal_type: str | None = None,
+        abm: str | None = None,    # "confirmed" | "match" -> filter to ABM-target hits
     ):
-        # `status` selects the tab:
-        #   qualified (default) / needs_review → pending queue for that verdict
-        #   deferred                          → snoozed companies (restorable)
+        # `status` selects the tab: qualified (default) / needs_review.
         statuses = ("needs_review",) if status == "needs_review" else ("qualified",)
-        companies = svc(app).list_panel(
-            statuses=statuses, segment=segment, signal_type=signal_type
-        )
+        companies = _annotate_panel(svc(app).list_panel(
+            statuses=statuses, segment=segment, signal_type=signal_type))
+        if abm == "confirmed":
+            companies = [c for c in companies
+                         if c.abm_match and c.abm_match.tier == "confirmed"]
+        elif abm in ("match", "any", "1", "true"):
+            companies = [c for c in companies if c.abm_match]
+        return companies
+
+    @app.get("/api/abm/summary")
+    def abm_summary():
+        """Target-list size + breakdown, and how many rows are indexed live."""
+        repo = app.state.repo
+        summary = (repo.abm_targets_summary()
+                   if hasattr(repo, "abm_targets_summary")
+                   else {"total": 0, "by_segment": {}, "uploaded_at": None})
+        index = getattr(app.state, "abm_index", None)
+        summary["indexed"] = index.size if index else 0
+        return summary
+
+    @app.post("/api/abm/import")
+    async def abm_import(request: Request):
+        """Upload the ABM target workbook (.xlsx as raw bytes); replaces the list."""
+        data = await request.body()
+        if not data:
+            raise HTTPException(status_code=400, detail="empty upload")
         try:
-            keys = [c.company_key for c in companies]
-            costs = app.state.scoring_repo.qualify_costs(keys) if keys else {}
-            est = spend_guard.discovery_est_qual_cost()
-            return [c.model_copy(update={"qualify_cost_usd": (
-                costs.get(c.company_key)
-                if costs.get(c.company_key) is not None
-                else (est if c.qualified_at else None))})
-                    for c in companies]
-        except Exception:  # noqa: BLE001 — cost lookup must not break the panel
-            logger.exception("panel qualify cost lookup failed")
-            return companies
+            targets = parse_workbook(data)
+        except Exception as e:  # noqa: BLE001 — surface a clean 400, not a 500
+            logger.exception("ABM workbook parse failed")
+            raise HTTPException(
+                status_code=400, detail=f"could not parse workbook: {e}") from e
+        if not targets:
+            raise HTTPException(
+                status_code=400, detail="no target accounts found in the workbook")
+        stored = app.state.repo.replace_abm_targets([t.model_dump() for t in targets])
+        app.state.abm_index = AbmIndex(targets)
+        return {"stored": stored, "summary": app.state.repo.abm_targets_summary()}
+
+    @app.get("/api/abm/matches", response_model=list[PanelCompany])
+    def abm_matches():
+        """Panel companies (qualified + pending) that are on the ABM target list.
+
+        Confirmed matches first, then 'review' (name-only) matches."""
+        matched = [c for c in _annotate_panel(svc(app).list_panel()) if c.abm_match]
+        matched.sort(
+            key=lambda c: 0 if c.abm_match and c.abm_match.tier == "confirmed" else 1)
+        return matched
 
     @app.get("/api/activity")
     def get_activity():

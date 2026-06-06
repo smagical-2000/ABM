@@ -53,6 +53,14 @@ window.API = {
       body: JSON.stringify({ reason }),
     }),
 
+  // ── ABM target list ─────────────────────────────────────────────────────────
+  // Upload the target workbook (.xlsx) as raw bytes; replaces the stored list.
+  importAbm: (file) => http('/api/abm/import', {
+    method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file,
+  }),
+  abmSummary: () => http('/api/abm/summary'),
+  abmMatches: () => http('/api/abm/matches'),
+
   // ── scoring phase ──────────────────────────────────────────────────────────
   frameworks: () => http('/api/scoring/frameworks'),
   scored: () => http('/api/scored'),

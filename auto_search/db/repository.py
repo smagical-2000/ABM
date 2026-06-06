@@ -132,6 +132,18 @@ class DiscoveryRepository(Protocol):
         """Most recently decided companies (any verdict) for the run log."""
         ...
 
+    def replace_abm_targets(self, targets: list[dict]) -> int:
+        """Replace the stored ABM target list wholesale; return rows stored."""
+        ...
+
+    def abm_targets(self) -> list[dict]:
+        """All stored ABM target rows (for building the match index)."""
+        ...
+
+    def abm_targets_summary(self) -> dict:
+        """Counts for the UI: total, by segment, last upload time."""
+        ...
+
 
 # ── JSON-file implementation (works now, zero infra) ──────────────────
 
@@ -391,6 +403,45 @@ class JsonFileRepository:
                 "signal_summary": top.get("summary") or payload.get("role"),
             })
         return out
+
+    # ── ABM target list (sidecar file, mirrors the runs sidecar) ──────
+
+    def _abm_path(self) -> Path:
+        return self._path.with_name("abm_targets.json")
+
+    def _abm_doc(self) -> dict:
+        p = self._abm_path()
+        if not p.exists():
+            return {"uploaded_at": None, "targets": []}
+        try:
+            return json.loads(p.read_text())
+        except json.JSONDecodeError:
+            return {"uploaded_at": None, "targets": []}
+
+    def replace_abm_targets(self, targets: list[dict]) -> int:
+        p = self._abm_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        doc = {"uploaded_at": datetime.now(UTC).isoformat(), "targets": targets}
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(json.dumps(doc, default=str))
+        tmp.replace(p)
+        return len(targets)
+
+    def abm_targets(self) -> list[dict]:
+        return self._abm_doc().get("targets", [])
+
+    def abm_targets_summary(self) -> dict:
+        doc = self._abm_doc()
+        targets = doc.get("targets", [])
+        by_segment: dict[str, int] = {}
+        for t in targets:
+            seg = t.get("segment") or t.get("source_sheet") or "Other"
+            by_segment[seg] = by_segment.get(seg, 0) + 1
+        return {
+            "total": len(targets),
+            "by_segment": dict(sorted(by_segment.items(), key=lambda kv: -kv[1])),
+            "uploaded_at": doc.get("uploaded_at"),
+        }
 
     # -- internals --
 

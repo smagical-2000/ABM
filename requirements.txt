@@ -17,3 +17,4 @@ fastapi>=0.110            # Discovery Panel HTTP API
 uvicorn[standard]>=0.27   # ASGI server
 psycopg[binary]>=3.1      # Postgres driver (sync) for the discovery store
 psycopg-pool>=3.2         # connection pool
+openpyxl>=3.1             # parse the uploaded ABM target-list workbook (.xlsx)

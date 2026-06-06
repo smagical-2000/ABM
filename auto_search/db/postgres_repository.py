@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from psycopg.rows import dict_row
+from psycopg.types.json import Json
 from psycopg_pool import ConnectionPool
 
 from auto_search.models import CompanyCandidate
@@ -311,6 +312,57 @@ class PostgresRepository:
                 "error_message = 'orphaned by restart', finished_at = now() "
                 "WHERE status = 'running'")
             return cur.rowcount or 0
+
+    # ── ABM target list ────────────────────────────────────────────────
+
+    def replace_abm_targets(self, targets: list[dict]) -> int:
+        """Replace the stored ABM target list wholesale; return rows stored."""
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute("DELETE FROM abm_targets")
+            for t in targets:
+                conn.execute(
+                    """INSERT INTO abm_targets
+                         (name, aliases, keys, domain, state, segment,
+                          source_sheet, definitive_id)
+                       VALUES (%(name)s, %(aliases)s, %(keys)s, %(domain)s,
+                               %(state)s, %(segment)s, %(source_sheet)s,
+                               %(definitive_id)s)""",
+                    {
+                        "name": t.get("name"),
+                        "aliases": Json(t.get("aliases") or []),
+                        "keys": Json(t.get("keys") or []),
+                        "domain": t.get("domain"),
+                        "state": t.get("state"),
+                        "segment": t.get("segment"),
+                        "source_sheet": t.get("source_sheet"),
+                        "definitive_id": t.get("definitive_id"),
+                    },
+                )
+        return len(targets)
+
+    def abm_targets(self) -> list[dict]:
+        """All stored ABM target rows (for building the match index)."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT name, aliases, keys, domain, state, segment, "
+                "source_sheet, definitive_id FROM abm_targets").fetchall()
+        return [dict(r) for r in rows]
+
+    def abm_targets_summary(self) -> dict:
+        """Counts for the UI: total, by segment, last upload time."""
+        with self._pool.connection() as conn:
+            tot = conn.execute(
+                "SELECT count(*) AS n, max(uploaded_at) AS up FROM abm_targets"
+            ).fetchone()
+            segs = conn.execute(
+                "SELECT coalesce(segment, source_sheet, 'Other') AS seg, "
+                "count(*) AS n FROM abm_targets GROUP BY 1 ORDER BY 2 DESC"
+            ).fetchall()
+        return {
+            "total": tot["n"] if tot else 0,
+            "uploaded_at": _iso(tot["up"]) if tot and tot["up"] else None,
+            "by_segment": {r["seg"]: r["n"] for r in segs},
+        }
 
     def recent_decisions(self, *, limit: int = 20) -> list[dict]:
         """Most recently decided companies (any verdict) — drives the run log.

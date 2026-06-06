@@ -417,6 +417,9 @@ function App() {
   const [stats, setStats] = useState({ panel_pending: 0, qualified: 0, needs_review: 0, total: 0 });
   const [segment, setSegment] = useState('all');
   const [signalType, setSignalType] = useState('all');
+  const [abmFilter, setAbmFilter] = useState('all');       // 'all' | 'match' | 'confirmed'
+  const [abmInfo, setAbmInfo] = useState(null);            // { total, uploaded_at, indexed }
+  const abmInputRef = useRef(null);
   const [tab, setTab] = useState('qualified');
   const [openKey, setOpenKey] = useState(null);
   const [leaving, setLeaving] = useState({});
@@ -459,6 +462,20 @@ function App() {
     }
   }
   useEffect(() => { loadAll(); }, []);
+  useEffect(() => { window.API.abmSummary().then(setAbmInfo).catch(() => {}); }, []);
+
+  async function handleAbmUpload(file) {
+    if (!file) return;
+    pushToast(`Uploading ${file.name}…`, 'muted');
+    try {
+      const res = await window.API.importAbm(file);
+      pushToast(`ABM list loaded — ${res.stored.toLocaleString()} target accounts`, 'success');
+      await window.API.abmSummary().then(setAbmInfo).catch(() => {});
+      await loadAll(true);   // re-annotate the panel against the new list
+    } catch (e) {
+      pushToast(`Upload failed: ${e.message}`, 'danger');
+    }
+  }
 
   const [activity, setActivity] = useState([]);
   const [lastRun, setLastRun] = useState(null);
@@ -636,8 +653,10 @@ function App() {
     if (c.bucket !== tab) return false;
     if (segment !== 'all' && c.segment !== segment) return false;
     if (signalType !== 'all' && !c.signals.some((s) => s.signal_type === signalType)) return false;
+    if (abmFilter === 'match' && !c.abm_match) return false;
+    if (abmFilter === 'confirmed' && !(c.abm_match && c.abm_match.tier === 'confirmed')) return false;
     return true;
-  }), [companies, tab, segment, signalType]);
+  }), [companies, tab, segment, signalType, abmFilter]);
 
   const openCompany = companies.find((c) => c.company_key === openKey) || null;
   const visibleRows = filtered.filter((c) => !leaving[c.company_key]);
@@ -655,6 +674,7 @@ function App() {
   }
   const qualifiedCount = companies.filter((c) => c.bucket === 'qualified' && !leaving[c.company_key]).length;
   const needsCount = companies.filter((c) => c.bucket === 'needs_review' && !leaving[c.company_key]).length;
+  const abmMatchCount = companies.filter((c) => c.bucket === tab && c.abm_match && !leaving[c.company_key]).length;
   const remainingMs = deadline - now;
   const queuedCount = qualifiedCount;
   const urgent = autoEnabled && remainingMs <= 10 * 60 * 1000 && queuedCount > 0;
@@ -767,8 +787,18 @@ function App() {
                   options={[{ value: 'all', label: 'All' }, { value: 'health_system', label: 'Health System' }, { value: 'specialty', label: 'Specialty' }, { value: 'payer', label: 'Payer' }]} />
                 <Dropdown label="Signal" value={signalType} onChange={setSignalType}
                   options={[{ value: 'all', label: 'All' }, { value: 'job_posting', label: 'Hiring' }, { value: 'layoff', label: 'Layoff' }, { value: 'leadership_change', label: 'Leadership change' }, { value: 'acquisition', label: 'Acquisition' }, { value: 'funding_round', label: 'Funding' }]} />
+                <Dropdown label="ABM list" value={abmFilter} onChange={setAbmFilter}
+                  options={[{ value: 'all', label: 'All' }, { value: 'match', label: `On ABM list${abmMatchCount ? ` (${abmMatchCount})` : ''}` }, { value: 'confirmed', label: 'ABM confirmed' }]} />
               </div>
               <div className="flex items-center gap-3">
+                <input ref={abmInputRef} type="file" accept=".xlsx" className="hidden"
+                  onChange={(e) => { const f = e.target.files[0]; e.target.value = ''; handleAbmUpload(f); }} />
+                <button onClick={() => abmInputRef.current && abmInputRef.current.click()}
+                  title={abmInfo && abmInfo.total ? `${abmInfo.total.toLocaleString()} ABM targets loaded — click to replace` : 'Upload your ABM target list (.xlsx)'}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[12.5px] font-medium text-zinc-600 transition-colors hover:bg-zinc-50">
+                  <Icons.sparkle className="h-3.5 w-3.5 text-amber-500" />
+                  {abmInfo && abmInfo.total ? `ABM list · ${abmInfo.total.toLocaleString()}` : 'Upload ABM list'}
+                </button>
                 {!loading && visibleCount > 0 && (
                   <label className="inline-flex cursor-pointer items-center gap-1.5 text-[13px] text-zinc-500 select-none">
                     <input type="checkbox" checked={allSelected} onChange={toggleSelectAll}
@@ -778,6 +808,9 @@ function App() {
                 )}
                 <span className="text-[13px] text-zinc-400">
                   {loading ? 'Loading…' : `${visibleCount} ${visibleCount === 1 ? 'company' : 'companies'}`}
+                  {!loading && abmMatchCount > 0 && (
+                    <span className="ml-1.5 font-medium text-amber-600">· {abmMatchCount} on ABM list</span>
+                  )}
                 </span>
               </div>
             </div>

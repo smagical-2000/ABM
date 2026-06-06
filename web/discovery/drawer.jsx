@@ -108,6 +108,25 @@ function CompanyDrawer({ company, onClose, onPromote, onDefer, onReject, onResto
                   </>
                 )}
               </div>
+              {company.abm_match && (
+                <div className={`mt-3 flex items-start gap-2 rounded-lg px-3 py-2 text-[12.5px] ring-1 ring-inset
+                  ${company.abm_match.tier === 'confirmed'
+                    ? 'bg-amber-50 text-amber-800 ring-amber-200'
+                    : 'bg-amber-50/60 text-amber-700 ring-amber-100'}`}>
+                  <Icons.sparkle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+                  <div>
+                    <span className="font-semibold">
+                      {company.abm_match.tier === 'confirmed' ? 'On your ABM target list' : 'Possible ABM-list match'}
+                    </span>
+                    {' — '}{company.abm_match.target_name}
+                    {company.abm_match.source_sheet ? ` · ${company.abm_match.source_sheet}` : ''}
+                    {company.abm_match.state ? `, ${company.abm_match.state}` : ''}
+                    {company.abm_match.tier !== 'confirmed' && (
+                      <span className="mt-0.5 block text-amber-600/80">Name match only — verify it's the same organization.</span>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Scroll body */}

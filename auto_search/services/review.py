@@ -20,6 +20,7 @@ import logging
 
 from pydantic import BaseModel
 
+from auto_search.abm.models import AbmMatch
 from auto_search.db.repository import DiscoveryRepository
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,7 @@ class PanelCompany(BaseModel):
     qualify_cost_usd: float | None = None  # from cost_events (measured tokens)
     signal_count: int = 0
     signals: list[PanelSignal] = []
+    abm_match: AbmMatch | None = None    # set when this company is on the ABM target list
 
 
 class DiscoveryStats(BaseModel):

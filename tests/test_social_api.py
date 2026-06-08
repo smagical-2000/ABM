@@ -159,3 +159,15 @@ def test_target_url_validation_rejects_lookalikes(client):
     assert client.post("/api/social/targets", json={"linkedin_url": "https://linkedin.com"}).status_code == 400
     # a real company URL is accepted
     assert client.post("/api/social/targets", json={"linkedin_url": "https://www.linkedin.com/company/real-co"}).status_code == 200
+
+
+def test_event_keyword_crud(client):
+    assert client.get("/api/social/keywords").json()["keywords"] == []
+    assert client.post("/api/social/keywords", json={"keyword": '"HIMSS26"'}).status_code == 200
+    # dedup is case/quote-insensitive
+    client.post("/api/social/keywords", json={"keyword": "himss26"})
+    kws = client.get("/api/social/keywords").json()["keywords"]
+    assert len(kws) == 1
+    assert client.post("/api/social/keywords", json={"keyword": "x"}).status_code == 400  # too short
+    assert client.request("DELETE", "/api/social/keywords", json={"keyword": "HIMSS26"}).json()["removed"]
+    assert client.get("/api/social/keywords").json()["keywords"] == []

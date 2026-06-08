@@ -24,6 +24,7 @@ import re
 from auto_search.normalize import normalize_company_name
 from auto_search.scoring import spend_guard
 from auto_search.social import apify
+from auto_search.social.filters import is_attending, is_us
 from auto_search.social.ingest import ingest_engager
 from auto_search.social.models import Engager, SocialTarget, source_for_kind
 from auto_search.social.seniority import is_decision_maker
@@ -262,6 +263,115 @@ async def poll_targets(
                     e, {**enriched, "linkedin_url": e.linkedin_url}, source).to_signal())
 
     logger.info("social poll: %s", summary)
+    return summary
+
+
+def _new_event_summary() -> dict:
+    return {"keywords": 0, "posts": 0, "attendees": 0, "enriched": 0,
+            "qualified": 0, "appended": 0, "skipped": {}}
+
+
+async def poll_events(
+    keywords: list[str],
+    *,
+    repo,
+    op: spend_guard.Operation | None = None,
+    can_qualify=None,
+    gate=None,
+    date_filter: str = "past-24h",
+    max_posts: int = 25,
+    max_enrich: int = 50,
+    search_fn=apify.search_event_posts,
+    enrich_fn=apify.enrich,
+    qualify_fn=None,
+) -> dict:
+    """Find event ATTENDEES from a keyword post search and run them through ICP.
+
+    The cost-shaped gauntlet (cheapest first), per the product rule "confirm the
+    author actually attended before extracting":
+
+      1. keyword search for recent posts                      (Apify, cheap)
+      2. author must be a PERSON (not the event's own page)   (free)
+      3. the post TEXT must confirm attendance (verb, not     (free)
+         just topic commentary)
+      4. decision-maker by headline                           (free)
+      5. enrich the attendee → company + country              (Apify, paid, capped)
+      6. must be US-based                                     (free, on enriched)
+      7. ICP-qualify the company → panel (event_attendance)   (LLM, gated)
+    """
+    kws = [k for k in (keywords or []) if k and k.strip()]
+    summary = _new_event_summary()
+    summary["keywords"] = len(kws)
+    if not kws:
+        return summary
+    try:
+        posts = await search_fn(kws, max_posts=max_posts, date_filter=date_filter)
+    except apify.ApifyError:
+        logger.exception("apify event search failed")
+        return summary
+    summary["posts"] = len(posts)
+    if op is not None and posts:
+        op.record(step="event_search", company_key=None, model="apify:posts-search",
+                  actual_usd=round(len(posts) * SCRAPE_COST_PER_ITEM_USD, 4))
+
+    seen: set[str] = set()
+    enrich_count = 0
+    kw_label = kws[0].strip('"') if len(kws) == 1 else None
+
+    for p in posts:
+        if gate is not None and not await gate():
+            summary["cancelled"] = True
+            return summary
+        ident = (p.author_url or "").strip().lower()
+        if not p.author_is_person or not ident:
+            _tally_skip(summary, "not_a_person")
+            continue
+        if ident in seen:
+            summary["duplicates"] = summary.get("duplicates", 0) + 1
+            continue
+        seen.add(ident)
+        # FREE gates: the author must say they attended (a verb, not just the
+        # event name), and be a decision-maker — before we pay to enrich.
+        if not is_attending(p.text, p.text)[0]:
+            _tally_skip(summary, "attendance_unconfirmed")
+            continue
+        if not is_decision_maker(p.author_headline)[0]:
+            _tally_skip(summary, "not_decision_maker")
+            continue
+        summary["attendees"] += 1
+
+        enriched = await _enrich_and_record(enrich_fn, p.author_url, op, summary,
+                                            max_enrich - enrich_count)
+        if enriched is None:
+            continue
+        enrich_count += 1
+        if not is_us(enriched.get("country"), enriched.get("city")):
+            _tally_skip(summary, "not_us")
+            continue
+        if not enriched.get("company"):
+            _tally_skip(summary, "enrich_no_company")
+            continue
+
+        engager = Engager(
+            full_name=enriched.get("full_name") or p.author_name,
+            job_title=enriched.get("job_title") or p.author_headline,
+            company_name=enriched.get("company"),
+            company_website=enriched.get("company_domain"),
+            industry=enriched.get("industry"),
+            linkedin_url=enriched.get("linkedin_url") or p.author_url,
+            source="event",
+            engagement_type="comment",
+            post_url=p.post_url,
+            post_title=p.text,        # ingest re-checks attendance on this text
+            comment_text=p.text,
+            event_name=p.keyword or kw_label,
+        )
+        kw = {"repo": repo, "op": op, "can_qualify": can_qualify}
+        if qualify_fn is not None:
+            kw["qualify_fn"] = qualify_fn
+        _tally_result(summary, await ingest_engager(engager, **kw))
+
+    logger.info("event poll: %s", summary)
     return summary
 
 

@@ -32,13 +32,21 @@ def is_magical(company_name: str | None, *links: str | None) -> bool:
 
 
 # Phrases that signal a person is (or will be) attending the event. Word-
-# boundaried so "attend" doesn't fire on "attended a webinar last year" — we
-# keep it to present/future intent.
+# Attendance intent — present/future ("I'll be at"), PAST ("I attended", "great
+# time at", "back from"), and exhibitor/speaker forms ("our booth", "exhibiting",
+# "speaking/presenting at", "meet (me/us/the team) at"). Word-boundaried. For an
+# event keyword search the post already mentions the event, so we additionally
+# require an attendance VERB here to exclude pure topic commentary ("HIMSS26 will
+# be huge for the industry").
 _ATTENDING_RE = re.compile(
-    r"\b(?:i'?ll be (?:there|attending|at)|see you (?:there|at)|join (?:me|us) at"
-    r"|excited to attend|attending|registered for|signed up|count me in|i'?m in"
-    r"|stop(?:ping)? by|swing by|at booth|our booth|find (?:me|us) at"
-    r"|looking forward to (?:seeing|attending|being)|can'?t wait to (?:attend|see))\b",
+    r"\b(?:i'?ll be (?:there|attending|at)|see you (?:there|at)|join (?:me|us)(?: at| for)?"
+    r"|excited to (?:attend|be at|join)|attending|attended|registered for|signed up"
+    r"|count me in|i'?m in|stop(?:ping)? by|swing by|at booth|our booth"
+    r"|find (?:me|us) at|meet (?:me|us|the team|our team) at|here at|back from"
+    r"|(?:great|fantastic|amazing|incredible|wonderful|awesome) (?:time|day|days|to be) (?:at|in)"
+    r"|was (?:great|amazing)? ?at"
+    r"|looking forward to (?:seeing|attending|being)|can'?t wait to (?:attend|see|be)"
+    r"|exhibiting|presenting at|speaking at|we are at|we'?re at|live (?:from|at))\b",
     re.IGNORECASE,
 )
 
@@ -55,6 +63,29 @@ _NOT_ATTENDING_RE = re.compile(
 def _normalize_quotes(text: str | None) -> str:
     """Fold curly apostrophes to ASCII so "I’ll"/"can’t" (iOS/LinkedIn) match."""
     return (text or "").replace("’", "'").replace("ʼ", "'")
+
+
+# US country/location markers (the enrichment returns e.g. country="United States",
+# location_name="Phoenix, Arizona, United States").
+_US_VALUES = frozenset({"us", "usa", "u.s.", "u.s.a.", "united states",
+                        "united states of america", "america"})
+_US_LOCATION_RE = re.compile(
+    r"\b(?:united states|usa|u\.s\.a?\.?|, us\b)\b", re.IGNORECASE)
+
+
+def is_us(country: str | None, *location_hints: str | None) -> bool:
+    """True if the person is US-based (Magical sells into US healthcare only).
+
+    Trusts an explicit country first; falls back to a US marker in any supplied
+    location string. Unknown/empty → False (we'd rather skip than chase a non-US
+    lead), so the caller drops anyone we can't confirm is in the US.
+    """
+    if country and country.strip().lower() in _US_VALUES:
+        return True
+    for hint in (country, *location_hints):
+        if hint and _US_LOCATION_RE.search(hint):
+            return True
+    return False
 
 
 def is_attending(comment_text: str | None, post_title: str | None = None) -> tuple[bool, str]:

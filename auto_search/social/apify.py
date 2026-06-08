@@ -195,3 +195,76 @@ async def enrich(linkedin_url: str, *, client: httpx.AsyncClient | None = None) 
     """Enrich one LinkedIn profile URL → company + firmographics, or None."""
     items = await _run_actor(_ACTOR_ENRICH, {"linkedin_url": linkedin_url}, client=client)
     return normalize_enrichment(items)
+
+
+# ── event keyword search (datadoping~linkedin-posts-search-scraper) ──────────
+# Search public LinkedIn posts by keyword (e.g. an event hashtag "HIMSS26"). Each
+# result carries the post text + author — we read the TEXT to confirm the author
+# (a person) actually attended, then enrich + qualify that attendee.
+_ACTOR_POST_SEARCH = "datadoping~linkedin-posts-search-scraper"
+
+# date_filter window → the actor's enum. Manual runs widen the window; the cron
+# stays past-24h.
+DATE_WINDOWS = {"24h": "past-24h", "week": "past-week", "month": "past-month"}
+
+
+class EventPost(BaseModel):
+    """One public post returned by a keyword search, with its author."""
+
+    author_name: str
+    author_headline: str | None = None
+    author_url: str | None = None        # /in/<slug> for a person, /company//showcase/ for an org
+    post_url: str | None = None
+    text: str = ""
+    keyword: str | None = None           # which search keyword surfaced it
+
+    @property
+    def author_is_person(self) -> bool:
+        """A real person's profile (/in/), not a company/showcase page — only a
+        person can 'attend'."""
+        return "/in/" in (self.author_url or "").lower()
+
+
+def parse_event_posts(items: list[dict]) -> list[EventPost]:
+    """Flatten the post-search dataset into EventPost rows (pure, unit-tested)."""
+    out: list[EventPost] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        author = it.get("author") or {}
+        name = (author.get("name") or it.get("owner_name") or "").strip()
+        if not name:
+            continue
+        text = it.get("text")
+        out.append(EventPost(
+            author_name=name,
+            author_headline=author.get("headline") or author.get("occupation"),
+            author_url=author.get("profile_url") or author.get("linkedinUrl"),
+            post_url=it.get("post_url") or it.get("url"),
+            text=text if isinstance(text, str) else "",
+            keyword=(it.get("input") or {}).get("keyword") if isinstance(it.get("input"), dict) else None,
+        ))
+    return out
+
+
+async def search_event_posts(
+    keywords: list[str],
+    *,
+    max_posts: int = 25,
+    date_filter: str = "past-24h",
+    sort_by: str = "date_posted",
+    client: httpx.AsyncClient | None = None,
+) -> list[EventPost]:
+    """Search public posts for the given event keywords. `date_filter` is the
+    actor enum (past-24h | past-week | past-month) — the cron uses 24h, a manual
+    run can widen it."""
+    keywords = [k for k in (keywords or []) if k and k.strip()]
+    if not keywords:
+        return []
+    items = await _run_actor(_ACTOR_POST_SEARCH, {
+        "keywords": keywords, "max_posts": max(10, max_posts),
+        "sort_by": sort_by, "date_filter": date_filter,
+    }, client=client)
+    posts = parse_event_posts(items)
+    logger.info("apify post-search: %d keywords → %d posts", len(keywords), len(posts))
+    return posts

@@ -69,8 +69,19 @@ window.API = {
   removeSocialTarget: (linkedin_url) => http('/api/social/targets', {
     method: 'DELETE', body: JSON.stringify({ linkedin_url }),
   }),
-  // Scrape active monitored accounts (last 24h) on demand. One run at a time.
-  runSocial: () => http('/api/social/run', { method: 'POST', body: '{}' }),
+  // Event/conference keywords we search posts for, to find attendees.
+  eventKeywords: () => http('/api/social/keywords'),
+  addEventKeyword: (body) => http('/api/social/keywords', {
+    method: 'POST', body: JSON.stringify(body),
+  }),
+  removeEventKeyword: (keyword) => http('/api/social/keywords', {
+    method: 'DELETE', body: JSON.stringify({ keyword }),
+  }),
+  // Manual social scan with a date window: { window: "24h"|"week"|"month",
+  // scope: "all"|"accounts"|"events" }. One run at a time.
+  runSocial: (body = {}) => http('/api/social/run', {
+    method: 'POST', body: JSON.stringify(body),
+  }),
 
   // ── scoring phase ──────────────────────────────────────────────────────────
   frameworks: () => http('/api/scoring/frameworks'),

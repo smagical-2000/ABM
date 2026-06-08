@@ -35,7 +35,7 @@ from dotenv import load_dotenv
 from auto_search.db import get_repository
 from auto_search.db.scoring_repository import get_scoring_repository
 from auto_search.scoring import spend_guard
-from auto_search.social import SocialTarget, poll_targets
+from auto_search.social import SocialTarget, poll_events, poll_targets
 
 load_dotenv(override=True)
 logger = logging.getLogger("run_social")
@@ -44,10 +44,11 @@ logger = logging.getLogger("run_social")
 async def _main(args) -> int:
     repo = get_repository()
     scoring_repo = get_scoring_repository()
-    targets = [SocialTarget(**t) for t in repo.social_targets()]
-    active = [t for t in targets if t.active]
-    if not active:
-        logger.warning("no active monitored accounts — nothing to poll")
+    active = [SocialTarget(**t) for t in repo.social_targets() if t.get("active", True)]
+    keywords = [k["keyword"] for k in repo.event_keywords()
+                if k.get("active", True) and k.get("keyword")]
+    if not active and not keywords:
+        logger.warning("no active monitored accounts or event keywords — nothing to poll")
         return 0
 
     # The ONE shared budget gate (same as the webhook + on-demand run).
@@ -61,12 +62,16 @@ async def _main(args) -> int:
     max_enrich = min(args.max_enrich, cap)
     op = spend_guard.Operation(scoring_repo, "social_cron", estimated_usd=round(cap * est, 4))
     try:
-        summary = await poll_targets(
-            active, repo=repo, op=op, can_qualify=gate,
-            max_posts=args.max_posts, posted_limit_date=since, max_enrich=max_enrich)
+        if active:
+            logger.info("social poll: %s", await poll_targets(
+                active, repo=repo, op=op, can_qualify=gate,
+                max_posts=args.max_posts, posted_limit_date=since, max_enrich=max_enrich))
+        if keywords:
+            logger.info("event poll: %s", await poll_events(
+                keywords, repo=repo, op=op, can_qualify=gate,
+                date_filter="past-24h", max_enrich=max_enrich))
     finally:
         op.finish()
-    logger.info("social poll complete: %s", summary)
     return 0
 
 

@@ -63,11 +63,17 @@ from auto_search.social import (
     SocialTarget,
     engager_from_trigify,
     ingest_engager,
+    poll_events,
     poll_targets,
 )
 
 load_dotenv(override=True)
 logger = logging.getLogger(__name__)
+
+# Manual-run date windows: likes/comments use a posted-since date (days), event
+# search uses the actor's enum. The cron + the main Run button use "24h".
+_WINDOW_DAYS = {"24h": 1, "week": 7, "month": 30}
+_WINDOW_FILTER = {"24h": "past-24h", "week": "past-week", "month": "past-month"}
 
 _WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web" / "discovery"
 
@@ -627,40 +633,77 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Magical's own account stays monitored")
         return {"removed": app.state.repo.delete_social_target(url)}
 
+    @app.get("/api/social/keywords")
+    def list_event_keywords():
+        """Event/conference keywords we search public posts for, to find attendees."""
+        return {"keywords": app.state.repo.event_keywords()}
+
+    @app.post("/api/social/keywords")
+    async def add_event_keyword(request: Request):
+        """Add/update an event keyword: {keyword, label?, active?}."""
+        body = await _json_body(request)
+        kw = (body.get("keyword") or "").strip()
+        if len(kw) < 2:
+            raise HTTPException(status_code=400, detail="a keyword (2+ chars) is required")
+        return app.state.repo.upsert_event_keyword({
+            "keyword": kw, "label": body.get("label"),
+            "active": bool(body.get("active", True))})
+
+    @app.delete("/api/social/keywords")
+    async def delete_event_keyword(request: Request):
+        """Remove an event keyword by {keyword}."""
+        body = await _json_body(request)
+        return {"removed": app.state.repo.delete_event_keyword((body.get("keyword") or "").strip())}
+
     @app.post("/api/social/run")
-    async def social_run():
-        """Scan the active monitored accounts for the last 24h of decision-maker
-        engagers, on demand. Shares the discovery run's control + live activity:
-        one run at a time across both, the same pause/resume/cancel, and qualified
-        companies stream onto the panel via the activity feed. Budget-guarded."""
+    async def social_run(request: Request):
+        """Manual social scan with date-window control — the power-user run.
+
+        Body: {window: "24h"|"week"|"month", scope: "all"|"accounts"|"events"}.
+        Scans monitored accounts (likes/comments) AND event keywords for the
+        chosen window. Shares the discovery run's control + live banner (one run
+        at a time, same pause/resume/cancel). The cron + the main Run button use
+        the 24h window automatically; this is where you widen it."""
         if getattr(app.state, "discovery_running", False) or \
                 getattr(app.state, "social_running", False):
             return {"started": False, "busy": True}
-        targets = [SocialTarget(**t) for t in app.state.repo.social_targets()]
-        active = [t for t in targets if t.active]
-        if not active:
+        body = await _json_body(request)
+        window = body.get("window") if body.get("window") in _WINDOW_DAYS else "24h"
+        scope = body.get("scope") if body.get("scope") in ("all", "accounts", "events") else "all"
+
+        active = [SocialTarget(**t) for t in app.state.repo.social_targets()
+                  if t.get("active", True)]
+        keywords = [k["keyword"] for k in app.state.repo.event_keywords()
+                    if k.get("active", True) and k.get("keyword")]
+        do_accounts = scope in ("all", "accounts") and bool(active)
+        do_events = scope in ("all", "events") and bool(keywords)
+        if not do_accounts and not do_events:
             return {"started": False, "no_targets": True}
 
-        # The ONE shared budget gate (same as the webhook + cron).
         budget_gate, cap, est, blocked_now = spend_guard.make_social_gate(app.state.scoring_repo)
         if blocked_now:
             return {"started": False, "budget_blocked": True}
 
-        # Reuse the discovery run controller so the existing banner + pause/
-        # resume/cancel drive the social scan too (no second control system).
         ctrl = app.state.discovery_control
         ctrl.reset()
         app.state.social_running = True
-        app.state.run_phase = "Scanning LinkedIn engagement"
-        since = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
+        app.state.run_phase = f"Scanning LinkedIn engagement ({window})"
+        since = (datetime.now(UTC) - timedelta(days=_WINDOW_DAYS[window])).isoformat()
+        date_filter = _WINDOW_FILTER[window]
 
         async def _run() -> None:
             op = spend_guard.Operation(app.state.scoring_repo, "social_poll",
                                        estimated_usd=round(cap * est, 4))
             try:
-                app.state.last_social = await poll_targets(
-                    active, repo=app.state.repo, op=op, can_qualify=budget_gate,
-                    gate=ctrl.gate, posted_limit_date=since, max_enrich=cap)
+                if do_accounts:
+                    app.state.last_social = await poll_targets(
+                        active, repo=app.state.repo, op=op, can_qualify=budget_gate,
+                        gate=ctrl.gate, posted_limit_date=since, max_enrich=cap)
+                if do_events and not ctrl.cancelled:
+                    app.state.run_phase = f"Scanning event keywords ({window})"
+                    app.state.last_events = await poll_events(
+                        keywords, repo=app.state.repo, op=op, can_qualify=budget_gate,
+                        gate=ctrl.gate, date_filter=date_filter, max_enrich=cap)
             except Exception:  # noqa: BLE001 — a poll failure must not kill the worker
                 logger.exception("social poll failed")
             finally:
@@ -669,7 +712,9 @@ def create_app() -> FastAPI:
                 app.state.run_phase = None
 
         _schedule_coro(app, _run())
-        return {"started": True, "targets": len(active)}
+        return {"started": True, "window": window,
+                "accounts": len(active) if do_accounts else 0,
+                "keywords": len(keywords) if do_events else 0}
 
     @app.get("/api/activity")
     def get_activity():
@@ -809,22 +854,29 @@ def create_app() -> FastAPI:
                 app.state.last_discovery = {**summary, "at": datetime.now(UTC).isoformat()}
             except Exception:  # noqa: BLE001 — never crash the loop
                 logger.exception("on-demand discovery run failed")
-            # Phase 2 of the SAME run: scan the monitored LinkedIn accounts. One
-            # Run button does both — connectors + social — under one control, one
-            # banner, one cost envelope. Skipped if the user cancelled phase 1 or
-            # opted out with {"include_social": false}.
+            # Phase 2 of the SAME run: scan monitored accounts (likes/comments) +
+            # event keywords for the last 24h. One Run button does everything —
+            # connectors + social + events — under one control, one banner, one
+            # cost envelope. Skipped if cancelled or {"include_social": false}.
             if include_social and not ctrl.cancelled:
                 try:
-                    app.state.run_phase = "Scanning LinkedIn engagement"
-                    targets = [SocialTarget(**t) for t in app.state.repo.social_targets()]
-                    active = [t for t in targets if t.active]
                     s_gate, cap, _est, blocked = spend_guard.make_social_gate(
                         app.state.scoring_repo)
+                    active = [SocialTarget(**t) for t in app.state.repo.social_targets()
+                              if t.get("active", True)]
+                    keywords = [k["keyword"] for k in app.state.repo.event_keywords()
+                                if k.get("active", True) and k.get("keyword")]
+                    since = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
                     if active and not blocked:
-                        since = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
+                        app.state.run_phase = "Scanning LinkedIn engagement"
                         app.state.last_social = await poll_targets(
                             active, repo=app.state.repo, op=op, can_qualify=s_gate,
                             gate=ctrl.gate, posted_limit_date=since, max_enrich=cap)
+                    if keywords and not blocked and not ctrl.cancelled:
+                        app.state.run_phase = "Scanning event keywords"
+                        app.state.last_events = await poll_events(
+                            keywords, repo=app.state.repo, op=op, can_qualify=s_gate,
+                            gate=ctrl.gate, date_filter="past-24h", max_enrich=cap)
                 except Exception:  # noqa: BLE001 — a social failure mustn't fail the run
                     logger.exception("social phase of discovery run failed")
             op.finish()

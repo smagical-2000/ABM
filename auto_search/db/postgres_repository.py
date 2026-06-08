@@ -31,6 +31,7 @@ from psycopg.types.json import Json
 from psycopg_pool import ConnectionPool
 
 from auto_search.models import CompanyCandidate, RawSignal
+from auto_search.normalize import normalize_keyword as _keyword_key
 from auto_search.normalize import normalize_linkedin_url
 
 logger = logging.getLogger(__name__)
@@ -467,6 +468,37 @@ class PostgresRepository:
         key = normalize_linkedin_url(linkedin_url)
         with self._pool.connection() as conn:
             cur = conn.execute("DELETE FROM social_targets WHERE url_key = %s", (key,))
+            return cur.rowcount > 0
+
+    def event_keywords(self) -> list[dict]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT keyword, label, active, created_at "
+                "FROM event_keywords ORDER BY created_at"
+            ).fetchall()
+        return [{"keyword": r["keyword"], "label": r["label"], "active": r["active"],
+                 "created_at": _iso(r["created_at"])} for r in rows]
+
+    def upsert_event_keyword(self, keyword: dict) -> dict:
+        key = _keyword_key(keyword.get("keyword"))
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """INSERT INTO event_keywords (kw_key, keyword, label, active)
+                   VALUES (%(k)s, %(kw)s, %(label)s, %(active)s)
+                   ON CONFLICT (kw_key) DO UPDATE SET
+                       label = COALESCE(EXCLUDED.label, event_keywords.label),
+                       active = EXCLUDED.active
+                   RETURNING keyword, label, active, created_at""",
+                {"k": key, "kw": keyword["keyword"].strip(), "label": keyword.get("label"),
+                 "active": keyword.get("active", True)},
+            ).fetchone()
+        return {"keyword": row["keyword"], "label": row["label"], "active": row["active"],
+                "created_at": _iso(row["created_at"])}
+
+    def delete_event_keyword(self, keyword: str) -> bool:
+        with self._pool.connection() as conn:
+            cur = conn.execute("DELETE FROM event_keywords WHERE kw_key = %s",
+                               (_keyword_key(keyword),))
             return cur.rowcount > 0
 
     def recent_decisions(self, *, limit: int = 20) -> list[dict]:

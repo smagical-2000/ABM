@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Protocol
 
 from auto_search.models import CompanyCandidate, RawSignal
+from auto_search.normalize import normalize_keyword as _keyword_key
 from auto_search.normalize import normalize_linkedin_url
 
 logger = logging.getLogger(__name__)
@@ -177,6 +178,18 @@ class DiscoveryRepository(Protocol):
 
     def delete_social_target(self, linkedin_url: str) -> bool:
         """Remove a monitored account; True if one was removed."""
+        ...
+
+    def event_keywords(self) -> list[dict]:
+        """Tracked event/conference keywords to search posts for."""
+        ...
+
+    def upsert_event_keyword(self, keyword: dict) -> dict:
+        """Add or update an event keyword (keyed case/quote-insensitively)."""
+        ...
+
+    def delete_event_keyword(self, keyword: str) -> bool:
+        """Remove an event keyword; True if one was removed."""
         ...
 
 
@@ -543,6 +556,52 @@ class JsonFileRepository:
         if len(kept) == len(targets):
             return False
         self._write_social(kept)
+        return True
+
+    # -- event keywords (sidecar, mirrors social targets) --
+
+    def _keywords_path(self) -> Path:
+        return self._path.with_name("event_keywords.json")
+
+    def _event_keywords(self) -> list[dict]:
+        p = self._keywords_path()
+        if not p.exists():
+            return []
+        try:
+            return json.loads(p.read_text()).get("keywords", [])
+        except json.JSONDecodeError:
+            return []
+
+    def event_keywords(self) -> list[dict]:
+        return self._event_keywords()
+
+    def upsert_event_keyword(self, keyword: dict) -> dict:
+        rows = self._event_keywords()
+        key = _keyword_key(keyword.get("keyword"))
+        row = next((k for k in rows if _keyword_key(k.get("keyword")) == key), None)
+        if row is None:
+            row = {"keyword": keyword["keyword"].strip(),
+                   "created_at": datetime.now(UTC).isoformat()}
+            rows.append(row)
+        row["label"] = keyword.get("label", row.get("label"))
+        row["active"] = keyword.get("active", row.get("active", True))
+        p = self._keywords_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(json.dumps({"keywords": rows}, default=str))
+        tmp.replace(p)
+        return row
+
+    def delete_event_keyword(self, keyword: str) -> bool:
+        rows = self._event_keywords()
+        key = _keyword_key(keyword)
+        kept = [k for k in rows if _keyword_key(k.get("keyword")) != key]
+        if len(kept) == len(rows):
+            return False
+        p = self._keywords_path()
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(json.dumps({"keywords": kept}, default=str))
+        tmp.replace(p)
         return True
 
     # -- internals --

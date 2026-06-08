@@ -160,3 +160,9 @@ def normalize_linkedin_url(url: str | None) -> str:
     u = re.sub(r"^www\.", "", u)
     u = u.split("?")[0].split("#")[0]
     return u.rstrip("/")
+
+
+def normalize_keyword(keyword: str | None) -> str:
+    """Dedup key for an event/search keyword — case/quote/space-insensitive, so
+    '"HIMSS26"', 'himss26', and ' HIMSS26 ' collapse to one."""
+    return (keyword or "").strip().strip('"').strip("'").lower()

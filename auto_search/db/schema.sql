@@ -164,3 +164,14 @@ CREATE TABLE IF NOT EXISTS social_targets (
     active        BOOLEAN NOT NULL DEFAULT TRUE,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Event/conference keywords we search public posts for, to find ATTENDEES.
+-- kw_key is the normalized dedup key.
+CREATE TABLE IF NOT EXISTS event_keywords (
+    id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    kw_key        TEXT NOT NULL UNIQUE,
+    keyword       TEXT NOT NULL,
+    label         TEXT,
+    active        BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);

@@ -41,12 +41,17 @@ def is_magical(company_name: str | None, *links: str | None) -> bool:
 _ATTENDING_RE = re.compile(
     r"\b(?:i'?ll be (?:there|attending|at)|see you (?:there|at)|join (?:me|us)(?: at| for)?"
     r"|excited to (?:attend|be at|join)|attending|attended|registered for|signed up"
-    r"|count me in|i'?m in|stop(?:ping)? by|swing by|at booth|our booth"
-    r"|find (?:me|us) at|meet (?:me|us|the team|our team) at|here at|back from"
+    r"|count me in|i'?m in|stop(?:ping)? by|swing by|at booth|our booth|visit (?:us|me|our booth)"
+    r"|find (?:me|us) at|meet (?:me|us|the team|our team) at|here at|back from|coming back from"
     r"|(?:great|fantastic|amazing|incredible|wonderful|awesome) (?:time|day|days|to be) (?:at|in)"
     r"|was (?:great|amazing)? ?at"
     r"|looking forward to (?:seeing|attending|being)|can'?t wait to (?:attend|see|be)"
-    r"|exhibiting|presenting at|speaking at|we are at|we'?re at|live (?:from|at))\b",
+    # past-event recaps + exhibitor/speaker/on-the-ground forms — an event post is
+    # often the author reflecting on having been there.
+    r"|(?:just |recently )?wrapped|is done|was (?:a )?(?:blast|success)|loved every"
+    r"|takeaways from|reflections from|highlights from|(?:our|my) (?:time|takeaways) (?:at|from)"
+    r"|presence at|exhibiting|presenting at|speaking at|we (?:are|were|'?re) at|i (?:was|am) at"
+    r"|live (?:from|at)|reporting (?:live )?from|on the ground at)\b",
     re.IGNORECASE,
 )
 

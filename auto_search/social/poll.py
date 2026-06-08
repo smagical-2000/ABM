@@ -330,13 +330,14 @@ async def poll_events(
             summary["duplicates"] = summary.get("duplicates", 0) + 1
             continue
         seen.add(ident)
-        # FREE gates: the author must say they attended (a verb, not just the
-        # event name), and be a decision-maker — before we pay to enrich.
+        # FREE gate: the post text must confirm the author actually attended
+        # (a verb/recap, not just the event name). We do NOT decision-maker-filter
+        # on the post HEADLINE here — that's a freeform tagline ("Healthcare AI
+        # leader…"), not a job title, and was dropping real decision-makers. The
+        # authoritative title comes from enrichment, so the decision-maker check
+        # runs inside ingest_engager on the enriched job_title.
         if not is_attending(p.text, p.text)[0]:
             _tally_skip(summary, "attendance_unconfirmed")
-            continue
-        if not is_decision_maker(p.author_headline)[0]:
-            _tally_skip(summary, "not_decision_maker")
             continue
         summary["attendees"] += 1
 

@@ -755,7 +755,8 @@ def create_app() -> FastAPI:
                 "paused": ctrl.paused,
                 "cancelling": ctrl.cancelled,
                 "last_run": getattr(app.state, "last_discovery", None),
-                "last_social": getattr(app.state, "last_social", None)}
+                "last_social": getattr(app.state, "last_social", None),
+                "last_events": getattr(app.state, "last_events", None)}
 
     @app.post("/api/discovery/run")
     async def discovery_run(request: Request):

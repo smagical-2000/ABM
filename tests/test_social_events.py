@@ -67,15 +67,26 @@ _POSTS = [
 ]
 
 
+# Enrichment returns the REAL job_title (the post headline is a tagline, so the
+# decision-maker check runs on this, inside ingest, not on the headline).
+_ENRICHED = {
+    "ferry": {"full_name": "Ferry Lagarde", "job_title": "Chief Information Officer",
+              "company": "Acme Health", "company_domain": "acme.example",
+              "country": "United States", "city": "Boston, MA"},
+    "junior": {"full_name": "Junior Person", "job_title": "Marketing Coordinator",
+               "company": "Junior Health Co", "country": "United States"},
+    "brit": {"full_name": "Brit Exec", "job_title": "CEO",
+             "company": "NHS Trust", "country": "United Kingdom"},
+}
+
+
 def _make_enrich(calls):
     async def _enrich(url):
         calls.append(url)
-        if "brit" in url:
-            return {"full_name": "Brit Exec", "job_title": "CEO",
-                    "company": "NHS Trust", "country": "United Kingdom"}
-        return {"full_name": "Ferry Lagarde", "job_title": "CIO",
-                "company": "Acme Health", "company_domain": "acme.example",
-                "country": "United States", "city": "Boston, MA"}
+        for k, v in _ENRICHED.items():
+            if k in url:
+                return v
+        return None
     return _enrich
 
 
@@ -92,15 +103,18 @@ async def test_only_us_decision_maker_attendees_are_qualified():
         ["HIMSS26"], repo=repo, search_fn=_search, enrich_fn=_make_enrich(calls),
         qualify_fn=_qualify(True))
 
-    # Only the two attending decision-makers (Ferry, Brit) get enriched — the org
-    # page, the topic-commenter, and the junior are dropped on the free filters.
+    # Every attending PERSON is enriched (ferry, junior, brit) — the org page is
+    # dropped free, and topic-commentary ("will be huge") fails the attendance gate.
     assert set(calls) == {"https://www.linkedin.com/in/ferry",
+                          "https://www.linkedin.com/in/junior",
                           "https://www.linkedin.com/in/brit"}
-    assert summary["skipped"].get("not_a_person") == 1        # the showcase page
-    assert summary["skipped"].get("attendance_unconfirmed") == 1  # topic commentary
-    assert summary["skipped"].get("not_decision_maker") == 1  # the coordinator
-    assert summary["skipped"].get("not_us") == 1              # the UK CEO
-    # Exactly one qualified company (Ferry's US health system).
+    assert summary["skipped"].get("not_a_person") == 1            # the showcase page
+    assert summary["skipped"].get("attendance_unconfirmed") == 1  # "will be huge" commentary
+    assert summary["skipped"].get("not_us") == 1                  # the UK CEO (post-enrich)
+    # The coordinator is enriched but rejected by the decision-maker check on the
+    # ENRICHED title (inside ingest) — not on the headline tagline.
+    assert summary["skipped"].get("not_decision_maker") == 1
+    # Exactly one qualified company: Ferry, a US CIO at a health system.
     assert summary["qualified"] == 1
     assert repo.saved and repo.saved[0].company_name == "Acme Health"
 

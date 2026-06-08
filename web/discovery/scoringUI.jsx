@@ -157,6 +157,48 @@ function SourceTag({ source }) {
 }
 window.SourceTag = SourceTag;
 
+// ── DiscoverySignals — WHY this account was discovered, with proof links ─────
+// A promoted lead must not "lose" the signal that surfaced it. This renders
+// EVERY carried discovery signal (hiring, layoff, leadership, social engagement,
+// event…) as its segment-colored chip + the summary + a "proof" link to the
+// source (job posting, post, article). Renders nothing for CSV imports (no
+// discovery signals), so it's safe to drop into the drawer unconditionally.
+function DiscoverySignals({ signals }) {
+  const list = (signals || []).filter((s) => s && s.signal_type);
+  if (!list.length) return null;
+  return (
+    <div className="mt-3 rounded-lg bg-zinc-50 px-3 py-2.5 ring-1 ring-inset ring-zinc-200">
+      <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
+        <window.Icons.compass className="h-3.5 w-3.5 text-zinc-400" />
+        Why discovered · {list.length} {list.length === 1 ? 'signal' : 'signals'}
+      </div>
+      <ul className="space-y-1.5">
+        {list.map((s, i) => {
+          const m = window.SIGNAL_META[s.signal_type] || {};
+          const Icon = m.icon || window.Icons.sparkle;
+          return (
+            <li key={i} className="flex items-start gap-2 text-[12.5px] text-zinc-700">
+              <span className={`mt-0.5 inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ring-1 ring-inset ${m.chip || 'bg-zinc-100 text-zinc-500 ring-zinc-200'}`}>
+                <Icon className="h-3 w-3" />{m.label || s.signal_type}
+              </span>
+              <span className="min-w-0 flex-1 text-pretty">
+                {s.summary || s.signal_type}
+                {s.url && (
+                  <a href={s.url} target="_blank" rel="noreferrer"
+                    className="ml-1 inline-flex items-center gap-0.5 whitespace-nowrap text-indigo-600 hover:underline">
+                    proof<window.Icons.ext className="h-3 w-3" />
+                  </a>
+                )}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+window.DiscoverySignals = DiscoverySignals;
+
 // ── DimensionBar (mirrors ConfidenceMeter) ───────────────────────────────────
 function dimColor(ratio) {
   if (ratio >= 0.8) return { bar: 'bg-emerald-500', text: 'text-emerald-600' };
@@ -330,6 +372,7 @@ function ScoredRow({ account, entering, onOpen, onScore, onLanding, tw, batchRun
           <div className="flex items-center gap-2.5">
             <h3 className="truncate text-[15px] font-semibold text-zinc-900">{a.name}</h3>
             <SegmentBadge segment={a.segment} />
+            <AbmBadge match={a.abm_match} />
             {flagged && (
               <span title="Independent QA disagrees on a fact that moves the fit. Open to review."
                 className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" />
@@ -337,7 +380,7 @@ function ScoredRow({ account, entering, onOpen, onScore, onLanding, tw, batchRun
           </div>
           <div className="mt-1.5 flex items-center gap-1.5 text-[12px] text-zinc-400">
             <SourceTag source={a.source} />
-            {a.state === 'scored' && (<><span className="text-zinc-300">·</span><span>scored {relativeTime(a.scored_at)}</span></>)}
+            {a.state === 'scored' && (<><span className="text-zinc-300">·</span><span title={a.scored_at || ''}>scored {formatDateTime(a.scored_at)}</span></>)}
             {a.state === 'queued' && (<><span className="text-zinc-300">·</span><span>not scored</span></>)}
             {a.state === 'error' && (<><span className="text-zinc-300">·</span><span>score failed</span></>)}
           </div>

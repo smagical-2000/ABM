@@ -152,3 +152,15 @@ CREATE TABLE IF NOT EXISTS abm_targets (
     uploaded_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_abm_targets_domain ON abm_targets (domain);
+
+-- Monitored LinkedIn accounts: profiles/companies whose post engagers we scrape
+-- (Magical's own + competitors). url_key is the normalized dedup key.
+CREATE TABLE IF NOT EXISTS social_targets (
+    id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    url_key       TEXT NOT NULL UNIQUE,
+    linkedin_url  TEXT NOT NULL,
+    label         TEXT,
+    kind          TEXT NOT NULL DEFAULT 'competitor',   -- own | competitor
+    active        BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);

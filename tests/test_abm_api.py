@@ -15,7 +15,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from auto_search.db.repository import JsonFileRepository
+from auto_search.db.scoring_repository import ScoringJsonRepository
 from auto_search.models import CompanyCandidate, QualificationResult, RawSignal
+from auto_search.scoring.frameworks import framework_for_segment
+from auto_search.scoring.models import Account
 
 _app_module = importlib.import_module("auto_search.api.app")
 
@@ -33,6 +36,18 @@ def _candidate(key, name, *, domain=None):
     )
 
 
+def _seed_scored(store, name, *, domain=None, source="discovery"):
+    """Put one account on the scoring board (state is irrelevant to ABM matching)."""
+    ScoringJsonRepository(store).upsert_account(
+        Account(
+            account_id=f"acc_{source}_{name.lower().replace(' ', '')}",
+            name=name, segment="health_system", source=source,
+            framework=framework_for_segment("health_system").key, domain=domain,
+        ),
+        state="queued",
+    )
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     store = tmp_path / "store.json"
@@ -40,12 +55,16 @@ def client(tmp_path, monkeypatch):
     repo.save_candidate(_candidate("acmehealth", "Acme Health"))
     repo.save_candidate(_candidate("bryanhealth", "Bryan Health", domain="bryanhealth.com"))
 
+    scoring_store = tmp_path / "scoring.json"
+    _seed_scored(scoring_store, "Bryan Health", domain="bryanhealth.com")  # discovery + domain → confirmed
+    _seed_scored(scoring_store, "Acme Health")                            # discovery + name-only → review
+    _seed_scored(scoring_store, "Unrelated Clinic", source="csv")          # CSV import → never tagged
+
     monkeypatch.delenv("BASIC_AUTH_USER", raising=False)
     monkeypatch.delenv("BASIC_AUTH_PASS", raising=False)
     monkeypatch.setattr(_app_module, "get_repository", lambda: JsonFileRepository(store))
-    from auto_search.db.scoring_repository import ScoringJsonRepository
     monkeypatch.setattr(_app_module, "get_scoring_repository",
-                        lambda: ScoringJsonRepository(tmp_path / "scoring.json"))
+                        lambda: ScoringJsonRepository(scoring_store))
     monkeypatch.setattr(_app_module, "_schedule_scoring",
                         lambda app, account_id, **kw: None)
     from auto_search.api.app import create_app
@@ -99,6 +118,29 @@ def test_panel_abm_filter(client):
     assert [c["name"] for c in confirmed] == ["Bryan Health"]
     any_match = client.get("/api/panel?abm=match").json()
     assert {c["name"] for c in any_match} == {"Bryan Health", "Acme Health"}
+
+
+def test_scored_board_has_no_match_before_upload(client):
+    scored = client.get("/api/scored").json()
+    assert scored and all(a.get("abm_match") is None for a in scored)
+
+
+def test_scored_board_is_annotated_after_upload(client):
+    client.post("/api/abm/import", content=_workbook())
+    scored = {a["name"]: a for a in client.get("/api/scored").json()}
+    # Domain-bearing scored account → confirmed via domain (location-independent).
+    assert scored["Bryan Health"]["abm_match"]["tier"] == "confirmed"
+    assert scored["Bryan Health"]["abm_match"]["how"] == "domain"
+    # Name-only scored account → review (no signal geography to corroborate).
+    assert scored["Acme Health"]["abm_match"]["tier"] == "review"
+
+
+def test_scored_csv_import_is_never_tagged(client):
+    # 'Unrelated Clinic' IS on the uploaded list, but it's a CSV import (from the
+    # ABM sheet itself), so it's a target by definition — no badge.
+    client.post("/api/abm/import", content=_workbook())
+    scored = {a["name"]: a for a in client.get("/api/scored").json()}
+    assert scored["Unrelated Clinic"]["abm_match"] is None
 
 
 def test_import_rejects_empty_upload(client):

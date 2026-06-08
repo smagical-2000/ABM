@@ -139,6 +139,19 @@ class RawSignal(BaseModel):
             title = p.get("job_title") or p.get("role") or "role"
             where = p.get("location") or ""
             return f"Hiring: {title}{f' — {where}' if where else ''}".strip()
+        if self.signal_type == "social_engagement":
+            who = p.get("person_name") or "Someone"
+            role = p.get("person_title")
+            verb = "commented on" if p.get("engagement_type") == "comment" else "engaged with"
+            whose = "a Magical post" if p.get("social_source") == "magical_post" \
+                else "a competitor post" if p.get("social_source") == "competitor_post" \
+                else "a tracked post"
+            return f"{who}{f' ({role})' if role else ''} {verb} {whose}".strip()
+        if self.signal_type == "event_attendance":
+            who = p.get("person_name") or "Someone"
+            role = p.get("person_title")
+            event = p.get("event_name") or "a tracked event"
+            return f"{who}{f' ({role})' if role else ''} attending {event}".strip()
         return self.signal_type
 
 

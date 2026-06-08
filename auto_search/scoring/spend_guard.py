@@ -45,6 +45,57 @@ def discovery_est_qual_cost() -> float: return _f("DISCOVERY_EST_QUAL_COST", "0.
 def discovery_monthly_budget() -> float: return _f("DISCOVERY_MONTHLY_BUDGET", "50")
 
 
+def social_webhook_max_qualify() -> int:
+    """Max NEW companies one social-webhook request may pay to qualify.
+
+    The Trigify webhook is an external, paid path: without a per-request cap a
+    huge (or malicious) batch could fire hundreds of LLM qualifications. New-
+    company qualifications above this are skipped (already-known companies still
+    get their signal appended for free). Tunable via SOCIAL_WEBHOOK_MAX_QUALIFY.
+    """
+    try:
+        return max(1, int(os.getenv("SOCIAL_WEBHOOK_MAX_QUALIFY", "25")))
+    except (TypeError, ValueError):
+        return 25
+
+
+def make_social_gate(scoring_repo) -> tuple:
+    """The ONE budget gate shared by every paid social path (webhook, on-demand
+    run, cron). Returns (gate, cap, est, blocked_now):
+
+      gate()      -> None to allow a NEW qualification (and counts it), or a
+                     skip-reason str ("request_cap" / "budget_blocked").
+      cap         -> max new qualifications this request/run may pay for.
+      est         -> estimated $ per qualification (for the projection).
+      blocked_now -> True if the monthly budget is already spent (refuse up front).
+
+    Counting is increment-on-allow: one gate-pass == one committed paid attempt,
+    so all three callers account for spend identically (the divergence a review
+    flagged). A failed attempt still consumed budget intent — that's the safe
+    direction for a cost guard.
+    """
+    est = discovery_est_qual_cost()
+    cap = social_webhook_max_qualify()
+    monthly = discovery_monthly_budget()
+    try:
+        spent = float((scoring_repo.spend_rollup() or {}).get("month_discovery_cost") or 0)
+    except Exception:  # noqa: BLE001 — never let the meter block work by erroring
+        logger.exception("discovery spend lookup failed; allowing within cap")
+        spent = 0.0
+    state = {"n": 0}
+
+    def gate() -> str | None:
+        if state["n"] >= cap:
+            return "request_cap"
+        if monthly and spent + (state["n"] + 1) * est > monthly:
+            return "budget_blocked"
+        state["n"] += 1
+        return None
+
+    blocked_now = bool(monthly and spent >= monthly)
+    return gate, cap, est, blocked_now
+
+
 def discovery_manual_default_limit() -> int:
     """Per-source company cap applied to a MANUAL panel run when none is given.
 

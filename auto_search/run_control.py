@@ -37,6 +37,14 @@ class RunControl:
     One instance lives for the lifetime of the app and is reused across runs;
     each new run must call :meth:`reset` first so a prior cancel/pause can never
     leak into the next one.
+
+    SINGLE-OWNER ASSUMPTION: the discovery run and the social scan deliberately
+    share this one instance (so the UI has one banner + one pause/cancel). That is
+    only safe because they are mutually exclusive — each entry point refuses to
+    start if either `discovery_running` or `social_running` is set. If you ever
+    let both run at once, give each its own RunControl: a shared one would
+    cross-wire (pausing one pauses the other; whichever finishes first resets the
+    flags the other still needs).
     """
 
     def __init__(self) -> None:

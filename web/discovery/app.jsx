@@ -104,7 +104,7 @@ function fmtElapsed(sec) {
   const s = sec % 60;
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
-function ActivityBanner({ runs, paused, cancelling }) {
+function ActivityBanner({ runs, paused, cancelling, phase }) {
   const qualified = runs.reduce((n, r) => n + (r.companies_qualified || 0), 0);
   const evaluated = runs.reduce((n, r) => n + (r.new_companies || 0), 0);
   const planned = runs.reduce((n, r) => n + (r.planned || 0), 0);
@@ -120,7 +120,10 @@ function ActivityBanner({ runs, paused, cancelling }) {
     : paused
     ? { wrap: 'border-amber-100 from-amber-50 to-amber-50/40', dot: 'bg-amber-500', text: 'text-amber-700', sub: 'text-amber-600' }
     : { wrap: 'border-indigo-100 from-indigo-50 to-violet-50/50', dot: 'bg-indigo-500', text: 'text-indigo-700', sub: 'text-indigo-600' };
-  const verb = cancelling ? 'Stopping' : paused ? 'Paused' : 'Discovering';
+  // `phase` (e.g. "Scanning LinkedIn engagement") labels which run is live; it's
+  // the only signal when there are no connector_runs (the social scan has none).
+  const verb = cancelling ? 'Stopping' : paused ? 'Paused' : (phase || 'Discovering');
+  const label = sources ? `${verb} — ${sources}` : verb;
   return (
     <div className={`border-b bg-gradient-to-r ${tone.wrap}`}>
       <div className="mx-auto flex max-w-6xl items-center gap-3 px-8 py-2.5">
@@ -128,7 +131,7 @@ function ActivityBanner({ runs, paused, cancelling }) {
           {!paused && !cancelling && <span className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-75 ${tone.dot}`}></span>}
           <span className={`relative inline-flex h-2.5 w-2.5 rounded-full ${tone.dot}`}></span>
         </span>
-        <span className={`text-[13px] font-medium ${tone.text}`}>{verb} — {sources}</span>
+        <span className={`text-[13px] font-medium ${tone.text}`}>{label}</span>
         <span className="text-zinc-300">·</span>
         {hasPlan ? (
           <>
@@ -418,6 +421,7 @@ function App() {
   const [segment, setSegment] = useState('all');
   const [signalType, setSignalType] = useState('all');
   const [abmFilter, setAbmFilter] = useState('all');       // 'all' | 'match' | 'confirmed'
+  const [socialOpen, setSocialOpen] = useState(false);     // Monitored Accounts modal
   const [abmInfo, setAbmInfo] = useState(null);            // { total, uploaded_at, indexed }
   const abmInputRef = useRef(null);
   const [tab, setTab] = useState('qualified');
@@ -481,6 +485,7 @@ function App() {
   const [lastRun, setLastRun] = useState(null);
   const [runLog, setRunLog] = useState([]);
   const [discoRunning, setDiscoRunning] = useState(false);   // on-demand run in flight
+  const [runPhase, setRunPhase] = useState(null);            // which run is live (label)
   const [confirmRun, setConfirmRun] = useState(false);
   const wasActiveRef = useRef(false);
   // Timestamp of the last pause/resume/cancel click, so the 4s poll doesn't
@@ -501,21 +506,30 @@ function App() {
         // crash/restart and show a phantom in-progress run.
         const running = !!(a && a.running);
         setDiscoRunning(running);
+        setRunPhase(running ? ((a && a.phase) || null) : null);
         if (Date.now() - controlActionAt.current > 5000) {
           setPaused(!!(a && a.paused));
           setCancelling(!!(a && a.cancelling));
         }
         if (!running) { setPaused(false); setCancelling(false); }
-        if (active.length > 0) { wasActiveRef.current = true; loadAll(true); }
+        // Refresh the panel while ANY run is live — a social scan produces no
+        // connector_runs (active stays []), so keying off `running` is what makes
+        // its qualified companies stream in live (not just discovery runs).
+        if (running) { wasActiveRef.current = true; loadAll(true); }
         else if (wasActiveRef.current) {
           wasActiveRef.current = false;
           loadAll(true);
           window.API.scoringStats().then((s) => { if (alive && s) setSpend(s); }).catch(() => {});
           const lr = a && a.last_run;
+          const sr = a && a.last_social;
           const n = lr && (lr.evaluated ?? ((lr.qualified || 0) + (lr.needs_review || 0) + (lr.disqualified || 0)));
-          pushToast(n != null
-            ? `Run complete — ${n} evaluated, $${(lr.cost_usd || 0).toFixed(2)} charged`
-            : 'Discovery run complete', 'success');
+          if (n != null) {
+            pushToast(`Run complete — ${n} evaluated, $${(lr.cost_usd || 0).toFixed(2)} charged`, 'success');
+          } else if (sr) {
+            pushToast(`Scan complete — ${sr.qualified || 0} qualified, ${sr.enriched || 0} enriched`, 'success');
+          } else {
+            pushToast('Run complete', 'success');
+          }
         }
       } catch (_) { /* ignore */ }
     }
@@ -756,7 +770,7 @@ function App() {
         </div>
       </header>
 
-      {discovery && activity.length > 0 && <ActivityBanner runs={activity} paused={paused} cancelling={cancelling} />}
+      {discovery && (discoRunning || activity.length > 0) && <ActivityBanner runs={activity} paused={paused} cancelling={cancelling} phase={runPhase} />}
 
       {discovery ? (
         <main className="mx-auto max-w-6xl px-8 py-8">
@@ -786,7 +800,7 @@ function App() {
                 <Dropdown label="Segment" value={segment} onChange={setSegment}
                   options={[{ value: 'all', label: 'All' }, { value: 'health_system', label: 'Health System' }, { value: 'specialty', label: 'Specialty' }, { value: 'payer', label: 'Payer' }]} />
                 <Dropdown label="Signal" value={signalType} onChange={setSignalType}
-                  options={[{ value: 'all', label: 'All' }, { value: 'job_posting', label: 'Hiring' }, { value: 'layoff', label: 'Layoff' }, { value: 'leadership_change', label: 'Leadership change' }, { value: 'acquisition', label: 'Acquisition' }, { value: 'funding_round', label: 'Funding' }]} />
+                  options={[{ value: 'all', label: 'All' }, { value: 'job_posting', label: 'Hiring' }, { value: 'layoff', label: 'Layoff' }, { value: 'leadership_change', label: 'Leadership change' }, { value: 'acquisition', label: 'Acquisition' }, { value: 'funding_round', label: 'Funding' }, { value: 'social_engagement', label: 'Engaged' }, { value: 'event_attendance', label: 'Event' }]} />
                 <Dropdown label="ABM list" value={abmFilter} onChange={setAbmFilter}
                   options={[{ value: 'all', label: 'All' }, { value: 'match', label: `On ABM list${abmMatchCount ? ` (${abmMatchCount})` : ''}` }, { value: 'confirmed', label: 'ABM confirmed' }]} />
               </div>
@@ -798,6 +812,12 @@ function App() {
                   className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[12.5px] font-medium text-zinc-600 transition-colors hover:bg-zinc-50">
                   <Icons.sparkle className="h-3.5 w-3.5 text-amber-500" />
                   {abmInfo && abmInfo.total ? `ABM list · ${abmInfo.total.toLocaleString()}` : 'Upload ABM list'}
+                </button>
+                <button onClick={() => setSocialOpen(true)}
+                  title="Monitor LinkedIn accounts — scrape post engagers, keep decision-makers"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[12.5px] font-medium text-zinc-600 transition-colors hover:bg-zinc-50">
+                  <Icons.leadership className="h-3.5 w-3.5 text-indigo-500" />
+                  Monitored accounts
                 </button>
                 {!loading && visibleCount > 0 && (
                   <label className="inline-flex cursor-pointer items-center gap-1.5 text-[13px] text-zinc-500 select-none">
@@ -880,6 +900,7 @@ function App() {
         <ConfirmDeleteModal count={selected.size}
           onCancel={() => setConfirmDelete(false)} onConfirm={handleDeleteSelected} />
       )}
+      {socialOpen && <SocialMonitor onClose={() => setSocialOpen(false)} pushToast={pushToast} />}
       <ToastStack toasts={toasts} />
     </div>
   );

@@ -68,6 +68,8 @@ const Icons = {
   play: (p) => ic(<path d="M6 4l14 8-14 8z" />, p),
   pause: (p) => ic(<><path d="M8 5v14M16 5v14" /></>, p),
   trash: (p) => ic(<><path d="M4 7h16" /><path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" /><path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13" /></>, p),
+  thumb: (p) => ic(<><path d="M7 10v11" /><path d="M4 10h3v11H4z" /><path d="M7 10l4-7a2 2 0 0 1 3 1.5V8h4.5a2 2 0 0 1 2 2.3l-1.2 7A2 2 0 0 1 17.3 19H7" /></>, p),
+  calendar: (p) => ic(<><rect x="3" y="5" width="18" height="16" rx="2" /><path d="M3 9h18M8 3v4M16 3v4" /></>, p),
 };
 window.Icons = Icons;
 
@@ -77,6 +79,8 @@ const SIGNAL_META = {
   acquisition: { label: 'Acquisition', icon: Icons.acquisition, chip: 'bg-amber-50 text-amber-700 ring-amber-100', dot: 'bg-amber-400' },
   funding_round: { label: 'Funding', icon: Icons.dollar, chip: 'bg-cyan-50 text-cyan-700 ring-cyan-100', dot: 'bg-cyan-400' },
   job_posting: { label: 'Hiring', icon: Icons.job, chip: 'bg-emerald-50 text-emerald-700 ring-emerald-100', dot: 'bg-emerald-400' },
+  social_engagement: { label: 'Engaged', icon: Icons.thumb, chip: 'bg-violet-50 text-violet-700 ring-violet-100', dot: 'bg-violet-400' },
+  event_attendance: { label: 'Event', icon: Icons.calendar, chip: 'bg-fuchsia-50 text-fuchsia-700 ring-fuchsia-100', dot: 'bg-fuchsia-400' },
 };
 window.SIGNAL_META = SIGNAL_META;
 

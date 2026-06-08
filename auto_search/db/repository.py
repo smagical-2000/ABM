@@ -28,7 +28,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
-from auto_search.models import CompanyCandidate
+from auto_search.models import CompanyCandidate, RawSignal
+from auto_search.normalize import normalize_linkedin_url
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,28 @@ class DiscoveryRepository(Protocol):
         The pipeline can call this BEFORE qualifying to skip the Claude
         call entirely for companies we've already decided on — the
         ultimate "don't reprocess" guard across runs.
+        """
+        ...
+
+    def add_signal(self, company_key: str, signal: RawSignal) -> bool:
+        """Append one signal to an EXISTING company, without touching its verdict.
+
+        Append-only: used when a new engager/signal arrives for a company that's
+        already been qualified, so we record the provenance without re-paying the
+        qualifier or resetting the review decision. Dedups on
+        source_external_id. Returns True if the signal was added, False if the
+        company doesn't exist or the signal was already stored.
+        """
+        ...
+
+    def update_signal(self, company_key: str, signal: RawSignal) -> bool:
+        """Upsert a signal on an EXISTING company by source_external_id.
+
+        Like add_signal, but REPLACES the stored signal when one with the same
+        source_external_id exists (else appends). Used to enrich a contact in
+        place — e.g. after an ICP-qualified company's engager is enriched, its
+        scrape-level signal is overwritten with the enriched company/title.
+        Returns True if updated/added, False if the company doesn't exist.
         """
         ...
 
@@ -144,6 +167,18 @@ class DiscoveryRepository(Protocol):
         """Counts for the UI: total, by segment, last upload time."""
         ...
 
+    def social_targets(self) -> list[dict]:
+        """Monitored LinkedIn accounts (own + competitors)."""
+        ...
+
+    def upsert_social_target(self, target: dict) -> dict:
+        """Add or update a monitored account (keyed by normalized URL)."""
+        ...
+
+    def delete_social_target(self, linkedin_url: str) -> bool:
+        """Remove a monitored account; True if one was removed."""
+        ...
+
 
 # ── JSON-file implementation (works now, zero infra) ──────────────────
 
@@ -211,15 +246,7 @@ class JsonFileRepository:
         for sig in candidate.signals:
             if sig.source_external_id in seen_ids:
                 continue
-            existing["signals"].append({
-                "source": sig.source,
-                "signal_type": sig.signal_type,
-                "source_external_id": sig.source_external_id,
-                "summary": sig.summary,
-                "signal_strength": sig.signal_strength,
-                "observed_at": sig.observed_at.isoformat(),
-                "payload": sig.payload,
-            })
+            existing["signals"].append(_signal_to_dict(sig))
             seen_ids.add(sig.source_external_id)
 
         self._flush()
@@ -233,6 +260,32 @@ class JsonFileRepository:
     def already_qualified(self, company_key: str) -> bool:
         row = self._store.get(company_key)
         return bool(row) and row.get("icp_status") in self._DECIDED_STATUSES
+
+    def add_signal(self, company_key: str, signal: RawSignal) -> bool:
+        row = self._store.get(company_key)
+        if row is None:
+            return False
+        signals = row.setdefault("signals", [])
+        if any(s["source_external_id"] == signal.source_external_id for s in signals):
+            return False
+        signals.append(_signal_to_dict(signal))
+        self._flush()
+        return True
+
+    def update_signal(self, company_key: str, signal: RawSignal) -> bool:
+        row = self._store.get(company_key)
+        if row is None:
+            return False
+        signals = row.setdefault("signals", [])
+        new_row = _signal_to_dict(signal)
+        for i, s in enumerate(signals):
+            if s["source_external_id"] == signal.source_external_id:
+                signals[i] = new_row
+                break
+        else:
+            signals.append(new_row)
+        self._flush()
+        return True
 
     def panel(self, statuses: tuple[str, ...] = ("qualified",)) -> list[dict]:
         rows = [r for r in self._store.values() if r.get("icp_status") in statuses]
@@ -443,6 +496,55 @@ class JsonFileRepository:
             "uploaded_at": doc.get("uploaded_at"),
         }
 
+    # ── monitored social accounts (sidecar file) ─────────────────────
+
+    def _social_path(self) -> Path:
+        return self._path.with_name("social_targets.json")
+
+    def _social_targets(self) -> list[dict]:
+        p = self._social_path()
+        if not p.exists():
+            return []
+        try:
+            return json.loads(p.read_text()).get("targets", [])
+        except json.JSONDecodeError:
+            return []
+
+    def _write_social(self, targets: list[dict]) -> None:
+        p = self._social_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(json.dumps({"targets": targets}, default=str))
+        tmp.replace(p)
+
+    def social_targets(self) -> list[dict]:
+        return self._social_targets()
+
+    def upsert_social_target(self, target: dict) -> dict:
+        targets = self._social_targets()
+        key = normalize_linkedin_url(target.get("linkedin_url"))
+        row = next((t for t in targets
+                    if normalize_linkedin_url(t.get("linkedin_url")) == key), None)
+        if row is None:
+            row = {"linkedin_url": target["linkedin_url"],
+                   "created_at": datetime.now(UTC).isoformat()}
+            targets.append(row)
+        row["label"] = target.get("label", row.get("label"))
+        row["kind"] = target.get("kind", row.get("kind", "competitor"))
+        row["active"] = target.get("active", row.get("active", True))
+        self._write_social(targets)
+        return row
+
+    def delete_social_target(self, linkedin_url: str) -> bool:
+        targets = self._social_targets()
+        key = normalize_linkedin_url(linkedin_url)
+        kept = [t for t in targets
+                if normalize_linkedin_url(t.get("linkedin_url")) != key]
+        if len(kept) == len(targets):
+            return False
+        self._write_social(kept)
+        return True
+
     # -- internals --
 
     def _load(self) -> dict[str, dict]:
@@ -472,6 +574,20 @@ class JsonFileRepository:
 
 
 # ── helpers ───────────────────────────────────────────────────────────
+
+
+def _signal_to_dict(sig: RawSignal) -> dict:
+    """The stored JSON shape for one signal — shared by save_candidate +
+    add_signal so the persisted record never drifts between the two paths."""
+    return {
+        "source": sig.source,
+        "signal_type": sig.signal_type,
+        "source_external_id": sig.source_external_id,
+        "summary": sig.summary,
+        "signal_strength": sig.signal_strength,
+        "observed_at": sig.observed_at.isoformat(),
+        "payload": sig.payload,
+    }
 
 
 # Signal-summary text lives on RawSignal.summary (models.py) so JSON and

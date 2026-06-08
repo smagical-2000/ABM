@@ -35,7 +35,9 @@ _RUN_ITEMS = "https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items"
 
 # Hard ceiling so one search can't run away with the bill.
 MAX_ROWS = 50
-DEFAULT_ROWS = 10
+# Default rows per job search. Env-driven so the testing cap (5, while we
+# validate the pipeline) becomes a config flip at ship time, not a code change.
+DEFAULT_ROWS = max(1, int(os.getenv("APIFY_JOBS_ROWS", "5")))
 
 # Indeed `fromDays` is an enum; LinkedIn `datePosted` is a coded preset.
 _INDEED_FROM_DAYS = ("1", "3", "7", "14")

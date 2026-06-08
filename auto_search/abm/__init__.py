@@ -15,8 +15,16 @@ in-memory index.
 
 from __future__ import annotations
 
+from auto_search.abm.annotate import match_one, states_from_locations
 from auto_search.abm.matcher import AbmIndex
 from auto_search.abm.models import AbmMatch, TargetAccount
 from auto_search.abm.parse import parse_workbook
 
-__all__ = ["AbmIndex", "AbmMatch", "TargetAccount", "parse_workbook"]
+__all__ = [
+    "AbmIndex",
+    "AbmMatch",
+    "TargetAccount",
+    "match_one",
+    "parse_workbook",
+    "states_from_locations",
+]

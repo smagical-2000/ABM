@@ -145,3 +145,18 @@ def clean_domain(website: str | None) -> str | None:
     if not w or "/" in w or " " in w or "." not in w:
         return None
     return w
+
+
+def normalize_linkedin_url(url: str | None) -> str:
+    """Canonical key for a LinkedIn profile/company URL, for dedup.
+
+    Lowercases, drops scheme / 'www.' / regional subdomain (ca., uk.), query
+    string, and trailing slash, so 'https://ca.linkedin.com/company/getmagical/'
+    and 'http://www.linkedin.com/company/getmagical' collapse to the same key.
+    """
+    u = (url or "").strip().lower()
+    u = re.sub(r"^[a-z]+://", "", u)
+    u = re.sub(r"^[a-z]{2}\.", "", u)        # regional subdomain (ca./uk./…)
+    u = re.sub(r"^www\.", "", u)
+    u = u.split("?")[0].split("#")[0]
+    return u.rstrip("/")

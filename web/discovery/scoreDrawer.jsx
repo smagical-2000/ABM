@@ -43,7 +43,11 @@ function ScoreDrawer({ account, onClose, onRescore, onOpenLanding }) {
   const open = !!account;
   const animate = typeof document === 'undefined' || document.visibilityState !== 'hidden';
   const a = account;
-  const tier = a && a.total != null ? (a.tier || window.tierFor(a.framework, a.total)) : null;
+  // Never null: the score-summary block dereferences tier.band, and a background
+  // re-score can flip an open account's total to null between renders — a null
+  // tier there would throw and white-screen the whole app (no error boundary).
+  const tier = (a && a.total != null && (a.tier || window.tierFor(a.framework, a.total)))
+    || { band: 'low', label: '' };
   const fw = a ? window.FRAMEWORKS[a.framework] : null;
   // map corrections by dimension label for inline rendering
   const corrByDim = {};
@@ -92,6 +96,8 @@ function ScoreDrawer({ account, onClose, onRescore, onOpenLanding }) {
                 {fw && (<><span className="text-zinc-300">·</span><span className="text-[12px] text-zinc-400">{fw.label} rubric · {fw.version}</span></>)}
                 <span className="inline-flex items-center gap-1.5 rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] font-medium text-zinc-500 ring-1 ring-inset ring-zinc-200"><window.Icons.doc className="h-3 w-3 text-zinc-400" />Landing Page ready</span>
               </div>
+              <AbmCallout match={a.abm_match} />
+              <DiscoverySignals signals={a.discovery_signals} />
             </div>
 
             {/* Scroll body */}
@@ -117,9 +123,12 @@ function ScoreDrawer({ account, onClose, onRescore, onOpenLanding }) {
                     )}
                     <span className="font-semibold text-zinc-800">{a.total}</span> of {a.max_total} points
                     <span className="text-zinc-300"> · </span>
-                    {fw.dimensions.length} dimensions
+                    {/* Fall back to the account's own dimensions if the framework
+                        config isn't loaded / is an unknown key — never crash the
+                        drawer (which white-screens the whole app). */}
+                    {(fw ? fw.dimensions : (a.dimensions || [])).length} dimensions
                   </div>
-                  <div className="mt-0.5 text-[12px] text-zinc-400">Scored {relativeTime(a.scored_at)} · Sonnet{qaApplied ? ' · QA-corrected' : ''}</div>
+                  <div className="mt-0.5 text-[12px] text-zinc-400" title={a.scored_at || ''}>Scored {formatDateTime(a.scored_at)} · Sonnet{qaApplied ? ' · QA-corrected' : ''}</div>
                 </div>
               </div>
 

@@ -214,8 +214,12 @@ def _account_from_discovery(c: dict[str, Any]) -> Account:
     """
     segment = c.get("segment") or "specialty"
     key = c.get("company_key") or c.get("name", "unknown")
+    # Carry signal_type + summary + the evidence URL (job posting, post, etc.) so
+    # the scored drawer can show WHY this account was discovered, with proof links
+    # — not just the company website.
     signals = [
-        {"signal_type": s.get("signal_type"), "summary": s.get("summary")}
+        {"signal_type": s.get("signal_type"), "summary": s.get("summary"),
+         "url": s.get("url") or s.get("evidence_url")}
         for s in (c.get("signals") or [])
     ]
     return Account(

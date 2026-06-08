@@ -23,8 +23,11 @@ import asyncio
 import json
 import logging
 import os
+import re
+import secrets
+from collections import deque
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -34,14 +37,20 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from auto_search import discovery_runner
-from auto_search.abm import AbmIndex, TargetAccount, parse_workbook
-from auto_search.abm.util import extract_state
+from auto_search.abm import (
+    AbmIndex,
+    TargetAccount,
+    match_one,
+    parse_workbook,
+    states_from_locations,
+)
 from auto_search.api.auth import install_basic_auth
 from auto_search.db import get_repository
 from auto_search.db.scoring_repository import (
     STALE_SCORING_SECONDS,
     get_scoring_repository,
 )
+from auto_search.normalize import normalize_linkedin_url
 from auto_search.run_control import RunControl
 from auto_search.runtime import is_production
 from auto_search.scoring import budget as budget_guard
@@ -50,6 +59,12 @@ from auto_search.scoring import spend_guard
 from auto_search.scoring.frameworks import all_frameworks_public
 from auto_search.scoring.service import ScoringService
 from auto_search.services import DiscoveryStats, PanelCompany, ReviewService
+from auto_search.social import (
+    SocialTarget,
+    engager_from_trigify,
+    ingest_engager,
+    poll_targets,
+)
 
 load_dotenv(override=True)
 logger = logging.getLogger(__name__)
@@ -256,6 +271,26 @@ def _load_abm_index(repo) -> AbmIndex:
     return AbmIndex([TargetAccount(**r) for r in rows])
 
 
+# Magical's own LinkedIn — always monitored (its engagers are the hottest signal).
+_MAGICAL_TARGET = {
+    "linkedin_url": "https://www.linkedin.com/company/getmagical",
+    "label": "Magical", "kind": "own", "active": True,
+}
+
+
+def _seed_social_targets(repo) -> None:
+    """Ensure Magical's own account is in the monitored list (idempotent)."""
+    if not hasattr(repo, "upsert_social_target"):
+        return
+    try:
+        existing = {normalize_linkedin_url(t.get("linkedin_url"))
+                    for t in repo.social_targets()}
+        if normalize_linkedin_url(_MAGICAL_TARGET["linkedin_url"]) not in existing:
+            repo.upsert_social_target(dict(_MAGICAL_TARGET))
+    except Exception:  # noqa: BLE001 — seeding must never block startup
+        logger.exception("social target seed failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Build the service once; the repo (Postgres pool or JSON file) lives for
@@ -272,12 +307,18 @@ async def lifespan(app: FastAPI):
     app.state.repo = repo
     app.state.scoring_repo = scoring_repo
     app.state.abm_index = _load_abm_index(repo)   # ABM target list -> match index
+    _seed_social_targets(repo)                    # ensure Magical is always monitored
+    # Ring buffer of the last social-webhook payloads + outcomes, for debugging
+    # the Trigify field mapping (read via GET /api/social/debug). In-memory only.
+    app.state.social_debug = deque(maxlen=50)
+    app.state.social_running = False              # one social poll at a time
     app.state.scoring_tasks = set()           # keep background score tasks alive
     app.state.scoring_inflight = set()        # account_ids being scored (dedupe lock)
     app.state.batch_running = False           # one queued batch at a time
     app.state.discovery_running = False       # one on-demand discovery run at a time
-    app.state.discovery_control = RunControl()  # live pause/cancel for that run
+    app.state.discovery_control = RunControl()  # live pause/cancel — shared by social
     app.state.last_discovery = None
+    app.state.run_phase = None                # label for the live banner (which run)
     app.state.loop = asyncio.get_running_loop()
     # No scoring task can be alive at boot, so anything still marked 'scoring'
     # was orphaned by the previous shutdown — return it to the queue so it does
@@ -326,9 +367,12 @@ def create_app() -> FastAPI:
     # HTTP Basic auth — gated by BASIC_AUTH_USER/PASS. In production we FAIL
     # CLOSED: refuse to start without credentials rather than serve a public,
     # spend-bearing API. Localhost (no production markers) stays frictionless.
-    # /api/health is exempt for the platform healthcheck; added after CORS so it
-    # runs outermost.
-    auth_enabled = install_basic_auth(app, exempt_paths=("/api/health",))
+    # /api/health is exempt for the platform healthcheck; /api/social/trigify is
+    # exempt because Trigify can't send Basic auth — it carries its own
+    # shared-secret header instead (verified in the handler). Added after CORS so
+    # it runs outermost.
+    auth_enabled = install_basic_auth(
+        app, exempt_paths=("/api/health", "/api/social/trigify"))
     if not auth_enabled and is_production():
         raise RuntimeError(
             "Refusing to start in production without auth: set BASIC_AUTH_USER "
@@ -353,6 +397,9 @@ def create_app() -> FastAPI:
     def svc(app: FastAPI) -> ReviewService:
         return app.state.service
 
+    def _abm_index() -> AbmIndex | None:
+        return getattr(app.state, "abm_index", None)
+
     def _annotate_panel(companies: list[PanelCompany]) -> list[PanelCompany]:
         """Add measured qualify cost + ABM-target match to each panel company.
 
@@ -364,19 +411,36 @@ def create_app() -> FastAPI:
         except Exception:  # noqa: BLE001 — cost lookup must not break the panel
             logger.exception("panel qualify cost lookup failed")
             costs, est = {}, None
-        index = getattr(app.state, "abm_index", None)
+        index = _abm_index()
         out: list[PanelCompany] = []
         for c in companies:
             cost = costs.get(c.company_key)
-            updates: dict = {
+            states = states_from_locations(s.location for s in (c.signals or []))
+            out.append(c.model_copy(update={
                 "qualify_cost_usd": cost if cost is not None
-                else (est if c.qualified_at else None)
-            }
-            if index is not None and index.size:
-                states = [st for st in
-                          (extract_state(s.location) for s in (c.signals or [])) if st]
-                updates["abm_match"] = index.match(c.name, domain=c.domain, states=states)
-            out.append(c.model_copy(update=updates))
+                else (est if c.qualified_at else None),
+                "abm_match": match_one(index, name=c.name, domain=c.domain, states=states),
+            }))
+        return out
+
+    def _annotate_scored(rows: list[dict]) -> list[dict]:
+        """Stamp each scored-account row with its ABM-target match, by name + domain.
+
+        Only Discovery-sourced accounts are matched: a CSV import comes straight
+        from the ABM sheet, so it's a target by definition and the tag would be
+        noise — the badge is meant to flag a company we found *independently* that
+        turns out to be on the list. Scored accounts don't retain signal geography,
+        so matching is domain-first (domain → confirmed; name-only → review) — the
+        same index and precision model as the panel, without state corroboration.
+        Every row still gets an `abm_match` key (None when not matched / not a
+        discovery account / no list), mirroring the panel's shape. Non-mutating:
+        returns shallow copies, so the repo's own rows are never touched."""
+        index = _abm_index()
+        out: list[dict] = []
+        for row in rows:
+            match = (match_one(index, name=row.get("name"), domain=row.get("domain"))
+                     if row.get("source") == "discovery" else None)
+            out.append({**row, "abm_match": match.model_dump() if match else None})
         return out
 
     # ── reads ──────────────────────────────────────────────────────────
@@ -410,7 +474,7 @@ def create_app() -> FastAPI:
         summary = (repo.abm_targets_summary()
                    if hasattr(repo, "abm_targets_summary")
                    else {"total": 0, "by_segment": {}, "uploaded_at": None})
-        index = getattr(app.state, "abm_index", None)
+        index = _abm_index()
         summary["indexed"] = index.size if index else 0
         return summary
 
@@ -443,6 +507,170 @@ def create_app() -> FastAPI:
             key=lambda c: 0 if c.abm_match and c.abm_match.tier == "confirmed" else 1)
         return matched
 
+    @app.post("/api/social/trigify")
+    async def trigify_webhook(request: Request):
+        """Inbound webhook for Trigify social-listening workflows.
+
+        Each enriched engager (one object, or a `{"engagers": [...]}` / bare-array
+        batch) is filtered — decision-maker (Director & above), not a Magical
+        employee, and for events a confirmed attendee — then the COMPANY runs
+        through the existing discovery qualifier and lands on the panel with a
+        social signal. The person is carried as a contact in the signal payload.
+
+        Auth: shared secret in the `X-Trigify-Secret` header vs env
+        TRIGIFY_WEBHOOK_SECRET (this route is exempt from Basic auth). Per-record
+        errors are reported, never 500 the batch."""
+        secret = os.getenv("TRIGIFY_WEBHOOK_SECRET")
+        if not secret:
+            raise HTTPException(status_code=503, detail="social webhook not configured")
+        if not secrets.compare_digest(request.headers.get("X-Trigify-Secret", ""), secret):
+            raise HTTPException(status_code=401, detail="invalid webhook secret")
+
+        raw = await request.body()
+        try:
+            data = json.loads(raw) if raw else None
+        except (ValueError, TypeError) as e:
+            raise HTTPException(status_code=400, detail="invalid JSON body") from e
+        if isinstance(data, dict) and isinstance(data.get("engagers"), list):
+            records = data["engagers"]
+        elif isinstance(data, list):
+            records = data
+        elif isinstance(data, dict):
+            records = [data]
+        else:
+            raise HTTPException(
+                status_code=400, detail="expected an engager object or list")
+
+        # Cost guard — this is a paid path (each NEW company = an LLM qualify),
+        # so it gets the SAME defenses as /api/discovery/run: a per-request cap
+        # on new qualifications, a monthly-budget pre-check, and a spend Operation
+        # so every qualify is recorded in the discovery cost meter. Appending a
+        # signal to an already-known company is free and never gated.
+        gate, cap, est, _blocked = spend_guard.make_social_gate(app.state.scoring_repo)
+
+        op = spend_guard.Operation(
+            app.state.scoring_repo, "social_webhook",
+            estimated_usd=round(min(len(records), cap) * est, 4),
+            accounts_planned=len(records))
+        results: list[dict] = []
+        try:
+            for rec in records:
+                if not isinstance(rec, dict):
+                    results.append({"accepted": False, "action": "skipped",
+                                    "reason": "invalid_record"})
+                    continue
+                try:
+                    engager = engager_from_trigify(rec)
+                except Exception as e:  # noqa: BLE001 — one bad record mustn't 500 the batch
+                    results.append({"accepted": False, "action": "skipped",
+                                    "reason": f"invalid_payload: {e}"})
+                    continue
+                try:
+                    res = await ingest_engager(
+                        engager, repo=app.state.repo, op=op, can_qualify=gate)
+                    results.append(res.model_dump())
+                except Exception:  # noqa: BLE001 — isolate per-record ingest failures
+                    logger.exception("social ingest failed for %r", rec.get("full_name"))
+                    results.append({"accepted": False, "action": "error",
+                                    "reason": "ingest_error"})
+        finally:
+            op.finish()
+        # Record raw payload + outcome (newest pushed last) so the Trigify field
+        # mapping can be inspected via GET /api/social/debug while wiring it up.
+        stamp = datetime.now(UTC).isoformat()
+        for rec, outcome in zip(records, results, strict=True):
+            app.state.social_debug.append({"at": stamp, "raw": rec, "outcome": outcome})
+        accepted = sum(1 for r in results if r.get("accepted"))
+        qualified_new = sum(1 for r in results if r.get("action") == "qualified")
+        return {"received": len(records), "accepted": accepted,
+                "skipped": len(records) - accepted,
+                "qualified_new": qualified_new, "results": results}
+
+    @app.get("/api/social/debug")
+    def social_debug():
+        """Last ~50 social-webhook payloads + what we did with each (newest
+        first). Behind Basic auth — a wiring aid while mapping Trigify fields."""
+        return {"events": list(reversed(app.state.social_debug))}
+
+    # ── monitored LinkedIn accounts (Apify post-engagement) ──────────────────
+
+    @app.get("/api/social/targets")
+    def list_social_targets():
+        """Monitored accounts whose post engagers we scrape (Magical + competitors)."""
+        return {"targets": app.state.repo.social_targets()}
+
+    @app.post("/api/social/targets")
+    async def add_social_target(request: Request):
+        """Add/update a monitored account: {linkedin_url, label?, kind?, active?}."""
+        body = await _json_body(request)
+        url = (body.get("linkedin_url") or "").strip()
+        # Require a real LinkedIn profile/company host+path (normalize strips
+        # scheme/www/regional), so a look-alike like evil.com/linkedin.com/x or a
+        # bare host is rejected before it ever reaches the paid scraper.
+        if not re.match(r"^linkedin\.com/(in|company|school)/.+", normalize_linkedin_url(url)):
+            raise HTTPException(
+                status_code=400,
+                detail="a LinkedIn profile/company URL is required (linkedin.com/company/… or /in/…)")
+        target = SocialTarget(
+            linkedin_url=url, label=body.get("label"),
+            kind="own" if body.get("kind") == "own" else "competitor",
+            active=bool(body.get("active", True)),
+        )
+        return app.state.repo.upsert_social_target(target.model_dump())
+
+    @app.delete("/api/social/targets")
+    async def delete_social_target(request: Request):
+        """Remove a monitored account by {linkedin_url}. Magical can't be removed."""
+        body = await _json_body(request)
+        url = (body.get("linkedin_url") or "").strip()
+        if normalize_linkedin_url(url) == normalize_linkedin_url(_MAGICAL_TARGET["linkedin_url"]):
+            raise HTTPException(status_code=400, detail="Magical's own account stays monitored")
+        return {"removed": app.state.repo.delete_social_target(url)}
+
+    @app.post("/api/social/run")
+    async def social_run():
+        """Scan the active monitored accounts for the last 24h of decision-maker
+        engagers, on demand. Shares the discovery run's control + live activity:
+        one run at a time across both, the same pause/resume/cancel, and qualified
+        companies stream onto the panel via the activity feed. Budget-guarded."""
+        if getattr(app.state, "discovery_running", False) or \
+                getattr(app.state, "social_running", False):
+            return {"started": False, "busy": True}
+        targets = [SocialTarget(**t) for t in app.state.repo.social_targets()]
+        active = [t for t in targets if t.active]
+        if not active:
+            return {"started": False, "no_targets": True}
+
+        # The ONE shared budget gate (same as the webhook + cron).
+        budget_gate, cap, est, blocked_now = spend_guard.make_social_gate(app.state.scoring_repo)
+        if blocked_now:
+            return {"started": False, "budget_blocked": True}
+
+        # Reuse the discovery run controller so the existing banner + pause/
+        # resume/cancel drive the social scan too (no second control system).
+        ctrl = app.state.discovery_control
+        ctrl.reset()
+        app.state.social_running = True
+        app.state.run_phase = "Scanning LinkedIn engagement"
+        since = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
+
+        async def _run() -> None:
+            op = spend_guard.Operation(app.state.scoring_repo, "social_poll",
+                                       estimated_usd=round(cap * est, 4))
+            try:
+                app.state.last_social = await poll_targets(
+                    active, repo=app.state.repo, op=op, can_qualify=budget_gate,
+                    gate=ctrl.gate, posted_limit_date=since, max_enrich=cap)
+            except Exception:  # noqa: BLE001 — a poll failure must not kill the worker
+                logger.exception("social poll failed")
+            finally:
+                op.finish()
+                app.state.social_running = False
+                app.state.run_phase = None
+
+        _schedule_coro(app, _run())
+        return {"started": True, "targets": len(active)}
+
     @app.get("/api/activity")
     def get_activity():
         """Powers the live marker + per-account feed.
@@ -472,11 +700,17 @@ def create_app() -> FastAPI:
         except Exception:  # noqa: BLE001 — cost lookup is best-effort for the log
             logger.exception("qualify cost lookup failed")
         ctrl = app.state.discovery_control
+        social_on = bool(getattr(app.state, "social_running", False))
         return {"active": active, "recent": recent,
-                "running": bool(getattr(app.state, "discovery_running", False)),
+                # `running` is unified across both run types so the one live
+                # banner + pause/cancel controls cover the social scan too.
+                "running": bool(getattr(app.state, "discovery_running", False)) or social_on,
+                "phase": getattr(app.state, "run_phase", None)
+                         or ("Scanning LinkedIn engagement" if social_on else None),
                 "paused": ctrl.paused,
                 "cancelling": ctrl.cancelled,
-                "last_run": getattr(app.state, "last_discovery", None)}
+                "last_run": getattr(app.state, "last_discovery", None),
+                "last_social": getattr(app.state, "last_social", None)}
 
     @app.post("/api/discovery/run")
     async def discovery_run(request: Request):
@@ -494,7 +728,8 @@ def create_app() -> FastAPI:
         companies qualified PER SOURCE (the spend knob). Omit both for a full
         24h pull.
         """
-        if getattr(app.state, "discovery_running", False):
+        if getattr(app.state, "discovery_running", False) or \
+                getattr(app.state, "social_running", False):
             return {"started": False, "busy": True}
         # Cost control for panel 1: refuse a manual run once this month's
         # discovery (qualify) spend has hit its budget, so the cheap-but-not-free
@@ -511,6 +746,9 @@ def create_app() -> FastAPI:
             logger.exception("discovery budget check failed; allowing run")
 
         body = await _json_body(request)
+        # The unified Run also scans the monitored LinkedIn accounts unless opted
+        # out — so there's one Run, not a separate "scan" the operator must hunt for.
+        include_social = body.get("include_social", True)
         raw_sources = body.get("sources")
         sources = None
         if isinstance(raw_sources, list) and raw_sources:
@@ -562,6 +800,7 @@ def create_app() -> FastAPI:
                                     "measured": True, "phase": "job_prefilter"})
 
             try:
+                app.state.run_phase = "Discovering signals"
                 summary = await discovery_runner.run_once(
                     app.state.repo, days=1, sources=sources, limit=limit,
                     on_company=on_company, gate=ctrl.gate,
@@ -570,20 +809,42 @@ def create_app() -> FastAPI:
                 app.state.last_discovery = {**summary, "at": datetime.now(UTC).isoformat()}
             except Exception:  # noqa: BLE001 — never crash the loop
                 logger.exception("on-demand discovery run failed")
-            finally:
-                op.finish()
-                app.state.discovery_running = False
+            # Phase 2 of the SAME run: scan the monitored LinkedIn accounts. One
+            # Run button does both — connectors + social — under one control, one
+            # banner, one cost envelope. Skipped if the user cancelled phase 1 or
+            # opted out with {"include_social": false}.
+            if include_social and not ctrl.cancelled:
+                try:
+                    app.state.run_phase = "Scanning LinkedIn engagement"
+                    targets = [SocialTarget(**t) for t in app.state.repo.social_targets()]
+                    active = [t for t in targets if t.active]
+                    s_gate, cap, _est, blocked = spend_guard.make_social_gate(
+                        app.state.scoring_repo)
+                    if active and not blocked:
+                        since = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
+                        app.state.last_social = await poll_targets(
+                            active, repo=app.state.repo, op=op, can_qualify=s_gate,
+                            gate=ctrl.gate, posted_limit_date=since, max_enrich=cap)
+                except Exception:  # noqa: BLE001 — a social failure mustn't fail the run
+                    logger.exception("social phase of discovery run failed")
+            op.finish()
+            app.state.discovery_running = False
+            app.state.run_phase = None
 
         _schedule_coro(app, _run())
         return {"started": True,
                 "sources": sources or list(discovery_runner.BROWSERLESS_SOURCES),
                 "limit": limit}
 
+    def _run_active() -> bool:
+        return bool(getattr(app.state, "discovery_running", False)
+                    or getattr(app.state, "social_running", False))
+
     @app.post("/api/discovery/pause")
     def discovery_pause():
-        """Pause the in-flight discovery run at the next company boundary — no
-        new Claude qualification starts, so spend freezes until resumed."""
-        if not getattr(app.state, "discovery_running", False):
+        """Pause the in-flight run (discovery OR social scan) at the next
+        boundary — no new paid call starts, so spend freezes until resumed."""
+        if not _run_active():
             return {"running": False, "paused": False}
         app.state.discovery_control.pause()
         return {"running": True, "paused": True}
@@ -592,18 +853,16 @@ def create_app() -> FastAPI:
     def discovery_resume():
         """Resume a paused run from exactly where it stopped."""
         app.state.discovery_control.resume()
-        return {"running": bool(getattr(app.state, "discovery_running", False)),
-                "paused": False}
+        return {"running": _run_active(), "paused": False}
 
     @app.post("/api/discovery/cancel")
     def discovery_cancel():
-        """Cancel the in-flight run. It stops cleanly at the next company
-        boundary (any in-flight call finishes). Re-running later 'smart resumes':
-        already-qualified companies are skipped by the dedup ledger, so it picks
-        up where it left off without paying twice."""
+        """Cancel the in-flight run (discovery OR social). It stops cleanly at the
+        next boundary (any in-flight call finishes). Re-running later 'smart
+        resumes': already-qualified companies are skipped by the dedup ledger, so
+        it picks up where it left off without paying twice."""
         app.state.discovery_control.cancel()
-        return {"cancelling": True,
-                "running": bool(getattr(app.state, "discovery_running", False))}
+        return {"cancelling": True, "running": _run_active()}
 
     @app.post("/api/discovery/delete")
     async def discovery_delete(request: Request):
@@ -700,8 +959,10 @@ def create_app() -> FastAPI:
     @app.get("/api/scored")
     def list_scored():
         """Every account in the scoring phase (queued / scoring / scored / error).
-        The dashboard filters client-side."""
-        return app.state.scoring.list_scored()
+        The dashboard filters client-side. Each row carries its ABM-target match
+        (when a list is loaded) so the scored board badges the same hits the
+        discovery panel does."""
+        return _annotate_scored(app.state.scoring.list_scored())
 
     @app.get("/api/scoring/activity")
     def scoring_activity():

@@ -60,6 +60,31 @@ function AbmBadge({ match }) {
 }
 window.AbmBadge = AbmBadge;
 
+// ── AbmCallout: the detail-drawer banner for an ABM-target match ─────────────
+// Shared by the discovery drawer and the score drawer so a match reads
+// identically on both. Renders nothing when the company isn't on the list.
+function AbmCallout({ match }) {
+  if (!match) return null;
+  const confirmed = match.tier === 'confirmed';
+  const where = [match.source_sheet, match.state].filter(Boolean).join(', ');
+  return (
+    <div className={`mt-3 flex items-start gap-2 rounded-lg px-3 py-2 text-[12.5px] ring-1 ring-inset
+      ${confirmed ? 'bg-amber-50 text-amber-800 ring-amber-200' : 'bg-amber-50/60 text-amber-700 ring-amber-100'}`}>
+      <Icons.sparkle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+      <div>
+        <span className="font-semibold">
+          {confirmed ? 'On your ABM target list' : 'Possible ABM-list match'}
+        </span>
+        {' — '}{match.target_name}{where ? ` · ${where}` : ''}
+        {!confirmed && (
+          <span className="mt-0.5 block text-amber-600/80">Name match only — verify it's the same organization.</span>
+        )}
+      </div>
+    </div>
+  );
+}
+window.AbmCallout = AbmCallout;
+
 // ── CompanyRow ──────────────────────────────────────────────────────────────
 function CompanyRow({ company, leaving, selected, onToggleSelect, onOpen, onPromote, onReject }) {
   const stop = (fn) => (e) => { e.stopPropagation(); fn(); };
@@ -81,7 +106,10 @@ function CompanyRow({ company, leaving, selected, onToggleSelect, onOpen, onProm
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2.5">
             <h3 className="truncate text-[15px] font-semibold text-zinc-900">{company.name}</h3>
-            {company.icp_status && <VerdictBadge status={company.icp_status} />}
+            {/* No verdict chip on the row: the panel only ever lists a tab's own
+                verdict (Qualified / Needs review), so a chip would just echo the
+                section header. The full verdict — including disqualified — still
+                shows in the Recent evaluations feed. */}
             <SegmentBadge segment={company.segment} />
             <AbmBadge match={company.abm_match} />
           </div>

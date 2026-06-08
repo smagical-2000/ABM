@@ -48,6 +48,13 @@ class PanelSignal(BaseModel):
     url: str | None = None
     location: str | None = None
     age: str | None = None
+    # social_engagement / event_attendance extras (the engaging person), null
+    # otherwise — drives the "People engaging" block in the company drawer.
+    person_name: str | None = None
+    person_title: str | None = None
+    person_profile_url: str | None = None
+    engaged_with: str | None = None     # post title or event name
+    social_source: str | None = None    # magical_post | competitor_post | event
 
 
 class PanelCompany(BaseModel):
@@ -199,9 +206,17 @@ def _to_panel_company(row: dict) -> PanelCompany:
             strength=s.get("signal_strength"),
             role=(p := s.get("payload") or {}).get("role"),
             title=p.get("job_title"),
-            url=p.get("job_url"),
+            # The signal's evidence link: a job posting for hiring signals, the
+            # post for social engagement — so the panel + the scored "Why
+            # discovered" proof link work for every signal type, not just jobs.
+            url=p.get("job_url") or p.get("post_url"),
             location=p.get("location"),
             age=p.get("age"),
+            person_name=p.get("person_name"),
+            person_title=p.get("person_title"),
+            person_profile_url=p.get("person_profile_url"),
+            engaged_with=p.get("post_title") or p.get("event_name"),
+            social_source=p.get("social_source"),
         )
         for s in row.get("signals", [])
     ]

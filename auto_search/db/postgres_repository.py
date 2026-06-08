@@ -30,7 +30,8 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Json
 from psycopg_pool import ConnectionPool
 
-from auto_search.models import CompanyCandidate
+from auto_search.models import CompanyCandidate, RawSignal
+from auto_search.normalize import normalize_linkedin_url
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +148,74 @@ class PostgresRepository:
                     },
                 )
         return key
+
+    def add_signal(self, company_key: str, signal: RawSignal) -> bool:
+        """Append one signal to an existing company; dedup on
+        (source, source_external_id). No verdict touched. See protocol docstring."""
+        with self._pool.connection() as conn, conn.transaction():
+            company = conn.execute(
+                "SELECT id FROM discovery_companies WHERE normalized_name = %s",
+                (company_key,),
+            ).fetchone()
+            if not company:
+                return False
+            inserted = conn.execute(
+                """
+                INSERT INTO discovery_signals (
+                    company_id, source, signal_type, source_external_id,
+                    summary, signal_strength, observed_at, payload
+                ) VALUES (
+                    %(cid)s, %(source)s, %(type)s, %(ext)s,
+                    %(summary)s, %(strength)s, %(observed)s, %(payload)s
+                )
+                ON CONFLICT (source, source_external_id) DO NOTHING
+                RETURNING id
+                """,
+                {
+                    "cid": company["id"], "source": signal.source,
+                    "type": signal.signal_type, "ext": signal.source_external_id,
+                    "summary": signal.summary, "strength": signal.signal_strength,
+                    "observed": signal.observed_at,
+                    "payload": json.dumps(signal.payload, default=str),
+                },
+            ).fetchone()
+        return inserted is not None
+
+    def update_signal(self, company_key: str, signal: RawSignal) -> bool:
+        """Upsert a signal by (source, source_external_id) — replaces payload/
+        summary when it exists, else inserts. See protocol docstring."""
+        with self._pool.connection() as conn, conn.transaction():
+            company = conn.execute(
+                "SELECT id FROM discovery_companies WHERE normalized_name = %s",
+                (company_key,),
+            ).fetchone()
+            if not company:
+                return False
+            conn.execute(
+                """
+                INSERT INTO discovery_signals (
+                    company_id, source, signal_type, source_external_id,
+                    summary, signal_strength, observed_at, payload
+                ) VALUES (
+                    %(cid)s, %(source)s, %(type)s, %(ext)s,
+                    %(summary)s, %(strength)s, %(observed)s, %(payload)s
+                )
+                ON CONFLICT (source, source_external_id) DO UPDATE SET
+                    signal_type = EXCLUDED.signal_type,
+                    summary = EXCLUDED.summary,
+                    signal_strength = EXCLUDED.signal_strength,
+                    observed_at = EXCLUDED.observed_at,
+                    payload = EXCLUDED.payload
+                """,
+                {
+                    "cid": company["id"], "source": signal.source,
+                    "type": signal.signal_type, "ext": signal.source_external_id,
+                    "summary": signal.summary, "strength": signal.signal_strength,
+                    "observed": signal.observed_at,
+                    "payload": json.dumps(signal.payload, default=str),
+                },
+            )
+        return True
 
     def set_review(
         self, company_key: str, review_status: str, *, reason: str | None = None,
@@ -363,6 +432,42 @@ class PostgresRepository:
             "uploaded_at": _iso(tot["up"]) if tot and tot["up"] else None,
             "by_segment": {r["seg"]: r["n"] for r in segs},
         }
+
+    # ── monitored social accounts ────────────────────────────────────
+
+    def social_targets(self) -> list[dict]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT linkedin_url, label, kind, active, created_at "
+                "FROM social_targets ORDER BY kind, created_at"
+            ).fetchall()
+        return [{"linkedin_url": r["linkedin_url"], "label": r["label"],
+                 "kind": r["kind"], "active": r["active"],
+                 "created_at": _iso(r["created_at"])} for r in rows]
+
+    def upsert_social_target(self, target: dict) -> dict:
+        key = normalize_linkedin_url(target.get("linkedin_url"))
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """INSERT INTO social_targets (url_key, linkedin_url, label, kind, active)
+                   VALUES (%(k)s, %(url)s, %(label)s, %(kind)s, %(active)s)
+                   ON CONFLICT (url_key) DO UPDATE SET
+                       label = COALESCE(EXCLUDED.label, social_targets.label),
+                       kind = EXCLUDED.kind, active = EXCLUDED.active
+                   RETURNING linkedin_url, label, kind, active, created_at""",
+                {"k": key, "url": target["linkedin_url"], "label": target.get("label"),
+                 "kind": target.get("kind", "competitor"),
+                 "active": target.get("active", True)},
+            ).fetchone()
+        return {"linkedin_url": row["linkedin_url"], "label": row["label"],
+                "kind": row["kind"], "active": row["active"],
+                "created_at": _iso(row["created_at"])}
+
+    def delete_social_target(self, linkedin_url: str) -> bool:
+        key = normalize_linkedin_url(linkedin_url)
+        with self._pool.connection() as conn:
+            cur = conn.execute("DELETE FROM social_targets WHERE url_key = %s", (key,))
+            return cur.rowcount > 0
 
     def recent_decisions(self, *, limit: int = 20) -> list[dict]:
         """Most recently decided companies (any verdict) — drives the run log.

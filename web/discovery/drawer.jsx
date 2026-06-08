@@ -67,6 +67,50 @@ function JobHiringBlock({ jobs }) {
   );
 }
 
+// ── PeopleEngagingBlock — decision-makers who engaged (social listening) ─────
+// One row per person: who they are, what they engaged with, link to profile.
+// This is the lightweight "contacts" surface (full contacts panel is later v2).
+function PeopleEngagingBlock({ signals }) {
+  return (
+    <div className="mt-7">
+      <SectionLabel>People engaging · {signals.length}</SectionLabel>
+      <div className="space-y-2">
+        {signals.map((s, i) => {
+          const attending = s.signal_type === 'event_attendance';
+          return (
+            <div key={i} className="rounded-xl border border-violet-100 bg-violet-50/40 px-3.5 py-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5 text-[13px] font-semibold text-zinc-800">
+                    {s.person_profile_url ? (
+                      <a href={s.person_profile_url} target="_blank" rel="noreferrer"
+                        className="truncate underline-offset-2 hover:text-indigo-600 hover:underline">
+                        {s.person_name || 'Unknown'}
+                      </a>
+                    ) : (
+                      <span className="truncate">{s.person_name || 'Unknown'}</span>
+                    )}
+                    {s.person_profile_url && <Icons.ext className="h-3 w-3 shrink-0 text-zinc-400" />}
+                  </div>
+                  {s.person_title && <div className="truncate text-[12px] text-zinc-500">{s.person_title}</div>}
+                </div>
+                <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-medium ring-1 ring-inset ${attending ? 'bg-fuchsia-50 text-fuchsia-700 ring-fuchsia-100' : 'bg-violet-50 text-violet-700 ring-violet-100'}`}>
+                  {attending ? 'Attending' : 'Engaged'}
+                </span>
+              </div>
+              {s.engaged_with && (
+                <div className="mt-1.5 truncate text-[11.5px] text-zinc-400" title={s.engaged_with}>
+                  {attending ? 'Event: ' : 'On: '}{s.engaged_with}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function CompanyDrawer({ company, onClose, onPromote, onDefer, onReject, onRestore }) {
   const open = !!company;
   return (
@@ -108,25 +152,7 @@ function CompanyDrawer({ company, onClose, onPromote, onDefer, onReject, onResto
                   </>
                 )}
               </div>
-              {company.abm_match && (
-                <div className={`mt-3 flex items-start gap-2 rounded-lg px-3 py-2 text-[12.5px] ring-1 ring-inset
-                  ${company.abm_match.tier === 'confirmed'
-                    ? 'bg-amber-50 text-amber-800 ring-amber-200'
-                    : 'bg-amber-50/60 text-amber-700 ring-amber-100'}`}>
-                  <Icons.sparkle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
-                  <div>
-                    <span className="font-semibold">
-                      {company.abm_match.tier === 'confirmed' ? 'On your ABM target list' : 'Possible ABM-list match'}
-                    </span>
-                    {' — '}{company.abm_match.target_name}
-                    {company.abm_match.source_sheet ? ` · ${company.abm_match.source_sheet}` : ''}
-                    {company.abm_match.state ? `, ${company.abm_match.state}` : ''}
-                    {company.abm_match.tier !== 'confirmed' && (
-                      <span className="mt-0.5 block text-amber-600/80">Name match only — verify it's the same organization.</span>
-                    )}
-                  </div>
-                </div>
-              )}
+              <AbmCallout match={company.abm_match} />
             </div>
 
             {/* Scroll body */}
@@ -166,10 +192,13 @@ function CompanyDrawer({ company, onClose, onPromote, onDefer, onReject, onResto
               </div>
 
               {/* Why discovered — non-job signals as a timeline; job postings
-                  collapse into the role-grouped hiring block below. */}
+                  collapse into the hiring block; social engagement collapses
+                  into the People-engaging block (one row per person). */}
               {(() => {
+                const isSocial = (s) => s.signal_type === 'social_engagement' || s.signal_type === 'event_attendance';
                 const jobs = company.signals.filter((s) => s.signal_type === 'job_posting');
-                const others = company.signals.filter((s) => s.signal_type !== 'job_posting');
+                const social = company.signals.filter(isSocial);
+                const others = company.signals.filter((s) => s.signal_type !== 'job_posting' && !isSocial(s));
                 return (
                   <>
                     {others.length > 0 && (
@@ -202,6 +231,7 @@ function CompanyDrawer({ company, onClose, onPromote, onDefer, onReject, onResto
                         </ol>
                       </div>
                     )}
+                    {social.length > 0 && <PeopleEngagingBlock signals={social} />}
                     {jobs.length > 0 && <JobHiringBlock jobs={jobs} />}
                   </>
                 );

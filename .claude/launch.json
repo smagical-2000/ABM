@@ -1,0 +1,18 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "discovery-ui",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "4173", "--directory", "web/discovery"],
+      "port": 4173,
+      "autoPort": false
+    },
+    {
+      "name": "discovery-app",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "python3 -m uvicorn auto_search.api.app:app --host 127.0.0.1 --port $PORT"],
+      "autoPort": true
+    }
+  ]
+}

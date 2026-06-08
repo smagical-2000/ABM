@@ -61,6 +61,17 @@ window.API = {
   abmSummary: () => http('/api/abm/summary'),
   abmMatches: () => http('/api/abm/matches'),
 
+  // ── social: monitored LinkedIn accounts (Apify post-engagement) ─────────────
+  socialTargets: () => http('/api/social/targets'),
+  addSocialTarget: (body) => http('/api/social/targets', {
+    method: 'POST', body: JSON.stringify(body),
+  }),
+  removeSocialTarget: (linkedin_url) => http('/api/social/targets', {
+    method: 'DELETE', body: JSON.stringify({ linkedin_url }),
+  }),
+  // Scrape active monitored accounts (last 24h) on demand. One run at a time.
+  runSocial: () => http('/api/social/run', { method: 'POST', body: '{}' }),
+
   // ── scoring phase ──────────────────────────────────────────────────────────
   frameworks: () => http('/api/scoring/frameworks'),
   scored: () => http('/api/scored'),

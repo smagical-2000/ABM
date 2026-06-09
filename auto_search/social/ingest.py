@@ -35,6 +35,11 @@ Qualify = Callable[[RawSignal], Awaitable[QualificationResult]]
 # Gate consulted ONLY before a NEW (paid) qualification. Returns a skip-reason
 # string to refuse (e.g. "budget_blocked" / "request_cap"), or None to allow.
 QualifyGate = Callable[[], str | None]
+# Looks up whether a company is on the ABM target list, by name (+ optional
+# domain). Returns a match (duck-typed: .target_name / .segment / .source_sheet)
+# or None. Injected so the social flow can treat a tracked account as
+# authoritative without importing the abm package.
+AbmLookup = Callable[[str, str | None], object | None]
 
 
 def _skip(reason: str) -> IngestResult:
@@ -48,6 +53,7 @@ async def ingest_engager(
     qualify_fn: Qualify = qualify,
     op: spend_guard.Operation | None = None,
     can_qualify: QualifyGate | None = None,
+    abm_lookup: AbmLookup | None = None,
 ) -> IngestResult:
     """Run one engager through the gauntlet and persist if it survives.
 
@@ -87,6 +93,29 @@ async def ingest_engager(
             accepted=True, action="appended" if added else "duplicate",
             reason="already_qualified", company_key=key, company_name=company)
 
+    # On the ABM target list → authoritative. We already chose to target this
+    # account, so a decision-maker engaging is itself the buying signal: save it
+    # as qualified WITHOUT the paid ICP qualifier (the list IS the qualification).
+    # A tracked target is never lost on an ICP miss, and we don't pay to
+    # re-research a company we picked. The panel's ABM badge does the highlight.
+    abm = abm_lookup(company, engager.company_website) if abm_lookup else None
+    if abm is not None:
+        verdict = QualificationResult(
+            qualified=True,
+            segment=_abm_segment(abm),
+            company_type="provider",
+            confidence=0.9,
+            reasoning=_abm_reason(abm, engager),
+            domain=engager.company_website,
+            decided_by="rules",
+        )
+        repo.save_candidate(CompanyCandidate(
+            company_key=key, company_name=company, signals=[signal], qualification=verdict))
+        logger.info("social ingest: %s → qualified via ABM target list (%s)",
+                    company, engager.source)
+        return IngestResult(accepted=True, action="qualified", reason="qualified",
+                            company_key=key, company_name=company)
+
     # New company → a PAID qualification. Let the caller veto first (budget/cap).
     if can_qualify is not None and (blocked := can_qualify()):
         return _skip(blocked)
@@ -107,3 +136,43 @@ async def ingest_engager(
     return IngestResult(
         accepted=True, action="qualified", reason=verdict.to_status(),
         company_key=key, company_name=company)
+
+
+# ── ABM-target verdict helpers ─────────────────────────────────────────
+
+# Map the ABM workbook's sheet/segment label onto the platform segment enum.
+# Ordered so a more specific hint wins (physician group before hospital).
+_SEGMENT_HINTS = (
+    ("payer", "payer"),
+    ("physician group", "specialty"),
+    ("specialt", "specialty"),
+    ("health system", "health_system"),
+    ("hospital", "health_system"),
+    ("rural", "health_system"),
+)
+
+
+def _abm_segment(match: object) -> str | None:
+    """Best-effort platform segment from the ABM target's sheet/segment label."""
+    label = (getattr(match, "segment", None) or getattr(match, "source_sheet", None) or "")
+    label = label.lower()
+    for hint, seg in _SEGMENT_HINTS:
+        if hint in label:
+            return seg
+    return None
+
+
+def _abm_reason(match: object, engager: Engager) -> str:
+    """The 'why qualified' line for an ABM-target engagement — names the person,
+    what they engaged with, and the list membership."""
+    who = engager.full_name or "A decision-maker"
+    title = f" ({engager.job_title})" if engager.job_title else ""
+    where = {
+        "competitor_post": "a competitor's LinkedIn post",
+        "magical_post": "a Magical post",
+        "event": f"the {engager.event_name or 'tracked'} event",
+    }.get(engager.source, "a tracked post")
+    verb = "is attending" if engager.source == "event" else "engaged with"
+    name = getattr(match, "target_name", None) or "your list"
+    return (f"On the ABM target list ({name}). {who}{title} {verb} {where} — "
+            "a tracked account showing intent.")

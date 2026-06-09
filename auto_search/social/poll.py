@@ -117,6 +117,7 @@ async def poll_targets(
     repo,
     op: spend_guard.Operation | None = None,
     can_qualify=None,
+    abm_lookup=None,
     gate=None,
     max_posts: int = MAX_POSTS_PER_TARGET,
     posted_limit_date: str | None = None,
@@ -199,7 +200,7 @@ async def poll_targets(
                 _tally_skip(summary, "magical_employee")
                 continue
             summary["decision_makers"] += 1
-            kw = {"repo": repo, "op": op, "can_qualify": can_qualify}
+            kw = {"repo": repo, "op": op, "can_qualify": can_qualify, "abm_lookup": abm_lookup}
             if qualify_fn is not None:
                 kw["qualify_fn"] = qualify_fn
             budget = max_enrich - enrich_count
@@ -277,6 +278,7 @@ async def poll_events(
     repo,
     op: spend_guard.Operation | None = None,
     can_qualify=None,
+    abm_lookup=None,
     gate=None,
     date_filter: str = "past-24h",
     max_posts: int = 25,
@@ -367,7 +369,7 @@ async def poll_events(
             comment_text=p.text,
             event_name=p.keyword or kw_label,
         )
-        kw = {"repo": repo, "op": op, "can_qualify": can_qualify}
+        kw = {"repo": repo, "op": op, "can_qualify": can_qualify, "abm_lookup": abm_lookup}
         if qualify_fn is not None:
             kw["qualify_fn"] = qualify_fn
         _tally_result(summary, await ingest_engager(engager, **kw))

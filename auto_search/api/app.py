@@ -406,6 +406,12 @@ def create_app() -> FastAPI:
     def _abm_index() -> AbmIndex | None:
         return getattr(app.state, "abm_index", None)
 
+    def _abm_social_lookup(name, domain=None):
+        """Is this company on the ABM target list? The social flow uses it to
+        treat a tracked account as authoritative — surfaced + highlighted without
+        paying the ICP qualifier (the list IS the qualification)."""
+        return match_one(_abm_index(), name=name, domain=domain)
+
     def _annotate_panel(companies: list[PanelCompany]) -> list[PanelCompany]:
         """Add measured qualify cost + ABM-target match to each panel company.
 
@@ -698,11 +704,13 @@ def create_app() -> FastAPI:
                 if do_accounts:
                     app.state.last_social = await poll_targets(
                         active, repo=app.state.repo, op=op, can_qualify=budget_gate,
+                        abm_lookup=_abm_social_lookup,
                         gate=ctrl.gate, posted_limit_date=since, max_enrich=cap)
                 if do_events and not ctrl.cancelled:
                     app.state.run_phase = f"Scanning event keywords ({window})"
                     app.state.last_events = await poll_events(
                         keywords, repo=app.state.repo, op=op, can_qualify=budget_gate,
+                        abm_lookup=_abm_social_lookup,
                         gate=ctrl.gate, date_filter=date_filter, max_enrich=cap)
             except Exception:  # noqa: BLE001 — a poll failure must not kill the worker
                 logger.exception("social poll failed")
@@ -888,11 +896,13 @@ def create_app() -> FastAPI:
                         app.state.run_phase = "Scanning LinkedIn engagement"
                         app.state.last_social = await poll_targets(
                             active, repo=app.state.repo, op=op, can_qualify=s_gate,
+                            abm_lookup=_abm_social_lookup,
                             gate=ctrl.gate, posted_limit_date=since, max_enrich=cap)
                     if keywords and not blocked and not ctrl.cancelled:
                         app.state.run_phase = "Scanning event keywords"
                         app.state.last_events = await poll_events(
                             keywords, repo=app.state.repo, op=op, can_qualify=s_gate,
+                            abm_lookup=_abm_social_lookup,
                             gate=ctrl.gate, date_filter="past-24h", max_enrich=cap)
                 except Exception:  # noqa: BLE001 — a social failure mustn't fail the run
                     logger.exception("social phase of discovery run failed")

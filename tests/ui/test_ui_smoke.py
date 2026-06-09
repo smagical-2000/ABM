@@ -166,8 +166,9 @@ def test_unknown_framework_drawer_does_not_white_screen(page):
     assert page.locator("text=Why discovered").count() > 0    # signal still shown
 
 
-def test_monitored_accounts_panel_opens(page):
+def test_social_listening_panel_opens(page):
     page.click("text=Discovery")
-    page.click("text=Monitored accounts")
-    page.wait_for_selector("text=Magical", timeout=10_000)
-    assert page.locator("text=getmagical").count() > 0 or page.locator("text=Magical").count() > 0
+    page.click("text=Social listening")
+    page.wait_for_selector("text=Event keywords", timeout=10_000)   # the panel's new section
+    assert page.locator("text=Monitored accounts").count() > 0       # accounts section header
+    assert page.locator("text=Back-fill").count() > 0                # the reframed scan

@@ -180,14 +180,15 @@ function JobRoleChip({ role, count }) {
 }
 window.JobRoleChip = JobRoleChip;
 
-// ── StackedHiringPill — the "🔥 N RCM roles open" signal-stacking headline ────
+// ── StackedHiringPill — the "N RCM roles open" signal-stacking headline ───────
 // Fires when a company has multiple open RCM reqs at once — the high-intent
 // "revenue-cycle build-out" the stacking gate qualifies on. Leads the chips so
-// a stacked account reads as hot at a glance; the per-role chips break it down.
+// a stacked account reads as high-priority at a glance (amber accent + icon, no
+// emoji); the per-role chips break it down.
 function StackedHiringPill({ count }) {
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-md bg-gradient-to-r from-amber-50 to-orange-50 px-2 py-1 text-[12px] font-semibold text-orange-700 ring-1 ring-inset ring-orange-200">
-      <span className="text-[13px] leading-none">🔥</span>
+    <span className="inline-flex items-center gap-1.5 rounded-md bg-amber-50 px-2 py-1 text-[12px] font-semibold text-amber-700 ring-1 ring-inset ring-amber-200">
+      <Icons.zap className="h-3.5 w-3.5 shrink-0 opacity-80" />
       <span className="tabular-nums">{count}</span>
       <span>RCM roles open</span>
     </span>

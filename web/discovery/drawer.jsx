@@ -25,7 +25,7 @@ function JobHiringBlock({ jobs }) {
   return (
     <div className="mt-7">
       <SectionLabel>
-        {stacked ? `🔥 ${jobs.length} RCM roles open` : `Open RCM roles · ${jobs.length}`}
+        {stacked ? `${jobs.length} RCM roles open` : `Open RCM roles · ${jobs.length}`}
       </SectionLabel>
       <div className="space-y-2.5">
         {groups.map((g, i) => (

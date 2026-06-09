@@ -384,7 +384,7 @@ function WatchStrip({ parked }) {
     <div className="border-b border-zinc-100 bg-zinc-50/70">
       <button onClick={() => setOpen((v) => !v)}
         className="flex w-full items-center gap-2.5 px-6 py-2.5 text-left text-[13px] text-zinc-500 transition-colors hover:bg-zinc-100/70">
-        <span className="text-[13px] leading-none">👀</span>
+        <Icons.clock className="h-4 w-4 shrink-0 text-zinc-400" />
         <span>
           Watching <span className="font-semibold tabular-nums text-zinc-700">{count}</span>{' '}
           {count === 1 ? 'company' : 'companies'} with a single open RCM role — they

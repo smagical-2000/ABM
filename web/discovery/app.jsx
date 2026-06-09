@@ -298,25 +298,30 @@ function RunActivityLog({ items }) {
   );
 }
 
-// ── RunConfigPopover — cost-controlled run setup (scope + per-source cap) ─────
-// The qualifier costs ~$0.12/company, so a run's spend is (sources × limit).
-// This little form makes that explicit before you spend: pick "Jobs only" or
-// "All sources", set the per-source company cap, see the worst-case estimate.
-function RunConfigPopover({ scope, onScope, limit, onLimit, onRun, onClose }) {
+// ── RunConfigPopover — the "Scan signals" control: scope, cost cap, and the
+// social-listening setup in one surface. One Run, one popover. The qualifier
+// costs ~$0.12/company, so worst-case spend is (sources × cap), shown before
+// you commit. "All signals" also mines the monitored LinkedIn accounts + event
+// keywords; "Jobs only" is the cheap focused pull.
+function RunConfigPopover({ scope, onScope, limit, onLimit, social, onManageSocial, onRun, onClose }) {
   const n = Number(limit) > 0 ? Number(limit) : 0;
   const sources = scope === 'jobs' ? 1 : 4;
   const effective = n || DEFAULT_RUN_LIMIT;     // blank → safe default, never "no cap"
   const estCompanies = effective * sources;
   const estCost = (estCompanies * 0.12).toFixed(2);
+  const includesSocial = scope === 'all';
+  const acc = (social && social.accounts) || 0;
+  const kw = (social && social.keywords) || 0;
   return (
-    <div className="absolute right-0 top-full z-40 mt-2 w-72 rounded-xl border border-zinc-200 bg-white p-3.5 shadow-xl shadow-zinc-900/10">
-      <div className="text-[13px] font-semibold text-zinc-800">Run discovery</div>
+    <div className="absolute right-0 top-full z-40 mt-2 w-80 rounded-xl border border-zinc-200 bg-white p-4 shadow-xl shadow-zinc-900/10">
+      <div className="text-[13px] font-semibold text-zinc-800">Scan signals</div>
       <p className="mt-0.5 text-[11.5px] leading-relaxed text-zinc-500">
-        Pulls the last 24h. Layoffs (WARN) runs only on the scheduled cron.
+        Pulls the last 24h of buying signals: hiring, leadership, M&A and funding
+        {includesSocial ? ', plus LinkedIn engagement and event attendees' : ''}. Layoffs run on the nightly cron.
       </p>
       <label className="mt-3 block text-[12px] font-medium text-zinc-600">Sources</label>
       <div className="mt-1 grid grid-cols-2 gap-1.5">
-        {[['jobs', 'Jobs only'], ['all', 'All sources']].map(([v, lbl]) => (
+        {[['jobs', 'Jobs only'], ['all', 'All signals']].map(([v, lbl]) => (
           <button key={v} onClick={() => onScope(v)}
             className={`rounded-lg px-2.5 py-1.5 text-[12.5px] font-medium ring-1 ring-inset transition-colors ${scope === v ? 'bg-indigo-600 text-white ring-indigo-600' : 'bg-white text-zinc-600 ring-zinc-200 hover:bg-zinc-50'}`}>
             {lbl}
@@ -329,14 +334,30 @@ function RunConfigPopover({ scope, onScope, limit, onLimit, onRun, onClose }) {
       <input type="number" min="1" max="500" value={limit}
         onChange={(e) => onLimit(e.target.value)}
         className="mt-1 w-full rounded-lg border border-zinc-200 px-3 py-1.5 text-[13px] text-zinc-800 focus:border-zinc-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200" />
-      <div className="mt-2.5 rounded-lg bg-zinc-50 px-3 py-2 text-[11.5px] text-zinc-500">
+      <div className="mt-2 rounded-lg bg-zinc-50 px-3 py-2 text-[11.5px] text-zinc-500">
         Up to <span className="font-semibold text-zinc-700">{estCompanies}</span> companies · est <span className="font-semibold text-zinc-700">${estCost}</span>
-        {n === 0 && <span className="text-zinc-400"> · blank uses default cap {DEFAULT_RUN_LIMIT}/source</span>}
+        {n === 0 && <span className="text-zinc-400"> · blank uses {DEFAULT_RUN_LIMIT}/source</span>}
+      </div>
+      {/* Social listening — the setup the "All signals" scan mines. */}
+      <div className="mt-3 overflow-hidden rounded-lg border border-zinc-200">
+        <div className="flex items-center justify-between gap-2 px-3 py-2">
+          <span className="inline-flex items-center gap-1.5 text-[12px] font-medium text-zinc-700">
+            <Icons.leadership className="h-3.5 w-3.5 text-indigo-500" />Social listening
+          </span>
+          <button onClick={onManageSocial}
+            className="text-[12px] font-medium text-indigo-600 transition-colors hover:text-indigo-700">Manage</button>
+        </div>
+        <div className="border-t border-zinc-100 bg-zinc-50/50 px-3 py-1.5 text-[11.5px] text-zinc-400">
+          {acc + kw === 0
+            ? 'No accounts or event keywords yet'
+            : `${acc} ${acc === 1 ? 'account' : 'accounts'} · ${kw} ${kw === 1 ? 'keyword' : 'keywords'}`}
+          {!includesSocial && acc + kw > 0 && <span> · included with All signals</span>}
+        </div>
       </div>
       <div className="mt-3 flex items-center justify-end gap-2">
         <button onClick={onClose} className="rounded-lg px-3 py-1.5 text-[12.5px] font-medium text-zinc-500 transition-colors hover:bg-zinc-100">Cancel</button>
         <button onClick={onRun} className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-[12.5px] font-medium text-white transition-colors hover:bg-indigo-700">
-          <Icons.zap className="h-3.5 w-3.5" />Run
+          <Icons.zap className="h-3.5 w-3.5" />Scan
         </button>
       </div>
     </div>
@@ -470,6 +491,7 @@ function App() {
   const [socialOpen, setSocialOpen] = useState(false);     // Monitored Accounts modal
   const [abmInfo, setAbmInfo] = useState(null);            // { total, uploaded_at, indexed }
   const [parked, setParked] = useState(null);             // jobs stacking watch list
+  const [socialInfo, setSocialInfo] = useState(null);     // { accounts, keywords } for the Scan popover
   const abmInputRef = useRef(null);
   const [tab, setTab] = useState('qualified');
   const [openKey, setOpenKey] = useState(null);
@@ -516,6 +538,19 @@ function App() {
   }
   useEffect(() => { loadAll(); }, []);
   useEffect(() => { window.API.abmSummary().then(setAbmInfo).catch(() => {}); }, []);
+  useEffect(() => { loadSocialInfo(); }, []);
+
+  // Counts for the Scan popover's social-listening summary; refreshed whenever
+  // the setup modal closes so an added account/keyword reflects immediately.
+  function loadSocialInfo() {
+    Promise.all([
+      window.API.socialTargets().catch(() => ({ targets: [] })),
+      window.API.eventKeywords().catch(() => ({ keywords: [] })),
+    ]).then(([t, k]) => setSocialInfo({
+      accounts: (t.targets || []).filter((x) => x.active !== false).length,
+      keywords: (k.keywords || []).filter((x) => x.active !== false).length,
+    })).catch(() => {});
+  }
 
   async function handleAbmUpload(file) {
     if (!file) return;
@@ -594,7 +629,10 @@ function App() {
     // run. Fall back to the default cap so a manual run is always bounded.
     const lim = Number(runLimit) > 0 ? Math.floor(Number(runLimit)) : DEFAULT_RUN_LIMIT;
     const body = { limit: lim };
-    if (runScope === 'jobs') body.sources = ['jobs'];
+    // Jobs-only is the cheap focused pull (no social); All signals scans the
+    // connectors + LinkedIn engagement + event attendees in one run.
+    if (runScope === 'jobs') { body.sources = ['jobs']; body.include_social = false; }
+    else body.include_social = true;
     try {
       const res = await window.API.runDiscovery(body);
       if (res && res.busy) { setDiscoRunning(false); pushToast('A discovery run is already in progress.', 'muted'); return; }
@@ -603,7 +641,7 @@ function App() {
         pushToast(`Discovery budget reached ($${res.month_discovery_cost} of $${res.discovery_budget}). Raise DISCOVERY_MONTHLY_BUDGET or wait.`, 'danger');
         return;
       }
-      const scopeLabel = body.sources ? 'jobs only' : 'all sources';
+      const scopeLabel = body.sources ? 'jobs only' : 'all signals';
       const capLabel = body.limit ? `, ${body.limit}/source` : '';
       pushToast(`Discovery running — ${scopeLabel}${capLabel}…`, 'success');
     } catch (e) { setDiscoRunning(false); pushToast(`Couldn't start: ${e.message}`, 'danger'); }
@@ -793,14 +831,15 @@ function App() {
                 ) : (
                   <div className="relative">
                     <button onClick={() => setConfirmRun((o) => !o)}
-                      title="Configure and run a discovery pull now (browserless sources)"
+                      title="Scan all signal sources for the last 24h"
                       className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-1.5 text-[13px] font-medium text-white shadow-sm transition-colors hover:bg-indigo-700">
-                      <Icons.zap className="h-4 w-4" />Run
+                      <Icons.zap className="h-4 w-4" />Scan signals
                     </button>
                     {confirmRun && (
                       <RunConfigPopover
                         scope={runScope} onScope={setRunScope}
                         limit={runLimit} onLimit={setRunLimit}
+                        social={socialInfo} onManageSocial={() => { setConfirmRun(false); setSocialOpen(true); }}
                         onRun={handleRunDiscovery} onClose={() => setConfirmRun(false)} />
                     )}
                   </div>
@@ -861,12 +900,6 @@ function App() {
                   className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[12.5px] font-medium text-zinc-600 transition-colors hover:bg-zinc-50">
                   <Icons.sparkle className="h-3.5 w-3.5 text-amber-500" />
                   {abmInfo && abmInfo.total ? `ABM list · ${abmInfo.total.toLocaleString()}` : 'Upload ABM list'}
-                </button>
-                <button onClick={() => setSocialOpen(true)}
-                  title="Social listening — manage the LinkedIn accounts + event keywords the Run scans"
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[12.5px] font-medium text-zinc-600 transition-colors hover:bg-zinc-50">
-                  <Icons.leadership className="h-3.5 w-3.5 text-indigo-500" />
-                  Social listening
                 </button>
                 {!loading && visibleCount > 0 && (
                   <label className="inline-flex cursor-pointer items-center gap-1.5 text-[13px] text-zinc-500 select-none">
@@ -951,7 +984,7 @@ function App() {
         <ConfirmDeleteModal count={selected.size}
           onCancel={() => setConfirmDelete(false)} onConfirm={handleDeleteSelected} />
       )}
-      {socialOpen && <SocialMonitor onClose={() => setSocialOpen(false)} pushToast={pushToast} />}
+      {socialOpen && <SocialMonitor onClose={() => { setSocialOpen(false); loadSocialInfo(); }} pushToast={pushToast} />}
       <ToastStack toasts={toasts} />
     </div>
   );

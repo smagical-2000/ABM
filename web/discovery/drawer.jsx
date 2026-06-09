@@ -51,7 +51,9 @@ function JobHiringBlock({ jobs }) {
                   )}
                   <span className="flex shrink-0 items-center gap-1.5 text-zinc-400">
                     {s.location && <span className="max-w-[110px] truncate">{s.location}</span>}
-                    {s.age && <span className="whitespace-nowrap">· {s.age}</span>}
+                    {s.observed_at && (
+                      <span className="whitespace-nowrap" title={formatDateTime(s.observed_at)}>· {relativeTime(s.observed_at)}</span>
+                    )}
                     {s.url && (
                       <a href={s.url} target="_blank" rel="noreferrer"
                         className="shrink-0 text-zinc-400 transition-colors hover:text-indigo-600"

@@ -196,9 +196,11 @@ function StackedHiringPill({ count }) {
 }
 window.StackedHiringPill = StackedHiringPill;
 
-// ── SignalChips — render a company's signals, grouping job postings by role ──
-// Non-job signals stay one-chip-each; job postings collapse to per-role counts
-// so a company hiring eight coders reads "8 Coder jobs", not eight rows.
+// ── SignalChips — one hiring headline per row, never two for the same jobs ───
+// Non-job signals stay one chip each. Job postings collapse to a SINGLE row
+// element: a stacked build-out (2+ open reqs) reads as the amber "N RCM roles
+// open" pill; a lone posting shows its role chip. The full per-role breakdown
+// ("Revenue Cycle · 3 openings") lives in the drawer, so the row stays clean.
 function SignalChips({ signals }) {
   const jobs = signals.filter((s) => s.signal_type === 'job_posting');
   const others = signals.filter((s) => s.signal_type !== 'job_posting');
@@ -207,8 +209,9 @@ function SignalChips({ signals }) {
   return (
     <>
       {others.map((s, i) => <SignalChip key={`o${i}`} signal={s} />)}
-      {stacked && <StackedHiringPill count={jobs.length} />}
-      {roles.map((r, i) => <JobRoleChip key={`j${i}`} role={r.role} count={r.items.length} />)}
+      {stacked
+        ? <StackedHiringPill count={jobs.length} />
+        : roles.map((r, i) => <JobRoleChip key={`j${i}`} role={r.role} count={r.items.length} />)}
     </>
   );
 }

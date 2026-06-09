@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import html
 import logging
+import os
 import re
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
@@ -26,6 +27,10 @@ logger = logging.getLogger(__name__)
 _GOOGLE_NEWS = "https://news.google.com/rss/search"
 _PARAMS = {"hl": "en-US", "gl": "US", "ceid": "US:en"}
 _UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+# Google News ranks by relevance, not recency, so without a window it returns
+# articles months old. The `when:Nd` operator bounds each query to recent news;
+# a touch wider than the UI's default 30-day view so that window always has stock.
+_RECENCY = os.getenv("NEWS_WHEN", "60d")
 
 # One tight query per topic. Quoted phrases keep it on-RCM; the OR-clauses widen
 # coverage without drifting into generic health/clinical news.
@@ -89,7 +94,8 @@ async def fetch_all(*, max_per_query: int = 15, timeout: float = 20.0) -> list[N
                                  headers={"User-Agent": _UA}) as client:
         for topic, query in QUERIES.items():
             try:
-                resp = await client.get(_GOOGLE_NEWS, params={"q": query, **_PARAMS})
+                resp = await client.get(
+                    _GOOGLE_NEWS, params={"q": f"{query} when:{_RECENCY}", **_PARAMS})
                 resp.raise_for_status()
             except Exception as e:  # noqa: BLE001 — one query must not kill the pull
                 logger.warning("news fetch failed for %s: %s", topic, e)

@@ -30,6 +30,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Json
 from psycopg_pool import ConnectionPool
 
+from auto_search.job_stacking import PARK_TTL_DAYS
 from auto_search.models import CompanyCandidate, RawSignal
 from auto_search.normalize import normalize_keyword as _keyword_key
 from auto_search.normalize import normalize_linkedin_url
@@ -501,6 +502,58 @@ class PostgresRepository:
                                (_keyword_key(keyword),))
             return cur.rowcount > 0
 
+    # ── stacking watch ledger ─────────────────────────────────────────
+
+    def upsert_parked(self, record: dict) -> dict:
+        with self._pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                """INSERT INTO parked_companies
+                     (company_key, name, domain, role, roles, postings, state,
+                      city, sample_url, sample_title, observed_at, last_seen_at)
+                   VALUES (%(key)s, %(name)s, %(domain)s, %(role)s, %(roles)s,
+                           %(postings)s, %(state)s, %(city)s, %(url)s, %(title)s,
+                           %(observed)s, now())
+                   ON CONFLICT (company_key) DO UPDATE SET
+                       name = EXCLUDED.name, domain = EXCLUDED.domain,
+                       role = EXCLUDED.role, roles = EXCLUDED.roles,
+                       postings = EXCLUDED.postings, state = EXCLUDED.state,
+                       city = EXCLUDED.city, sample_url = EXCLUDED.sample_url,
+                       sample_title = EXCLUDED.sample_title,
+                       observed_at = EXCLUDED.observed_at, last_seen_at = now()
+                   RETURNING *""",
+                {"key": record["company_key"],
+                 "name": record.get("name") or record["company_key"],
+                 "domain": record.get("domain"), "role": record.get("role"),
+                 "roles": Json(record.get("roles") or []),
+                 "postings": record.get("postings", 1), "state": record.get("state"),
+                 "city": record.get("city"), "url": record.get("sample_url"),
+                 "title": record.get("sample_title"),
+                 "observed": record.get("observed_at")},
+            ).fetchone()
+            # Opportunistic prune so the ledger can't grow without bound.
+            conn.execute(
+                "DELETE FROM parked_companies "
+                "WHERE last_seen_at < now() - make_interval(days => %s)",
+                (PARK_TTL_DAYS,),
+            )
+        return _parked_row(row)
+
+    def parked_companies(self) -> list[dict]:
+        # Hide companies that have since been decided by ANY path (graduated)
+        # and anything past the TTL — no write needed on read.
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                """SELECT p.* FROM parked_companies p
+                     LEFT JOIN discovery_companies d
+                            ON d.normalized_name = p.company_key
+                           AND d.icp_status = ANY(%s)
+                    WHERE p.last_seen_at >= now() - make_interval(days => %s)
+                      AND d.normalized_name IS NULL
+                    ORDER BY p.last_seen_at DESC""",
+                (list(_DECIDED_STATUSES), PARK_TTL_DAYS),
+            ).fetchall()
+        return [_parked_row(r) for r in rows]
+
     def recent_decisions(self, *, limit: int = 20) -> list[dict]:
         """Most recently decided companies (any verdict) — drives the run log.
 
@@ -572,3 +625,17 @@ def _to_row(company: dict, signals: list[dict]) -> dict:
 
 def _iso(dt) -> str | None:
     return dt.isoformat() if isinstance(dt, datetime) else dt
+
+
+def _parked_row(r: dict) -> dict:
+    """Shape a parked_companies row for the API (JSON-safe)."""
+    return {
+        "company_key": r["company_key"], "name": r["name"],
+        "domain": r.get("domain"), "role": r.get("role"),
+        "roles": r.get("roles") or [], "postings": r.get("postings"),
+        "state": r.get("state"), "city": r.get("city"),
+        "sample_url": r.get("sample_url"), "sample_title": r.get("sample_title"),
+        "observed_at": r.get("observed_at"),
+        "first_parked_at": _iso(r.get("first_parked_at")),
+        "last_seen_at": _iso(r.get("last_seen_at")),
+    }

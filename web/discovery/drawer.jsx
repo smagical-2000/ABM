@@ -21,9 +21,12 @@ function SectionLabel({ children }) {
 // Volume is the headline (count = pain intensity); each opening links out.
 function JobHiringBlock({ jobs }) {
   const groups = groupRoleItems(jobs);
+  const stacked = jobs.length >= 2;          // a stacked revenue-cycle build-out
   return (
     <div className="mt-7">
-      <SectionLabel>Open RCM roles · {jobs.length}</SectionLabel>
+      <SectionLabel>
+        {stacked ? `🔥 ${jobs.length} RCM roles open` : `Open RCM roles · ${jobs.length}`}
+      </SectionLabel>
       <div className="space-y-2.5">
         {groups.map((g, i) => (
           <div key={i} className="rounded-xl border border-emerald-100 bg-emerald-50/40 px-3.5 py-3">

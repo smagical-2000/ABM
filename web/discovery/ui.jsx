@@ -180,6 +180,21 @@ function JobRoleChip({ role, count }) {
 }
 window.JobRoleChip = JobRoleChip;
 
+// ── StackedHiringPill — the "🔥 N RCM roles open" signal-stacking headline ────
+// Fires when a company has multiple open RCM reqs at once — the high-intent
+// "revenue-cycle build-out" the stacking gate qualifies on. Leads the chips so
+// a stacked account reads as hot at a glance; the per-role chips break it down.
+function StackedHiringPill({ count }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-md bg-gradient-to-r from-amber-50 to-orange-50 px-2 py-1 text-[12px] font-semibold text-orange-700 ring-1 ring-inset ring-orange-200">
+      <span className="text-[13px] leading-none">🔥</span>
+      <span className="tabular-nums">{count}</span>
+      <span>RCM roles open</span>
+    </span>
+  );
+}
+window.StackedHiringPill = StackedHiringPill;
+
 // ── SignalChips — render a company's signals, grouping job postings by role ──
 // Non-job signals stay one-chip-each; job postings collapse to per-role counts
 // so a company hiring eight coders reads "8 Coder jobs", not eight rows.
@@ -187,9 +202,11 @@ function SignalChips({ signals }) {
   const jobs = signals.filter((s) => s.signal_type === 'job_posting');
   const others = signals.filter((s) => s.signal_type !== 'job_posting');
   const roles = groupRoleItems(jobs);
+  const stacked = jobs.length >= 2;          // multiple open RCM reqs = a build-out
   return (
     <>
       {others.map((s, i) => <SignalChip key={`o${i}`} signal={s} />)}
+      {stacked && <StackedHiringPill count={jobs.length} />}
       {roles.map((r, i) => <JobRoleChip key={`j${i}`} role={r.role} count={r.items.length} />)}
     </>
   );

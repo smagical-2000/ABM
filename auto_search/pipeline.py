@@ -46,6 +46,16 @@ AlreadyQualified = Callable[[str], bool]
 # qualifier only ever runs on companies with a real signal. Shape, not class.
 SignalPrefilter = Callable[[list[RawSignal]], Awaitable[list[RawSignal]]]
 
+# An optional per-company predicate, checked AFTER grouping and BEFORE the
+# (expensive) company qualifier: return True to DEFER the company — skip
+# qualification this run without marking it decided, so it's re-evaluated next
+# run. The jobs flow uses this for signal-stacking (park a single low-tier
+# posting until the company stacks). Connector-agnostic: the pipeline doesn't
+# know WHY a company is deferred, only that it should hold. `on_defer` is the
+# matching side-effect hook (e.g. persist the company to a watch ledger).
+DeferCompany = Callable[[str, list[RawSignal]], bool]
+OnDefer = Callable[[str, list[RawSignal]], None]
+
 
 async def collect_unique_companies(
     connector: SignalConnector,
@@ -98,6 +108,8 @@ async def run(
     limit: int | None = None,
     skip_already_qualified: AlreadyQualified | None = None,
     prefilter: SignalPrefilter | None = None,
+    defer: DeferCompany | None = None,
+    on_defer: OnDefer | None = None,
     on_plan: Callable[[int], None] | None = None,
     gate: RunGate | None = None,
 ) -> AsyncIterator[CompanyCandidate]:
@@ -108,12 +120,16 @@ async def run(
       2. Group by company (within-run dedup).
       3. Optionally skip companies already decided in a PRIOR run
          (cross-run dedup) — pass a repo's `already_qualified` here.
-      4. Qualify each remaining company once (website research via Claude).
-      5. Yield a CompanyCandidate (company + signals + verdict).
+      4. Optionally `defer` a company (skip qualify WITHOUT marking it decided,
+         so it's re-checked next run) — the jobs stacking gate; `on_defer`
+         records it to a watch ledger.
+      5. Qualify each remaining company once (website research via Claude).
+      6. Yield a CompanyCandidate (company + signals + verdict).
 
     The two dedup layers together guarantee one Claude call per company,
     ever: grouping handles repeats within a run, `skip_already_qualified`
-    handles repeats across runs. Callers persist/display the candidates;
+    handles repeats across runs. `defer` is orthogonal — a not-yet decision
+    that costs nothing and recurs. Callers persist/display the candidates;
     the pipeline has no opinion on storage.
     """
     groups = await collect_unique_companies(
@@ -125,8 +141,9 @@ async def run(
     # expensive per-company Claude calls run.
     if on_plan is not None:
         planned = sum(
-            1 for key in groups
-            if skip_already_qualified is None or not skip_already_qualified(key)
+            1 for key, sigs in groups.items()
+            if (skip_already_qualified is None or not skip_already_qualified(key))
+            and not (defer is not None and defer(key, sigs))
         )
         try:
             on_plan(planned)
@@ -134,6 +151,7 @@ async def run(
             logger.exception("on_plan hook failed")
 
     skipped = 0
+    deferred = 0
     for key, signals in groups.items():
         if skip_already_qualified is not None and skip_already_qualified(key):
             skipped += 1
@@ -147,6 +165,19 @@ async def run(
                         "remaining skipped", key, 0)
             break
 
+        # Cost gate: a connector may DEFER a company (e.g. jobs signal-stacking
+        # parks a single low-tier posting). Deferred companies aren't qualified
+        # and aren't marked decided, so they're re-evaluated next run.
+        if defer is not None and defer(key, signals):
+            deferred += 1
+            if on_defer is not None:
+                try:
+                    on_defer(key, signals)
+                except Exception:  # noqa: BLE001 — watch ledger must not break a run
+                    logger.exception("on_defer hook failed for %s", key)
+            logger.debug("defer (park) company: %s", key)
+            continue
+
         representative = max(signals, key=lambda s: s.signal_strength)
         verdict = await qualify(representative)
         yield CompanyCandidate(
@@ -158,3 +189,5 @@ async def run(
 
     if skipped:
         logger.info("skipped %d companies already qualified in prior runs", skipped)
+    if deferred:
+        logger.info("deferred %d companies (parked, watched for stacking)", deferred)

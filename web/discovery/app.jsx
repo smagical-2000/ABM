@@ -371,6 +371,52 @@ function ConfirmDeleteModal({ count, onCancel, onConfirm }) {
   );
 }
 
+// ── WatchStrip — subtle "watching N single-RCM-role companies" banner ────────
+// The jobs stacking gate parks any company with only ONE open standard RCM role
+// (not enough to spend a qualify on). They're not lost — re-checked every run
+// and auto-qualified the moment a second role opens. Kept deliberately quiet: a
+// one-line strip that expands to a compact list, so it informs without noise.
+function WatchStrip({ parked }) {
+  const [open, setOpen] = useState(false);
+  if (!parked || !parked.count) return null;
+  const { count, companies = [], stack_min = 2 } = parked;
+  return (
+    <div className="border-b border-zinc-100 bg-zinc-50/70">
+      <button onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2.5 px-6 py-2.5 text-left text-[13px] text-zinc-500 transition-colors hover:bg-zinc-100/70">
+        <span className="text-[13px] leading-none">👀</span>
+        <span>
+          Watching <span className="font-semibold tabular-nums text-zinc-700">{count}</span>{' '}
+          {count === 1 ? 'company' : 'companies'} with a single open RCM role — they
+          auto-qualify the moment {stack_min <= 2 ? 'a second' : 'another'} role opens.
+        </span>
+        <Icons.chevron className={`ml-auto h-4 w-4 shrink-0 text-zinc-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="max-h-56 overflow-y-auto border-t border-zinc-100 px-6 py-1.5">
+          <ul className="divide-y divide-zinc-100">
+            {companies.map((c) => (
+              <li key={c.company_key} className="flex items-center justify-between gap-3 py-1.5 text-[12.5px]">
+                <span className="min-w-0 truncate font-medium text-zinc-700">{c.name}</span>
+                <span className="flex shrink-0 items-center gap-2 text-zinc-400">
+                  {c.role && <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[11px] font-medium text-zinc-500">{c.role}</span>}
+                  {c.state && <span>{c.state}</span>}
+                  {c.sample_url && (
+                    <a href={c.sample_url} target="_blank" rel="noreferrer"
+                      className="text-zinc-400 transition-colors hover:text-indigo-600" title="View the open role">
+                      <Icons.ext className="h-3.5 w-3.5" />
+                    </a>
+                  )}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // App shell: Discovery | Scored. Discovery is unchanged; Scored is wired to the
 // scoring API. Promote moves a company from Discovery into Scored.
@@ -423,6 +469,7 @@ function App() {
   const [abmFilter, setAbmFilter] = useState('all');       // 'all' | 'match' | 'confirmed'
   const [socialOpen, setSocialOpen] = useState(false);     // Monitored Accounts modal
   const [abmInfo, setAbmInfo] = useState(null);            // { total, uploaded_at, indexed }
+  const [parked, setParked] = useState(null);             // jobs stacking watch list
   const abmInputRef = useRef(null);
   const [tab, setTab] = useState('qualified');
   const [openKey, setOpenKey] = useState(null);
@@ -459,6 +506,8 @@ function App() {
       ].sort((a, b) => new Date(b.qualified_at || b.first_seen_at) - new Date(a.qualified_at || a.first_seen_at));
       setCompanies(tagged);
       setStats(s);
+      // Best-effort: the stacking watch list (parked single-standard companies).
+      window.API.parked().then(setParked).catch(() => {});
     } catch (e) {
       if (!soft) pushToast(`Couldn't load: ${e.message}`, 'danger');
     } finally {
@@ -861,6 +910,8 @@ function App() {
             )}
 
             {!loading && urgent && tab === 'qualified' && <AutoScoreBanner remainingMs={remainingMs} queued={queuedCount} />}
+
+            {!loading && tab === 'qualified' && <WatchStrip parked={parked} />}
 
             {loading ? (
               <div className="animate-pulse">{Array.from({ length: 4 }).map((_, i) => <SkeletonRow key={i} />)}</div>

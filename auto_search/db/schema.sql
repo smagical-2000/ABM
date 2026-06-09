@@ -175,3 +175,28 @@ CREATE TABLE IF NOT EXISTS event_keywords (
     active        BOOLEAN NOT NULL DEFAULT TRUE,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Stacking watch ledger: companies the jobs gate PARKED — a single open
+-- "standard" RCM posting, not yet enough to spend the company qualifier. They
+-- are NOT in discovery_companies (never qualified); this is a lightweight
+-- watch list so a parked company isn't lost and auto-qualifies once it stacks
+-- (a 2nd open role) on a later run. Display-only — the qualify decision never
+-- reads it back. Rows are pruned by last_seen_at TTL and hidden once the
+-- company graduates into discovery_companies.
+CREATE TABLE IF NOT EXISTS parked_companies (
+    company_key     TEXT PRIMARY KEY,          -- normalized company name
+    name            TEXT NOT NULL,
+    domain          TEXT,
+    role            TEXT,                       -- the single standard role bucket
+    roles           JSONB NOT NULL DEFAULT '[]',
+    postings        INTEGER NOT NULL DEFAULT 1,
+    state           TEXT,
+    city            TEXT,
+    sample_url      TEXT,                       -- a posting link for the watch UI
+    sample_title    TEXT,
+    observed_at     TEXT,                       -- posting timestamp (display only)
+    first_parked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_parked_last_seen
+    ON parked_companies (last_seen_at DESC);

@@ -36,7 +36,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from auto_search import discovery_runner
+from auto_search import discovery_runner, job_stacking
 from auto_search.abm import (
     AbmIndex,
     TargetAccount,
@@ -757,6 +757,22 @@ def create_app() -> FastAPI:
                 "last_run": getattr(app.state, "last_discovery", None),
                 "last_social": getattr(app.state, "last_social", None),
                 "last_events": getattr(app.state, "last_events", None)}
+
+    @app.get("/api/discovery/parked")
+    def get_parked():
+        """Jobs stacking watch list: companies with a single open STANDARD RCM
+        role — parked (not yet qualified to save cost), re-checked every run,
+        and auto-qualified once a second role opens. Drives the subtle
+        "watching N" strip. Defensive: a repo without the ledger → empty watch.
+        """
+        repo = app.state.repo
+        companies = repo.parked_companies() if hasattr(repo, "parked_companies") else []
+        return {
+            "companies": companies,
+            "count": len(companies),
+            "stack_min": job_stacking.STACK_MIN_STANDARD,
+            "window_days": discovery_runner.JOBS_WINDOW_DAYS,
+        }
 
     @app.post("/api/discovery/run")
     async def discovery_run(request: Request):

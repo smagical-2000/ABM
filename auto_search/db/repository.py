@@ -28,6 +28,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
+from auto_search.job_stacking import PARK_TTL_DAYS
 from auto_search.models import CompanyCandidate, RawSignal
 from auto_search.normalize import normalize_keyword as _keyword_key
 from auto_search.normalize import normalize_linkedin_url
@@ -190,6 +191,28 @@ class DiscoveryRepository(Protocol):
 
     def delete_event_keyword(self, keyword: str) -> bool:
         """Remove an event keyword; True if one was removed."""
+        ...
+
+    # -- stacking watch ledger (jobs cost gate) --
+
+    def upsert_parked(self, record: dict) -> dict:
+        """Add/refresh a stacking-parked company in the watch ledger.
+
+        Keyed by `company_key`. Stamps `first_parked_at` on insert and
+        `last_seen_at` on every call, so the watch list can show "seen N days
+        ago" and prune companies that stopped hiring. Idempotent.
+        """
+        ...
+
+    def parked_companies(self) -> list[dict]:
+        """The watch list: companies the jobs gate parked (a single standard
+        RCM posting), most-recently-seen first.
+
+        Self-correcting: excludes any company now decided in the discovery store
+        (it graduated/qualified by any path) and drops entries older than the
+        TTL, so a parked company that later qualifies or goes quiet falls off
+        without an explicit delete.
+        """
         ...
 
 
@@ -603,6 +626,54 @@ class JsonFileRepository:
         tmp.write_text(json.dumps({"keywords": kept}, default=str))
         tmp.replace(p)
         return True
+
+    # -- stacking watch ledger (sidecar, mirrors social targets) --
+
+    def _parked_path(self) -> Path:
+        return self._path.with_name("parked_companies.json")
+
+    def _parked(self) -> list[dict]:
+        p = self._parked_path()
+        if not p.exists():
+            return []
+        try:
+            return json.loads(p.read_text()).get("companies", [])
+        except json.JSONDecodeError:
+            return []
+
+    def _write_parked(self, rows: list[dict]) -> None:
+        p = self._parked_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(json.dumps({"companies": rows}, default=str))
+        tmp.replace(p)
+
+    def upsert_parked(self, record: dict) -> dict:
+        rows = self._parked()
+        key = record["company_key"]
+        now = datetime.now(UTC).isoformat()
+        row = next((r for r in rows if r.get("company_key") == key), None)
+        if row is None:
+            row = {"company_key": key, "first_parked_at": now}
+            rows.append(row)
+        row.update({k: v for k, v in record.items() if k != "company_key"})
+        row["last_seen_at"] = now
+        self._write_parked(rows)
+        return row
+
+    def parked_companies(self) -> list[dict]:
+        rows = self._parked()
+        # ISO-8601 UTC strings compare chronologically, so a lexical cutoff works.
+        cutoff = (datetime.now(UTC) - timedelta(days=PARK_TTL_DAYS)).isoformat()
+        fresh = [
+            r for r in rows
+            if (r.get("last_seen_at") or "") >= cutoff
+            and not self.already_qualified(r.get("company_key", ""))
+        ]
+        if len(fresh) != len(rows):       # prune graduated/stale entries in place
+            self._write_parked(fresh)
+        fresh.sort(key=lambda r: r.get("last_seen_at") or "", reverse=True)
+        return fresh
 
     # -- internals --
 

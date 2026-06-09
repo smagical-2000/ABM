@@ -20,6 +20,7 @@ import socket
 import subprocess
 import time
 import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -58,6 +59,42 @@ VALUES
 ON CONFLICT (account_id) DO UPDATE SET
   discovery_signals=EXCLUDED.discovery_signals, scored_at=EXCLUDED.scored_at,
   total=EXCLUDED.total, tier_band=EXCLUDED.tier_band, dimensions=EXCLUDED.dimensions;
+
+-- Discovery: a STACKED company (2 open RCM roles) → exercises the
+-- "🔥 N RCM roles open" headline pill on the row + drawer.
+INSERT INTO discovery_companies
+  (normalized_name, display_name, domain, icp_status, segment, confidence,
+   reasoning, hq_state, qualified_at, first_seen_at)
+VALUES
+  ('uistackhealth','UI Stack Health System','uistack.example','qualified',
+   'health_system',0.92,'Stacked revenue-cycle build-out.','TX',
+   now()-interval '2 hours', now()-interval '2 hours')
+ON CONFLICT (normalized_name) DO UPDATE SET
+  icp_status=EXCLUDED.icp_status, qualified_at=EXCLUDED.qualified_at;
+
+INSERT INTO discovery_signals
+  (company_id, source, signal_type, source_external_id, summary,
+   signal_strength, observed_at, payload)
+SELECT dc.id, 'indeed', 'job_posting', s.ext, s.summ, 0.72,
+       now()-interval '1 day', s.pl::jsonb
+FROM discovery_companies dc,
+     (VALUES
+       ('uitest-biller','Hiring: Medical Biller',
+        '{"role":"Biller","tier":"standard","job_title":"Medical Biller","job_url":"https://example.com/b"}'),
+       ('uitest-coder','Hiring: Medical Coder',
+        '{"role":"Coder","tier":"standard","job_title":"Medical Coder","job_url":"https://example.com/c"}')
+     ) AS s(ext, summ, pl)
+WHERE dc.normalized_name='uistackhealth'
+ON CONFLICT (source, source_external_id) DO NOTHING;
+
+-- Stacking watch list: a single open standard role → exercises the WatchStrip.
+INSERT INTO parked_companies
+  (company_key, name, domain, role, roles, postings, state, sample_url,
+   sample_title, last_seen_at)
+VALUES
+  ('uisoloclinic','UI Solo Clinic','uisolo.example','Coder','["Coder"]',1,'OH',
+   'https://example.com/solo','Medical Coder', now())
+ON CONFLICT (company_key) DO UPDATE SET last_seen_at=EXCLUDED.last_seen_at;
 """
 
 
@@ -71,6 +108,10 @@ def _free_port() -> int:
 
 @pytest.fixture(scope="module")
 def base_url():
+    # Ensure every table exists (incl. parked_companies) before seeding — the
+    # local DB may predate newer tables; schema.sql is all CREATE IF NOT EXISTS.
+    schema = Path(__file__).resolve().parents[2] / "auto_search" / "db" / "schema.sql"
+    subprocess.run(["psql", DB, "-f", str(schema)], capture_output=True, text=True)
     # Seed the local DB (best-effort; skip the whole module if no local Postgres).
     seed = subprocess.run(["psql", DB, "-c", _SEED_SQL], capture_output=True, text=True)
     if seed.returncode != 0:
@@ -164,6 +205,22 @@ def test_unknown_framework_drawer_does_not_white_screen(page):
     page.wait_for_selector("text=Re-score", timeout=10_000)   # drawer opened
     assert page.locator("text=Magical").count() > 0           # app still mounted
     assert page.locator("text=Why discovered").count() > 0    # signal still shown
+
+
+def test_stacked_hiring_pill_and_watch_strip(page):
+    """Jobs signal-stacking UI: a company with 2 open RCM roles shows the
+    '🔥 N RCM roles open' headline, and the parked single-role company surfaces
+    in the subtle (expandable) watch strip — all without console errors."""
+    page.click("text=Discovery")
+    page.wait_for_selector("text=UI Stack Health System", timeout=10_000)
+    assert page.locator("text=RCM roles open").count() > 0     # the 🔥 stacked pill
+    # The watch strip: parked single-standard-role companies.
+    page.wait_for_selector("text=Watching", timeout=10_000)
+    page.click("text=Watching")                                # expand the list
+    assert page.locator("text=UI Solo Clinic").count() > 0
+    real = [e for e in page.console_errors
+            if not any(x in e.lower() for x in ("favicon", "tailwind", "cdn", "font"))]
+    assert not real, f"console errors: {real[:5]}"
 
 
 def test_social_listening_panel_opens(page):

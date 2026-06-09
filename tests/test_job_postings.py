@@ -11,7 +11,10 @@ import pytest
 
 from auto_search.clients.apify_jobs import IndeedJob, LinkedInJob
 from auto_search.connectors.job_postings import (
+    CORE,
     ESSENTIAL_RCM_TITLES,
+    STANDARD,
+    EssentialTitle,
     JobPostingsConnector,
     _domain_from_url,
     _indeed_domain,
@@ -74,7 +77,7 @@ class FakeClient:
 
 class TestJobToSignal:
     def test_clean_coder_maps(self):
-        sig, reason = _job_to_signal(_job(), "Coder", 0.78, SINCE, "ik-1")
+        sig, reason = _job_to_signal(_job(), "Coder", 0.78, STANDARD, SINCE, "ik-1")
         assert sig is not None, reason
         assert sig.signal_type == "job_posting"
         assert sig.source == "indeed"
@@ -87,42 +90,56 @@ class TestJobToSignal:
         assert sig.summary == "Hiring: Certified Medical Coder — Cleveland, TN"
 
     def test_missing_company_dropped(self):
-        sig, reason = _job_to_signal(_job(companyName=""), "Coder", 0.78, SINCE, "x")
+        sig, reason = _job_to_signal(_job(companyName=""), "Coder", 0.78, STANDARD, SINCE, "x")
         assert sig is None and reason == "missing_company"
 
     def test_off_topic_title_dropped(self):
         sig, reason = _job_to_signal(
-            _job(title="Staff Accountant"), "Coder", 0.78, SINCE, "x")
+            _job(title="Staff Accountant"), "Coder", 0.78, STANDARD, SINCE, "x")
         assert sig is None and reason == "not_rcm_title"
 
     def test_before_window_dropped(self):
         sig, reason = _job_to_signal(
-            _job(datePublished="2026-05-20"), "Coder", 0.78, SINCE, "x")
+            _job(datePublished="2026-05-20"), "Coder", 0.78, STANDARD, SINCE, "x")
         assert sig is None and reason == "before_window"
 
     def test_same_day_kept_despite_date_granularity(self):
         # Indeed dates have no clock; a posting dated == since.date() must pass.
         sig, reason = _job_to_signal(
-            _job(datePublished="2026-06-01"), "Coder", 0.78, SINCE, "x")
+            _job(datePublished="2026-06-01"), "Coder", 0.78, STANDARD, SINCE, "x")
         assert sig is not None, reason
 
     def test_non_us_dropped(self):
         sig, reason = _job_to_signal(
             _job(location={"countryCode": "CA", "city": "Toronto"}),
-            "Coder", 0.78, SINCE, "x")
+            "Coder", 0.78, STANDARD, SINCE, "x")
         assert sig is None and reason == "non_us"
 
     def test_domain_falls_back_to_email(self):
         sig, _ = _job_to_signal(
             _job(companyLinks=None, emails=["careers@acmehealth.com"]),
-            "Biller", 0.8, SINCE, "x")
+            "Biller", 0.8, STANDARD, SINCE, "x")
         assert sig.company_domain_raw == "acmehealth.com"
 
     def test_job_board_email_domain_rejected(self):
         sig, _ = _job_to_signal(
             _job(companyLinks=None, emails=["hr@acme.jobs"]),
-            "Biller", 0.8, SINCE, "x")
+            "Biller", 0.8, STANDARD, SINCE, "x")
         assert sig.company_domain_raw is None
+
+
+class TestTiers:
+    def test_every_title_has_a_known_tier(self):
+        assert all(t.tier in (CORE, STANDARD) for t in ESSENTIAL_RCM_TITLES)
+        assert any(t.tier == CORE for t in ESSENTIAL_RCM_TITLES)
+        assert any(t.tier == STANDARD for t in ESSENTIAL_RCM_TITLES)
+
+    def test_signal_payload_carries_tier(self):
+        # The stacking gate reads payload["tier"], so every posting must carry it.
+        core, _ = _job_to_signal(_job(), "Prior Auth", 0.88, CORE, SINCE, "ik-9")
+        assert core.payload["tier"] == CORE
+        std, _ = _linkedin_to_signal(_lijob(), "Coder", 0.72, STANDARD, SINCE, "li-9")
+        assert std.payload["tier"] == STANDARD
 
 
 # ── small helpers ─────────────────────────────────────────────────────
@@ -169,8 +186,8 @@ async def test_connector_buckets_and_dedups_across_titles():
         '"medical coder"': [coder],
         '"medical biller"': [biller, coder],   # coder re-appears under biller search
     })
-    titles = [('"medical coder"', "Coder", 0.78),
-              ('"medical biller"', "Biller", 0.80)]
+    titles = [EssentialTitle('"medical coder"', "Coder", 0.78, STANDARD),
+              EssentialTitle('"medical biller"', "Biller", 0.80, STANDARD)]
     conn = JobPostingsConnector(client=fake, titles=titles, max_rows=5)
 
     out = [s async for s in conn.pull(since=SINCE)]
@@ -191,7 +208,8 @@ async def test_connector_volume_is_count_of_signals():
             for i in range(3)]
     fake = FakeClient({'"medical coder"': jobs})
     conn = JobPostingsConnector(
-        client=fake, titles=[('"medical coder"', "Coder", 0.78)], max_rows=10)
+        client=fake, titles=[EssentialTitle('"medical coder"', "Coder", 0.78, STANDARD)],
+        max_rows=10)
 
     out = [s async for s in conn.pull(since=SINCE)]
     assert len(out) == 3
@@ -226,7 +244,7 @@ class TestLinkedIn:
         assert _split_loc("New York, NY 10001") == ("New York", "NY")
 
     def test_linkedin_maps(self):
-        sig, reason = _linkedin_to_signal(_lijob(), "Coder", 0.78, SINCE, "li-1")
+        sig, reason = _linkedin_to_signal(_lijob(), "Coder", 0.78, STANDARD, SINCE, "li-1")
         assert sig is not None, reason
         assert sig.source == "linkedin"
         assert sig.signal_type == "job_posting"
@@ -238,7 +256,7 @@ class TestLinkedIn:
 
     def test_linkedin_off_topic_dropped(self):
         sig, reason = _linkedin_to_signal(
-            _lijob(title="Software Engineer"), "Coder", 0.78, SINCE, "x")
+            _lijob(title="Software Engineer"), "Coder", 0.78, STANDARD, SINCE, "x")
         assert sig is None and reason == "not_rcm_title"
 
 
@@ -269,8 +287,10 @@ async def test_cross_board_dedup_keeps_unique_drops_crosslisted():
         indeed_by_q={'"medical coder"': [indeed_coder]},
         linkedin_by_q={"medical coder": [li_same, li_other]},
     )
+    # CORE title → searched on BOTH boards, so cross-board dedup is exercised.
     conn = JobPostingsConnector(
-        client=fake, titles=[('"medical coder"', "Coder", 0.78)], max_rows=5)
+        client=fake, titles=[EssentialTitle('"medical coder"', "Coder", 0.78, CORE)],
+        max_rows=5)
 
     out = [s async for s in conn.pull(since=SINCE)]
     companies = {s.company_key for s in out}
@@ -279,3 +299,40 @@ async def test_cross_board_dedup_keeps_unique_drops_crosslisted():
     assert len(companies) == 2
     boards = {s.payload["source_board"] for s in out}
     assert boards == {"indeed", "linkedin"}
+
+
+@pytest.mark.asyncio
+async def test_standard_titles_skip_linkedin_to_save_credits():
+    """Scrape-cost lever: a STANDARD role searches Indeed ONLY, so a
+    LinkedIn-only posting is never fetched (no second-board credit spend)."""
+    indeed_hit = _job(jobKey="ik-1", title="Medical Coder", companyName="Acme Health",
+                      location={"city": "Dallas", "countryCode": "US",
+                                "formattedAddressShort": "Dallas, TX"})
+    li_only = _lijob(id="li-9", title="Medical Coder", companyName="LinkedinOnly Health")
+    fake = FakeBothClient(indeed_by_q={'"medical coder"': [indeed_hit]},
+                          linkedin_by_q={"medical coder": [li_only]})
+    conn = JobPostingsConnector(
+        client=fake, titles=[EssentialTitle('"medical coder"', "Coder", 0.72, STANDARD)],
+        max_rows=5)
+
+    out = [s async for s in conn.pull(since=SINCE)]
+    assert {s.payload["source_board"] for s in out} == {"indeed"}   # linkedin skipped
+    assert all(s.company_name_raw != "LinkedinOnly Health" for s in out)
+
+
+@pytest.mark.asyncio
+async def test_core_titles_search_both_boards():
+    """CORE roles keep both boards for max recall on the high-intent signals."""
+    indeed_hit = _job(jobKey="ik-2", title="Denials Specialist", companyName="Acme Health",
+                      location={"city": "Dallas", "countryCode": "US",
+                                "formattedAddressShort": "Dallas, TX"})
+    li_hit = _lijob(id="li-2", title="Denials Specialist", companyName="Beacon Clinic",
+                    location="Austin, TX")
+    fake = FakeBothClient(indeed_by_q={'"denials specialist"': [indeed_hit]},
+                          linkedin_by_q={"denials specialist": [li_hit]})
+    conn = JobPostingsConnector(
+        client=fake, titles=[EssentialTitle('"denials specialist"', "Denials", 0.86, CORE)],
+        max_rows=5)
+
+    out = [s async for s in conn.pull(since=SINCE)]
+    assert {s.payload["source_board"] for s in out} == {"indeed", "linkedin"}

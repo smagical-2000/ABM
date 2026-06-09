@@ -37,6 +37,9 @@ window.API = {
   deleteCompanies: (body) => http('/api/discovery/delete', {
     method: 'POST', body: JSON.stringify(body),
   }),
+  // Jobs stacking watch list: companies with a single open standard RCM role,
+  // parked until a second opens. → { companies, count, stack_min, window_days }.
+  parked: () => http('/api/discovery/parked'),
   panel: ({ status = 'qualified', segment, signal_type } = {}) => {
     const q = new URLSearchParams({ status });
     if (segment && segment !== 'all') q.set('segment', segment);

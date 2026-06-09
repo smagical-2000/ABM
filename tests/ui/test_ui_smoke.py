@@ -225,7 +225,9 @@ def test_stacked_hiring_pill_and_watch_strip(page):
 
 def test_social_listening_panel_opens(page):
     page.click("text=Discovery")
-    page.click("text=Social listening")
-    page.wait_for_selector("text=Event keywords", timeout=10_000)   # the panel's new section
+    # Social-listening setup now lives inside the unified "Scan signals" control.
+    page.click("text=Scan signals")                                 # open the run popover
+    page.click("text=Manage")                                       # → social-listening setup
+    page.wait_for_selector("text=Event keywords", timeout=10_000)   # the panel's section
     assert page.locator("text=Monitored accounts").count() > 0       # accounts section header
     assert page.locator("text=Back-fill").count() > 0                # the reframed scan

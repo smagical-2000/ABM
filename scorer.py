@@ -28,7 +28,9 @@ load_dotenv(Path(__file__).parent / ".env")
 # Configuration
 # ---------------------------------------------------------------------------
 
-MODEL = "claude-opus-4-7"
+# Sonnet by default — markedly cheaper than Opus, ample for scoring. Override
+# with ANTHROPIC_MODEL if a deeper model is ever needed for a one-off.
+MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 OUTPUTS_DIR = Path(__file__).parent / "outputs"
 
@@ -199,16 +201,27 @@ def score_account(company: str, segment: str, dry_run: bool = False) -> str:
         f"output_tokens={final_message.usage.output_tokens}"
     )
 
+    # Refusal → do NOT return content. Saving here would write an empty/partial
+    # file that looks like a successful run to anyone who opens it later.
     if final_message.stop_reason == "refusal":
-        log.warning(
-            f"Claude refused. Category: {final_message.stop_details.category}, "
-            f"Explanation: {final_message.stop_details.explanation}"
+        details = getattr(final_message, "stop_details", None)
+        raise ValueError(
+            f"Claude refused to score '{company}'. "
+            f"Category: {getattr(details, 'category', '?')}, "
+            f"Explanation: {getattr(details, 'explanation', '?')}"
         )
 
     # Reconstruct the full text from the response (more reliable than stream parts)
     full_text = "\n".join(
         block.text for block in final_message.content if block.type == "text"
     )
+
+    # Empty output is also a non-result — refuse to save a blank report.
+    if not full_text.strip():
+        raise ValueError(
+            f"Claude returned no text for '{company}' "
+            f"(stop_reason={final_message.stop_reason}). Nothing saved."
+        )
 
     # Post-process: collapse multi-line table cells caused by web_search citation newlines.
     # Without this, Notion renders broken/empty rows for every cited cell.

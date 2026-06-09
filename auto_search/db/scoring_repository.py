@@ -1,0 +1,820 @@
+"""Storage for the scoring phase — interface + Postgres and JSON implementations.
+
+Separate from the discovery store (repository.py) so the two phases stay
+decoupled, but it talks to the same database. One denormalized row per account
+(scored_accounts) carries the whole lifecycle, so the Scored dashboard reads it
+in a single query.
+
+`get_scoring_repository()` returns Postgres when DATABASE_URL is set, else a
+JSON-file repo for local/dev — mirroring get_repository() for discovery.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Protocol
+
+from auto_search.scoring.models import Account, ScoreResult
+
+logger = logging.getLogger(__name__)
+
+# "Active" = actively being scored (a live Claude call, costing money) — this
+# drives the dashboard shimmer + the activity poll. 'queued' is deliberately NOT
+# here: imports park in 'queued' for free until the user scores them on demand,
+# so a 1000-row import must not look like 1000 accounts mid-score.
+_ACTIVE_STATES = ("scoring",)
+
+# A score (plus QA) takes ~1 minute; even a heavily rate-limited run is bounded
+# at a few minutes per call. An account sitting in 'scoring' far longer than that
+# was orphaned (its background task died, usually a service restart) and would
+# otherwise tick "scoring" forever, so it is swept back to the queue.
+STALE_SCORING_SECONDS = 1800   # 30 minutes
+
+
+# ── interface ─────────────────────────────────────────────────────────
+
+
+class ScoringRepository(Protocol):
+    def ensure_schema(self) -> None: ...
+    def upsert_account(self, account: Account, *, state: str,
+                       import_label: str | None = None) -> dict: ...
+    def import_labels(self) -> list[dict]: ...
+    def set_state(self, account_id: str, state: str, *, error: str | None = None) -> None: ...
+    def set_phase(self, account_id: str, phase: str | None) -> None: ...
+    def save_score(self, account_id: str, score: ScoreResult) -> dict | None: ...
+    def set_dossier_state(self, account_id: str, state: str | None,
+                          error: str | None = None) -> None: ...
+    def save_dossier(self, account_id: str, dossier) -> dict | None: ...
+    def get(self, account_id: str) -> dict | None: ...
+    def list_accounts(self) -> list[dict]: ...
+    def active(self) -> list[dict]: ...
+    def queued(self) -> list[dict]: ...
+    def exists(self, account_id: str) -> bool: ...
+    def cost_summary(self) -> dict: ...
+    def recover_orphaned_scoring(self, older_than_seconds: int = 0) -> int: ...
+    def reset_to_queued(self) -> int: ...
+    # spend guardrails
+    def create_spend_operation(self, op: dict) -> None: ...
+    def finish_spend_operation(self, op_id: str, *, status: str, actual_usd: float,
+                               accounts_done: int, error: str | None = None) -> None: ...
+    def record_cost_event(self, event: dict) -> None: ...
+    def spend_rollup(self) -> dict: ...
+    def recent_operations(self, limit: int = 10) -> list[dict]: ...
+    def qualify_costs(self, company_keys: list[str]) -> dict[str, float]: ...
+
+
+# ── shared row shaping ────────────────────────────────────────────────
+
+
+def _row(account: dict) -> dict:
+    """Shape a stored account into the object the UI consumes (scoringData.js).
+
+    Adds a resolved `tier` for convenience; scored fields are null until scored.
+    For in-flight accounts it also reports the phase + when scoring started, so
+    the UI can show live elapsed time and a progress estimate.
+    """
+    band, label = account.get("tier_band"), account.get("tier_label")
+    state = account.get("state", "queued")
+    in_flight = state == "scoring"          # parked 'queued' has no live clock
+    started = account.get("updated_at") if in_flight else None
+    return {
+        "phase": account.get("phase") if in_flight else None,
+        "scoring_started_at": _iso(started),
+        "elapsed_seconds": _elapsed(started) if in_flight else None,
+        "account_id": account["account_id"],
+        "name": account["name"],
+        "segment": account.get("segment"),
+        "sub_segment": account.get("sub_segment"),
+        "domain": account.get("domain"),
+        "source": account.get("source"),
+        "discovery_company_key": account.get("discovery_company_key"),
+        "approximate_employees": account.get("approximate_employees"),
+        "framework": account.get("framework"),
+        "state": account.get("state", "queued"),
+        "max_total": account.get("max_total"),
+        "total": account.get("total"),
+        "tier": {"band": band, "label": label} if band else None,
+        "tier_band": band,
+        "tier_label": label,
+        "dimensions": account.get("dimensions") or [],
+        "recommendation": account.get("recommendation"),
+        "qa": account.get("qa"),
+        "firmographics": account.get("firmographics") or {},
+        "discovery_signals": account.get("discovery_signals") or [],
+        "model": account.get("model"),
+        "cost_usd": _as_float(account.get("cost_usd")),
+        "import_label": account.get("import_label"),
+        "dossier": account.get("dossier"),
+        "dossier_state": account.get("dossier_state"),
+        "dossier_cost": _as_float(account.get("dossier_cost")),
+        "dossier_generated_at": _iso(account.get("dossier_generated_at")),
+        "dossier_error": account.get("dossier_error"),
+        "error": account.get("error_message"),
+        "scored_at": _iso(account.get("scored_at")),
+        "created_at": _iso(account.get("created_at")),
+    }
+
+
+def _score_fields(score: ScoreResult) -> dict:
+    return {
+        "total": score.total,
+        "max_total": score.max_total,
+        "tier_band": score.tier_band,
+        "tier_label": score.tier_label,
+        "dimensions": [d.model_dump() for d in score.dimensions],
+        "recommendation": score.recommendation,
+        "qa": score.qa.model_dump() if score.qa else None,
+        "model": score.model,
+        "cost_usd": score.cost_usd,
+        "scored_at": score.scored_at or datetime.now(UTC).isoformat(),
+    }
+
+
+def _iso(dt) -> str | None:
+    return dt.isoformat() if isinstance(dt, datetime) else dt
+
+
+def _as_float(v) -> float:
+    try:
+        return round(float(v), 4) if v is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _month_start_iso() -> str:
+    now = datetime.now(UTC)
+    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+
+def _elapsed(dt) -> int | None:
+    """Whole seconds since `dt` (a datetime or ISO string), or None."""
+    if isinstance(dt, datetime):
+        base = dt
+    elif isinstance(dt, str):
+        try:
+            base = datetime.fromisoformat(dt)
+        except ValueError:
+            return None
+    else:
+        return None
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=UTC)
+    return max(0, int((datetime.now(UTC) - base).total_seconds()))
+
+
+# ── Postgres ──────────────────────────────────────────────────────────
+
+
+class ScoringPostgresRepository:
+    def __init__(self, dsn: str | None = None) -> None:
+        from psycopg.rows import dict_row
+        from psycopg_pool import ConnectionPool
+
+        dsn = dsn or os.getenv("DATABASE_URL")
+        if not dsn:
+            raise RuntimeError("DATABASE_URL not set")
+        self._pool = ConnectionPool(dsn, min_size=1, max_size=4, open=True,
+                                    kwargs={"row_factory": dict_row})
+
+    def close(self) -> None:
+        self._pool.close()
+
+    def ensure_schema(self) -> None:
+        sql = (Path(__file__).resolve().parent / "scoring_schema.sql").read_text()
+        with self._pool.connection() as conn:
+            conn.execute(sql)
+        logger.info("scoring schema ensured")
+
+    def upsert_account(self, account: Account, *, state: str,
+                       import_label: str | None = None) -> dict:
+        now = datetime.now(UTC)
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO scored_accounts (
+                    account_id, source, discovery_company_key, name, segment,
+                    framework, domain, sub_segment, approximate_employees,
+                    firmographics, discovery_signals, state, max_total,
+                    import_label, created_at, updated_at
+                ) VALUES (
+                    %(id)s, %(source)s, %(dck)s, %(name)s, %(segment)s,
+                    %(framework)s, %(domain)s, %(sub)s, %(emp)s,
+                    %(firmo)s, %(signals)s, %(state)s, %(max_total)s,
+                    %(label)s, %(now)s, %(now)s
+                )
+                ON CONFLICT (account_id) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    segment = EXCLUDED.segment,
+                    framework = EXCLUDED.framework,
+                    domain = COALESCE(EXCLUDED.domain, scored_accounts.domain),
+                    firmographics = EXCLUDED.firmographics,
+                    discovery_signals = EXCLUDED.discovery_signals,
+                    state = EXCLUDED.state,
+                    import_label = COALESCE(EXCLUDED.import_label, scored_accounts.import_label),
+                    updated_at = EXCLUDED.updated_at
+                """,
+                {
+                    "id": account.account_id, "source": account.source,
+                    "dck": account.discovery_company_key, "name": account.name,
+                    "segment": account.segment, "framework": account.framework,
+                    "domain": account.domain, "sub": account.sub_segment,
+                    "emp": account.approximate_employees,
+                    "firmo": json.dumps(account.firmographics, default=str),
+                    "signals": json.dumps(account.discovery_signals, default=str),
+                    "state": state, "max_total": _max_total(account),
+                    "label": import_label, "now": now,
+                },
+            )
+        return self.get(account.account_id)
+
+    def import_labels(self) -> list[dict]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT import_label AS label, COUNT(*) AS count, "
+                "MAX(created_at) AS latest FROM scored_accounts "
+                "WHERE import_label IS NOT NULL GROUP BY import_label "
+                "ORDER BY MAX(created_at) DESC"
+            ).fetchall()
+        return [{"label": r["label"], "count": r["count"]} for r in rows]
+
+    def set_state(self, account_id: str, state: str, *, error: str | None = None) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE scored_accounts SET state=%s, error_message=%s, "
+                "updated_at=now() WHERE account_id=%s",
+                (state, error, account_id),
+            )
+
+    def set_phase(self, account_id: str, phase: str | None) -> None:
+        # Phase changes must NOT reset updated_at — elapsed is measured from the
+        # start of scoring.
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE scored_accounts SET phase=%s WHERE account_id=%s",
+                (phase, account_id),
+            )
+
+    def save_score(self, account_id: str, score: ScoreResult) -> dict | None:
+        f = _score_fields(score)
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                UPDATE scored_accounts SET
+                    state='scored', error_message=NULL, phase=NULL,
+                    total=%(total)s, tier_band=%(band)s, tier_label=%(label)s,
+                    dimensions=%(dims)s, recommendation=%(rec)s, qa=%(qa)s,
+                    model=%(model)s, cost_usd=%(cost)s,
+                    scored_at=%(scored_at)s, updated_at=now()
+                 WHERE account_id=%(id)s
+             RETURNING account_id
+                """,
+                {
+                    "id": account_id, "total": f["total"], "band": f["tier_band"],
+                    "label": f["tier_label"], "dims": json.dumps(f["dimensions"]),
+                    "rec": f["recommendation"],
+                    "qa": json.dumps(f["qa"]) if f["qa"] is not None else None,
+                    "model": f["model"], "cost": f["cost_usd"],
+                    "scored_at": f["scored_at"],
+                },
+            ).fetchone()
+        return self.get(account_id) if row else None
+
+    def set_dossier_state(self, account_id: str, state: str | None,
+                          error: str | None = None) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE scored_accounts SET dossier_state=%s, dossier_error=%s "
+                "WHERE account_id=%s",
+                (state, error, account_id),
+            )
+
+    def save_dossier(self, account_id: str, dossier) -> dict | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                UPDATE scored_accounts SET
+                    dossier=%(d)s, dossier_state='ready', dossier_error=NULL,
+                    dossier_cost=%(cost)s, dossier_generated_at=%(at)s
+                 WHERE account_id=%(id)s
+             RETURNING account_id
+                """,
+                {
+                    "id": account_id,
+                    "d": json.dumps(dossier.model_dump(), default=str),
+                    "cost": dossier.cost_usd,
+                    "at": dossier.generated_at or datetime.now(UTC).isoformat(),
+                },
+            ).fetchone()
+        return self.get(account_id) if row else None
+
+    def get(self, account_id: str) -> dict | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM scored_accounts WHERE account_id=%s", (account_id,)
+            ).fetchone()
+        return _row(row) if row else None
+
+    def list_accounts(self) -> list[dict]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM scored_accounts ORDER BY updated_at DESC"
+            ).fetchall()
+        return [_row(r) for r in rows]
+
+    def active(self) -> list[dict]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM scored_accounts WHERE state = ANY(%s) "
+                "ORDER BY updated_at DESC",
+                (list(_ACTIVE_STATES),),
+            ).fetchall()
+        return [_row(r) for r in rows]
+
+    def queued(self) -> list[dict]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM scored_accounts WHERE state='queued' "
+                "ORDER BY created_at ASC"
+            ).fetchall()
+        return [_row(r) for r in rows]
+
+    def exists(self, account_id: str) -> bool:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM scored_accounts WHERE account_id=%s", (account_id,)
+            ).fetchone()
+        return row is not None
+
+    def cost_summary(self) -> dict:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                  COALESCE(SUM(cost_usd + dossier_cost), 0) AS total_cost,
+                  COALESCE(SUM(cost_usd) FILTER (
+                      WHERE scored_at >= date_trunc('month', now())), 0)
+                    + COALESCE(SUM(dossier_cost) FILTER (
+                      WHERE dossier_generated_at >= date_trunc('month', now())), 0)
+                    AS month_cost,
+                  COUNT(*) FILTER (WHERE state='scored')  AS scored_count,
+                  COUNT(*) FILTER (WHERE state='queued')  AS queued_count,
+                  COALESCE(SUM(cost_usd) FILTER (WHERE source='csv' AND state='scored'), 0) AS csv_cost,
+                  COUNT(*) FILTER (WHERE source='csv' AND state='scored') AS csv_count
+                FROM scored_accounts
+                """
+            ).fetchone()
+        csv_avg = (row["csv_cost"] / row["csv_count"]) if row["csv_count"] else 0.0
+        return _cost_summary(row["total_cost"], row["month_cost"],
+                             row["scored_count"], row["queued_count"], csv_avg)
+
+    def recover_orphaned_scoring(self, older_than_seconds: int = 0) -> int:
+        """Return stuck 'scoring' accounts to the queue. With the default 0 this
+        resets every in-flight row (call at startup, when no task is alive); a
+        positive threshold only sweeps rows stalled longer than that."""
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "UPDATE scored_accounts SET state='queued', phase=NULL, "
+                "updated_at=now() WHERE state='scoring' "
+                "AND updated_at <= now() - make_interval(secs => %s)",
+                (older_than_seconds,),
+            )
+            return cur.rowcount or 0
+
+    def reset_to_queued(self) -> int:
+        """Clear every score back to a parked 'queued' account (non-destructive):
+        the accounts stay, but their score, QA, tier and measured cost are wiped
+        so they can be re-scored on demand. Used to re-measure cost from clean."""
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "UPDATE scored_accounts SET state='queued', phase=NULL, "
+                "total=NULL, tier_band=NULL, tier_label=NULL, dimensions=NULL, "
+                "recommendation=NULL, qa=NULL, cost_usd=0, scored_at=NULL, "
+                "error_message=NULL, updated_at=now() WHERE state <> 'queued'"
+            )
+            return cur.rowcount or 0
+
+    # ── spend guardrails ───────────────────────────────────────────────
+
+    def create_spend_operation(self, op: dict) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO spend_operations
+                  (id, op_type, status, estimated_usd, actual_usd,
+                   accounts_planned, accounts_done, metadata)
+                VALUES (%(id)s, %(op_type)s, %(status)s, %(estimated_usd)s,
+                        %(actual_usd)s, %(accounts_planned)s, %(accounts_done)s, %(metadata)s)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                {**op, "metadata": json.dumps(op["metadata"]) if op.get("metadata") else None},
+            )
+
+    def finish_spend_operation(self, op_id, *, status, actual_usd, accounts_done, error=None):
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE spend_operations SET status=%s, actual_usd=%s, accounts_done=%s, "
+                "error_message=%s, finished_at=now() WHERE id=%s",
+                (status, actual_usd, accounts_done, error, op_id))
+
+    def record_cost_event(self, event: dict) -> None:
+        payload = {**event, "metadata": json.dumps(event["metadata"])
+                   if event.get("metadata") else None}
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO cost_events
+                  (id, operation_id, op_type, account_id, company_key, step,
+                   estimated_usd, actual_usd, model, searches, metadata)
+                VALUES (%(id)s, %(operation_id)s, %(op_type)s, %(account_id)s,
+                        %(company_key)s, %(step)s, %(estimated_usd)s, %(actual_usd)s,
+                        %(model)s, %(searches)s, %(metadata)s::jsonb)
+                """, payload)
+
+    def spend_rollup(self) -> dict:
+        with self._pool.connection() as conn:
+            r = conn.execute(
+                """
+                SELECT
+                  COALESCE(SUM(actual_usd) FILTER (WHERE step <> 'qualify'
+                      AND created_at >= date_trunc('month', now())), 0) AS month_scoring,
+                  COALESCE(SUM(actual_usd) FILTER (WHERE step = 'qualify'
+                      AND created_at >= date_trunc('month', now())), 0) AS month_discovery,
+                  COALESCE(SUM(actual_usd) FILTER (
+                      WHERE created_at >= date_trunc('day', now())), 0) AS daily_total
+                FROM cost_events
+                """).fetchone()
+        return _rollup(r["month_scoring"], r["month_discovery"], r["daily_total"])
+
+    def recent_operations(self, limit: int = 10) -> list[dict]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT id, op_type, status, estimated_usd, actual_usd, accounts_planned, "
+                "accounts_done, started_at, finished_at FROM spend_operations "
+                "ORDER BY started_at DESC LIMIT %s", (limit,)).fetchall()
+        return [_op_row(r) for r in rows]
+
+    def qualify_costs(self, company_keys: list[str]) -> dict[str, float]:
+        """Per-company discovery qualify spend from cost_events (step=qualify)."""
+        if not company_keys:
+            return {}
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                """SELECT company_key, COALESCE(SUM(actual_usd), 0) AS usd
+                     FROM cost_events
+                    WHERE step = 'qualify' AND company_key = ANY(%s)
+                    GROUP BY company_key""",
+                (list(company_keys),),
+            ).fetchall()
+        return {r["company_key"]: round(float(r["usd"]), 4) for r in rows}
+
+
+# ── JSON file (local/dev) ─────────────────────────────────────────────
+
+
+class ScoringJsonRepository:
+    def __init__(self, path: str | Path = "./data/scoring_store.json") -> None:
+        self._path = Path(path)
+        self._store: dict[str, dict] = self._load()
+        # Spend ledger lives in sibling files so it survives a restart in dev.
+        self._spend_path = self._path.with_suffix(".spend.json")
+        spend = self._load_json(self._spend_path)
+        self._ops: list[dict] = spend.get("operations", [])
+        self._events: list[dict] = spend.get("events", [])
+
+    def ensure_schema(self) -> None:
+        return None
+
+    def upsert_account(self, account: Account, *, state: str,
+                       import_label: str | None = None) -> dict:
+        now = datetime.now(UTC).isoformat()
+        existing = self._store.get(account.account_id, {})
+        existing.update({
+            "account_id": account.account_id, "source": account.source,
+            "discovery_company_key": account.discovery_company_key,
+            "name": account.name, "segment": account.segment,
+            "framework": account.framework, "domain": account.domain,
+            "sub_segment": account.sub_segment,
+            "approximate_employees": account.approximate_employees,
+            "firmographics": account.firmographics,
+            "discovery_signals": account.discovery_signals,
+            "state": state, "max_total": _max_total(account),
+            "updated_at": now,
+        })
+        if import_label or not existing.get("import_label"):
+            existing["import_label"] = import_label
+        existing.setdefault("created_at", now)
+        self._store[account.account_id] = existing
+        self._flush()
+        return _row(existing)
+
+    def import_labels(self) -> list[dict]:
+        agg: dict[str, dict] = {}
+        for r in self._store.values():
+            label = r.get("import_label")
+            if not label:
+                continue
+            slot = agg.setdefault(label, {"label": label, "count": 0, "latest": ""})
+            slot["count"] += 1
+            slot["latest"] = max(slot["latest"], r.get("created_at") or "")
+        rows = sorted(agg.values(), key=lambda s: s["latest"], reverse=True)
+        return [{"label": s["label"], "count": s["count"]} for s in rows]
+
+    def set_state(self, account_id: str, state: str, *, error: str | None = None) -> None:
+        row = self._store.get(account_id)
+        if row:
+            row["state"] = state
+            row["error_message"] = error
+            row["updated_at"] = datetime.now(UTC).isoformat()
+            self._flush()
+
+    def set_phase(self, account_id: str, phase: str | None) -> None:
+        row = self._store.get(account_id)
+        if row:
+            row["phase"] = phase           # no updated_at change — keep the clock
+            self._flush()
+
+    def save_score(self, account_id: str, score: ScoreResult) -> dict | None:
+        row = self._store.get(account_id)
+        if not row:
+            return None
+        row.update(_score_fields(score))
+        row["state"] = "scored"
+        row["error_message"] = None
+        row["phase"] = None
+        row["updated_at"] = datetime.now(UTC).isoformat()
+        self._flush()
+        return _row(row)
+
+    def set_dossier_state(self, account_id: str, state: str | None,
+                          error: str | None = None) -> None:
+        row = self._store.get(account_id)
+        if row:
+            row["dossier_state"] = state
+            row["dossier_error"] = error
+            self._flush()
+
+    def save_dossier(self, account_id: str, dossier) -> dict | None:
+        row = self._store.get(account_id)
+        if not row:
+            return None
+        row["dossier"] = dossier.model_dump()
+        row["dossier_state"] = "ready"
+        row["dossier_error"] = None
+        row["dossier_cost"] = dossier.cost_usd
+        row["dossier_generated_at"] = dossier.generated_at or datetime.now(UTC).isoformat()
+        self._flush()
+        return _row(row)
+
+    def get(self, account_id: str) -> dict | None:
+        row = self._store.get(account_id)
+        return _row(row) if row else None
+
+    def list_accounts(self) -> list[dict]:
+        rows = sorted(self._store.values(),
+                      key=lambda r: r.get("updated_at") or "", reverse=True)
+        return [_row(r) for r in rows]
+
+    def active(self) -> list[dict]:
+        return [_row(r) for r in self._store.values()
+                if r.get("state") in _ACTIVE_STATES]
+
+    def queued(self) -> list[dict]:
+        rows = [r for r in self._store.values() if r.get("state") == "queued"]
+        rows.sort(key=lambda r: r.get("created_at") or "")
+        return [_row(r) for r in rows]
+
+    def exists(self, account_id: str) -> bool:
+        return account_id in self._store
+
+    def cost_summary(self) -> dict:
+        month_start = _month_start_iso()
+        total = month = csv_cost = 0.0
+        scored = queued = csv_count = 0
+        for r in self._store.values():
+            state = r.get("state")
+            if state == "scored":
+                scored += 1
+                if r.get("source") == "csv":
+                    csv_cost += _as_float(r.get("cost_usd"))
+                    csv_count += 1
+            elif state == "queued":
+                queued += 1
+            c = _as_float(r.get("cost_usd"))
+            total += c
+            if (_iso(r.get("scored_at")) or "") >= month_start:
+                month += c
+            # dossier spend counts toward the budget too
+            dc = _as_float(r.get("dossier_cost"))
+            if dc:
+                total += dc
+                if (_iso(r.get("dossier_generated_at")) or "") >= month_start:
+                    month += dc
+        csv_avg = (csv_cost / csv_count) if csv_count else 0.0
+        return _cost_summary(total, month, scored, queued, csv_avg)
+
+    def recover_orphaned_scoring(self, older_than_seconds: int = 0) -> int:
+        n = 0
+        for row in self._store.values():
+            if row.get("state") != "scoring":
+                continue
+            elapsed = _elapsed(row.get("updated_at"))
+            if elapsed is None or elapsed >= older_than_seconds:
+                row["state"] = "queued"
+                row["phase"] = None
+                row["updated_at"] = datetime.now(UTC).isoformat()
+                n += 1
+        if n:
+            self._flush()
+        return n
+
+    def reset_to_queued(self) -> int:
+        n = 0
+        for row in self._store.values():
+            if row.get("state") == "queued":
+                continue
+            row.update({
+                "state": "queued", "phase": None, "total": None,
+                "tier_band": None, "tier_label": None, "dimensions": None,
+                "recommendation": None, "qa": None, "cost_usd": 0,
+                "scored_at": None, "error_message": None,
+                "updated_at": datetime.now(UTC).isoformat(),
+            })
+            n += 1
+        if n:
+            self._flush()
+        return n
+
+    # ── spend guardrails ───────────────────────────────────────────────
+
+    def create_spend_operation(self, op: dict) -> None:
+        self._ops.append({**op, "started_at": datetime.now(UTC).isoformat(),
+                          "finished_at": None, "error_message": None})
+        self._flush_spend()
+
+    def finish_spend_operation(self, op_id, *, status, actual_usd, accounts_done, error=None):
+        for o in self._ops:
+            if o.get("id") == op_id:
+                o.update({"status": status, "actual_usd": actual_usd,
+                          "accounts_done": accounts_done, "error_message": error,
+                          "finished_at": datetime.now(UTC).isoformat()})
+                break
+        self._flush_spend()
+
+    def record_cost_event(self, event: dict) -> None:
+        self._events.append({**event, "created_at": datetime.now(UTC).isoformat()})
+        self._flush_spend()
+
+    def spend_rollup(self) -> dict:
+        month_start = _month_start_iso()
+        day_start = datetime.now(UTC).replace(
+            hour=0, minute=0, second=0, microsecond=0).isoformat()
+        ms = md = dt = 0.0
+        for e in self._events:
+            amt = _as_float(e.get("actual_usd"))
+            created = e.get("created_at") or ""
+            if created >= month_start:
+                if e.get("step") == "qualify":
+                    md += amt
+                else:
+                    ms += amt
+            if created >= day_start:
+                dt += amt
+        return _rollup(ms, md, dt)
+
+    def recent_operations(self, limit: int = 10) -> list[dict]:
+        rows = sorted(self._ops, key=lambda o: o.get("started_at") or "", reverse=True)
+        return [_op_row(o) for o in rows[:limit]]
+
+    def qualify_costs(self, company_keys: list[str]) -> dict[str, float]:
+        if not company_keys:
+            return {}
+        want = set(company_keys)
+        totals: dict[str, float] = {}
+        for ev in self._events:
+            if ev.get("step") != "qualify":
+                continue
+            key = ev.get("company_key")
+            if key not in want:
+                continue
+            totals[key] = round(totals.get(key, 0.0) + float(ev.get("actual_usd") or 0), 4)
+        return totals
+
+    # -- internals --
+
+    def _load_json(self, path: Path) -> dict:
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text())
+        except json.JSONDecodeError:
+            return {}
+
+    def _flush_spend(self) -> None:
+        self._spend_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._spend_path.with_suffix(self._spend_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(
+            {"operations": self._ops, "events": self._events}, indent=2, default=str))
+        tmp.replace(self._spend_path)
+
+    def _load(self) -> dict[str, dict]:
+        if not self._path.exists():
+            return {}
+        try:
+            return json.loads(self._path.read_text())
+        except json.JSONDecodeError:
+            # Never silently wipe data: preserve the corrupt file before starting
+            # fresh, so a bad write can't erase real scoring history.
+            backup = self._path.with_suffix(self._path.suffix + ".corrupt")
+            try:
+                self._path.replace(backup)
+                logger.error("corrupt scoring store at %s — moved to %s, starting empty",
+                             self._path, backup)
+            except OSError:
+                logger.error("corrupt scoring store at %s — starting empty", self._path)
+            return {}
+
+    def _flush(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+        tmp.write_text(json.dumps(self._store, indent=2, default=str))
+        tmp.replace(self._path)
+
+
+# ── helpers + factory ─────────────────────────────────────────────────
+
+
+# The board-approved scoring budget. Surfaced with spend so the meter reads
+# against a fixed number; override with SCORING_MONTHLY_BUDGET if it changes.
+_MONTHLY_BUDGET = _as_float(os.getenv("SCORING_MONTHLY_BUDGET")) or 200.0
+
+
+def _rollup(month_scoring, month_discovery, daily) -> dict:
+    ms = _as_float(month_scoring)
+    md = _as_float(month_discovery)
+    dt = _as_float(daily)
+    warn = _as_float(os.getenv("SPEND_DAILY_WARN_USD")) or 50.0
+    disc_budget = _as_float(os.getenv("DISCOVERY_MONTHLY_BUDGET")) or 50.0
+    return {
+        "month_scoring_cost": ms,
+        "month_discovery_cost": md,
+        "month_total_cost": round(ms + md, 4),
+        "daily_total_cost": dt,
+        "daily_warn": warn,
+        "daily_over_warn": bool(warn and dt >= warn),
+        "discovery_budget": disc_budget,
+        "discovery_over_budget": bool(disc_budget and md >= disc_budget),
+        "discovery_est_qual_cost": _as_float(os.getenv("DISCOVERY_EST_QUAL_COST")) or 0.12,
+    }
+
+
+def _op_row(r) -> dict:
+    return {
+        "id": r.get("id"), "op_type": r.get("op_type"), "status": r.get("status"),
+        "estimated_usd": _as_float(r.get("estimated_usd")),
+        "actual_usd": _as_float(r.get("actual_usd")),
+        "accounts_planned": int(r.get("accounts_planned") or 0),
+        "accounts_done": int(r.get("accounts_done") or 0),
+        "started_at": _iso(r.get("started_at")),
+        "finished_at": _iso(r.get("finished_at")),
+    }
+
+
+def _cost_summary(total, month, scored, queued, csv_avg=0.0) -> dict:
+    total = _as_float(total)
+    month = _as_float(month)
+    scored = int(scored or 0)
+    return {
+        "total_cost": total,
+        "month_cost": month,
+        "monthly_budget": _MONTHLY_BUDGET,
+        "budget_remaining": round(max(0.0, _MONTHLY_BUDGET - month), 2),
+        "scored_count": scored,
+        "queued_count": int(queued or 0),
+        "avg_cost": round(total / scored, 4) if scored else 0.0,
+        # measured average for CSV-source accounts only — the right basis for a
+        # CSV import estimate (CSV scoring skips QA, so it is cheaper).
+        "csv_avg_cost": round(_as_float(csv_avg), 4),
+    }
+
+
+def _max_total(account: Account) -> int:
+    from auto_search.scoring.frameworks import FRAMEWORKS, framework_for_segment
+    fw = FRAMEWORKS.get(account.framework) or framework_for_segment(account.segment)
+    return fw.max_total
+
+
+def get_scoring_repository() -> ScoringRepository:
+    if os.getenv("DATABASE_URL"):
+        return ScoringPostgresRepository()
+    # Fail closed: real (production) data must not silently land in a JSON file.
+    from auto_search.runtime import is_production
+    if is_production():
+        raise RuntimeError(
+            "DATABASE_URL is required in production — refusing to run the scoring "
+            "store on a JSON file where data would not persist or be backed up."
+        )
+    return ScoringJsonRepository()

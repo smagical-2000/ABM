@@ -814,10 +814,10 @@ function App() {
                   {abmInfo && abmInfo.total ? `ABM list · ${abmInfo.total.toLocaleString()}` : 'Upload ABM list'}
                 </button>
                 <button onClick={() => setSocialOpen(true)}
-                  title="Monitor LinkedIn accounts — scrape post engagers, keep decision-makers"
+                  title="Social listening — manage the LinkedIn accounts + event keywords the Run scans"
                   className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[12.5px] font-medium text-zinc-600 transition-colors hover:bg-zinc-50">
                   <Icons.leadership className="h-3.5 w-3.5 text-indigo-500" />
-                  Monitored accounts
+                  Social listening
                 </button>
                 {!loading && visibleCount > 0 && (
                   <label className="inline-flex cursor-pointer items-center gap-1.5 text-[13px] text-zinc-500 select-none">

@@ -133,21 +133,25 @@ function SocialMonitor({ onClose, pushToast }) {
           <p className="mt-2 text-[11.5px] leading-relaxed text-zinc-400">We confirm the author actually attended (from the post text), keep US decision-makers, and run them through ICP scoring.</p>
         </div>
 
-        {/* Footer — controlled manual run with a date window */}
-        <div className="flex items-center justify-between gap-2 border-t border-zinc-100 px-6 py-4">
-          <div className="flex items-center gap-2 text-[12px] text-zinc-500">
-            <span>Scan the last</span>
-            <select value={window_} onChange={(e) => setWindow(e.target.value)}
-              className="rounded-lg border border-zinc-200 bg-white py-1.5 pl-2.5 pr-7 text-[12.5px] font-medium text-zinc-800 hover:bg-zinc-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200">
-              <option value="24h">24 hours</option>
-              <option value="week">week</option>
-              <option value="month">month</option>
-            </select>
+        {/* Footer — BACK-FILL, not a second run. The daily Run (and cron) already
+            cover the last 24h; this is the catch-up for older posts (week/month). */}
+        <div className="border-t border-zinc-100 px-6 py-4">
+          <div className="mb-2 text-[11.5px] text-zinc-400">The <span className="font-medium text-zinc-500">Run</span> button + the daily cron already scan the last 24h. Use this only to back-fill older posts.</div>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-[12px] text-zinc-500">
+              <span>Back-fill the last</span>
+              <select value={window_} onChange={(e) => setWindow(e.target.value)}
+                className="rounded-lg border border-zinc-200 bg-white py-1.5 pl-2.5 pr-7 text-[12.5px] font-medium text-zinc-800 hover:bg-zinc-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200">
+                <option value="24h">24 hours</option>
+                <option value="week">week</option>
+                <option value="month">month</option>
+              </select>
+            </div>
+            <button onClick={runScan} disabled={running}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">
+              {running ? (<><Icons.refresh className="h-4 w-4 animate-spin" />Starting…</>) : (<><Icons.sparkle className="h-4 w-4" />Back-fill now</>)}
+            </button>
           </div>
-          <button onClick={runScan} disabled={running}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">
-            {running ? (<><Icons.refresh className="h-4 w-4 animate-spin" />Starting…</>) : (<><Icons.sparkle className="h-4 w-4" />Run scan</>)}
-          </button>
         </div>
       </div>
     </div>

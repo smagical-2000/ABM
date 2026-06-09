@@ -57,6 +57,7 @@ function NavSwitch({ view, onChange, scoredCount, pulse }) {
     <div className="flex items-center gap-0.5 rounded-lg bg-zinc-100/80 p-0.5">
       {item('discovery', 'Discovery')}
       {item('scored', 'Scored')}
+      {item('news', 'News')}
     </div>
   );
 }
@@ -968,6 +969,8 @@ function App() {
             Sorted by most recently evaluated · Disqualified rows appear in Recent evaluations below
           </p>
         </main>
+      ) : view === 'news' ? (
+        <NewsView pushToast={pushToast} />
       ) : (
         <ScoredView refreshKey={scoredRefreshKey} pushToast={pushToast} onCount={setScoredCount} />
       )}

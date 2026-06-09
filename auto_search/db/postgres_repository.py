@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from psycopg.rows import dict_row
@@ -434,6 +434,60 @@ class PostgresRepository:
             "uploaded_at": _iso(tot["up"]) if tot and tot["up"] else None,
             "by_segment": {r["seg"]: r["n"] for r in segs},
         }
+
+    # ── market-intelligence news ─────────────────────────────────────
+
+    def news_urls(self) -> list[str]:
+        with self._pool.connection() as conn:
+            rows = conn.execute("SELECT url FROM news_items").fetchall()
+        return [r["url"] for r in rows]
+
+    def save_news_items(self, items: list[dict]) -> int:
+        new = 0
+        with self._pool.connection() as conn, conn.transaction():
+            for it in items:
+                if not it.get("url"):
+                    continue
+                cur = conn.execute(
+                    """INSERT INTO news_items
+                         (url, title, source, published_at, snippet, topic,
+                          why_it_matters, relevant, fetched_at)
+                       VALUES (%(url)s, %(title)s, %(source)s, %(published_at)s,
+                               %(snippet)s, %(topic)s, %(why_it_matters)s,
+                               coalesce(%(relevant)s, true), %(fetched_at)s)
+                       ON CONFLICT (url) DO UPDATE SET
+                         topic = EXCLUDED.topic,
+                         why_it_matters = EXCLUDED.why_it_matters,
+                         snippet = COALESCE(EXCLUDED.snippet, news_items.snippet),
+                         relevant = EXCLUDED.relevant
+                       RETURNING (xmax = 0) AS inserted""",
+                    {"url": it.get("url"), "title": it.get("title") or "",
+                     "source": it.get("source"), "published_at": it.get("published_at"),
+                     "snippet": it.get("snippet"), "topic": it.get("topic"),
+                     "why_it_matters": it.get("why_it_matters"),
+                     "relevant": it.get("relevant", True), "fetched_at": it.get("fetched_at")})
+                row = cur.fetchone()
+                if row and row.get("inserted"):
+                    new += 1
+        return new
+
+    def news_items(self, *, topics=None, days=None, limit=200) -> list[dict]:
+        clauses = ["relevant"]
+        params: dict = {"limit": limit}
+        if topics:
+            clauses.append("topic = ANY(%(topics)s)")
+            params["topics"] = list(topics)
+        if days:
+            params["cutoff"] = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+            clauses.append("coalesce(published_at, fetched_at) >= %(cutoff)s")
+        where = "WHERE " + " AND ".join(clauses)
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT url, title, source, published_at, snippet, topic, "
+                "why_it_matters, fetched_at FROM news_items "
+                f"{where} ORDER BY coalesce(published_at, fetched_at) DESC "
+                "LIMIT %(limit)s", params).fetchall()
+        return [dict(r) for r in rows]
 
     # ── monitored social accounts ────────────────────────────────────
 

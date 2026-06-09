@@ -36,7 +36,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from auto_search import discovery_runner, job_stacking
+from auto_search import discovery_runner, job_stacking, news
 from auto_search.abm import (
     AbmIndex,
     TargetAccount,
@@ -318,6 +318,8 @@ async def lifespan(app: FastAPI):
     # the Trigify field mapping (read via GET /api/social/debug). In-memory only.
     app.state.social_debug = deque(maxlen=50)
     app.state.social_running = False              # one social poll at a time
+    app.state.news_running = False                # one news refresh at a time
+    app.state.last_news = None
     app.state.scoring_tasks = set()           # keep background score tasks alive
     app.state.scoring_inflight = set()        # account_ids being scored (dedupe lock)
     app.state.batch_running = False           # one queued batch at a time
@@ -478,6 +480,45 @@ def create_app() -> FastAPI:
         elif abm in ("match", "any", "1", "true"):
             companies = [c for c in companies if c.abm_match]
         return companies
+
+    # ── market-intelligence news (RCM / regulation headlines) ────────
+
+    @app.get("/api/news")
+    def get_news(topic: str | None = None, days: int = 30, limit: int = 200):
+        """Recent RCM / regulation headlines for the News tab, newest first."""
+        repo = app.state.repo
+        base = {"topics": list(news.TOPICS), "labels": news.TOPIC_LABELS,
+                "last_run": getattr(app.state, "last_news", None)}
+        if not hasattr(repo, "news_items"):
+            return {"items": [], **base}
+        topics = (topic,) if topic in news.TOPICS else None
+        return {"items": repo.news_items(topics=topics, days=days, limit=limit), **base}
+
+    @app.post("/api/news/refresh")
+    def news_refresh():
+        """Pull the latest headlines + tag them in the background. One at a time."""
+        if getattr(app.state, "news_running", False):
+            return {"started": False, "busy": True}
+        app.state.news_running = True
+
+        async def _run() -> None:
+            op = spend_guard.Operation(app.state.scoring_repo, "news_refresh",
+                                       estimated_usd=0.0, accounts_planned=0)
+
+            def on_cost(usd: float) -> None:
+                op.record(step="news_enrich", actual_usd=usd, model="news")
+
+            try:
+                summary = await news.run_once(app.state.repo, on_cost=on_cost)
+                app.state.last_news = {**summary, "at": datetime.now(UTC).isoformat()}
+            except Exception:  # noqa: BLE001 — never crash the loop
+                logger.exception("news refresh failed")
+            finally:
+                op.finish()
+                app.state.news_running = False
+
+        _schedule_coro(app, _run())
+        return {"started": True}
 
     @app.get("/api/abm/summary")
     def abm_summary():

@@ -153,6 +153,24 @@ CREATE TABLE IF NOT EXISTS abm_targets (
 );
 CREATE INDEX IF NOT EXISTS idx_abm_targets_domain ON abm_targets (domain);
 
+
+-- ── market-intelligence news ──────────────────────────────────────────────
+-- RCM / regulation headlines (Google News RSS), tagged with a topic + a
+-- "why it matters" angle by a cheap batched Sonnet pass. Industry context for
+-- the GTM team, NOT a per-company signal. Keyed by url so a re-pull dedups.
+CREATE TABLE IF NOT EXISTS news_items (
+    url             TEXT PRIMARY KEY,
+    title           TEXT NOT NULL,
+    source          TEXT,
+    published_at    TEXT,             -- ISO-8601 (string sort == chronological)
+    snippet         TEXT,
+    topic           TEXT,
+    why_it_matters  TEXT,
+    relevant        BOOLEAN NOT NULL DEFAULT true,
+    fetched_at      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_news_topic_pub ON news_items (topic, published_at DESC);
+
 -- Monitored LinkedIn accounts: profiles/companies whose post engagers we scrape
 -- (Magical's own + competitors). url_key is the normalized dedup key.
 CREATE TABLE IF NOT EXISTS social_targets (

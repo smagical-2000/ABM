@@ -64,6 +64,14 @@ window.API = {
   abmSummary: () => http('/api/abm/summary'),
   abmMatches: () => http('/api/abm/matches'),
 
+  // ── market-intelligence news ────────────────────────────────────────────────
+  news: ({ topic, days = 30, limit = 200 } = {}) => {
+    const q = new URLSearchParams({ days: String(days), limit: String(limit) });
+    if (topic) q.set('topic', topic);
+    return http(`/api/news?${q.toString()}`);
+  },
+  refreshNews: () => http('/api/news/refresh', { method: 'POST' }),
+
   // ── social: monitored LinkedIn accounts (Apify post-engagement) ─────────────
   socialTargets: () => http('/api/social/targets'),
   addSocialTarget: (body) => http('/api/social/targets', {

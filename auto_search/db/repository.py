@@ -169,6 +169,19 @@ class DiscoveryRepository(Protocol):
         """Counts for the UI: total, by segment, last upload time."""
         ...
 
+    def news_urls(self) -> list[str]:
+        """URLs already stored — lets the news runner enrich only NEW articles."""
+        ...
+
+    def save_news_items(self, items: list[dict]) -> int:
+        """Upsert news items (keyed by url); return how many were new."""
+        ...
+
+    def news_items(self, *, topics: tuple[str, ...] | None = None,
+                   days: int | None = None, limit: int = 200) -> list[dict]:
+        """Recent relevant news, newest first; optional topic / day-window filter."""
+        ...
+
     def social_targets(self) -> list[dict]:
         """Monitored LinkedIn accounts (own + competitors)."""
         ...
@@ -531,6 +544,58 @@ class JsonFileRepository:
             "by_segment": dict(sorted(by_segment.items(), key=lambda kv: -kv[1])),
             "uploaded_at": doc.get("uploaded_at"),
         }
+
+    # ── market-intelligence news (sidecar file) ──────────────────────
+
+    def _news_path(self) -> Path:
+        return self._path.with_name("news_items.json")
+
+    def _news_store(self) -> dict[str, dict]:
+        p = self._news_path()
+        if not p.exists():
+            return {}
+        try:
+            return json.loads(p.read_text())
+        except json.JSONDecodeError:
+            return {}
+
+    def news_urls(self) -> list[str]:
+        return list(self._news_store().keys())
+
+    def save_news_items(self, items: list[dict]) -> int:
+        store = self._news_store()
+        new = 0
+        for it in items:
+            url = it.get("url")
+            if not url:
+                continue
+            if url not in store:
+                new += 1
+            store[url] = it
+        # Cap at the 500 most recent so the sidecar can't grow without bound.
+        if len(store) > 500:
+            kept = sorted(store.values(),
+                          key=lambda r: r.get("published_at") or r.get("fetched_at") or "",
+                          reverse=True)[:500]
+            store = {r["url"]: r for r in kept}
+        p = self._news_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(json.dumps(store, default=str))
+        tmp.replace(p)
+        return new
+
+    def news_items(self, *, topics=None, days=None, limit=200) -> list[dict]:
+        rows = [r for r in self._news_store().values() if r.get("relevant", True)]
+        if topics:
+            tset = set(topics)
+            rows = [r for r in rows if r.get("topic") in tset]
+        if days:
+            cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+            rows = [r for r in rows
+                    if (r.get("published_at") or r.get("fetched_at") or "") >= cutoff]
+        rows.sort(key=lambda r: r.get("published_at") or r.get("fetched_at") or "", reverse=True)
+        return rows[:limit]
 
     # ── monitored social accounts (sidecar file) ─────────────────────
 

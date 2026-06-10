@@ -898,6 +898,7 @@ function App() {
                   options={[{ value: 'all', label: 'All' }, { value: 'match', label: `On ABM list${abmMatchCount ? ` (${abmMatchCount})` : ''}` }, { value: 'confirmed', label: 'ABM confirmed' }]} />
               </div>
               <div className="flex items-center gap-3">
+                {tab === 'qualified' && <IntentInfo />}
                 <input ref={abmInputRef} type="file" accept=".xlsx" className="hidden"
                   onChange={(e) => { const f = e.target.files[0]; e.target.value = ''; handleAbmUpload(f); }} />
                 <button onClick={() => abmInputRef.current && abmInputRef.current.click()}

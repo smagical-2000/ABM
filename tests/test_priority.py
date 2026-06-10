@@ -91,6 +91,15 @@ def test_last_signal_at_is_the_freshest():
         == datetime.fromisoformat(_recent(2))
 
 
+def test_outcome_adjustment_is_a_noop_placeholder_today():
+    assert priority.outcome_adjustment() == 0
+    assert priority.outcome_adjustment({"engaged": True, "meeting_booked": True}) == 0
+    # the (no-op) outcomes hook must not change the score yet
+    sigs = [_sig("leadership_change")]
+    base = priority.intent(sigs, now=NOW).score
+    assert priority.intent(sigs, now=NOW, outcomes={"engaged": True}).score == base
+
+
 def test_hot_threshold_is_env_tunable(monkeypatch):
     # a single core role scores 30 + 5 recency = 35 (Watch at the default 65)
     assert priority.intent([_job("Denials Spec")], now=NOW).tier == "watch"

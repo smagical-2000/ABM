@@ -265,6 +265,16 @@ def test_discovery_panel_ranks_by_buying_intent(page):
     assert body.index("UI Hot Health System") < body.index("UI Stack Health System")
 
 
+def test_intent_scoring_hint_popover(page):
+    """The light 'How intent is scored' hint opens the deterministic rubric + the
+    forward-looking outcomes line."""
+    page.click("text=Discovery")
+    page.wait_for_selector("text=How intent is scored", timeout=10_000)
+    page.click("text=How intent is scored")
+    assert page.get_by_text("Deterministic", exact=False).count() > 0   # the rubric opened
+    assert page.get_by_text("deals won", exact=False).count() > 0       # the "next" provision line
+
+
 def test_discovery_signal_filter_has_social_types(page):
     page.click("text=Discovery")
     options = page.locator("select").nth(1).locator("option").all_inner_texts()

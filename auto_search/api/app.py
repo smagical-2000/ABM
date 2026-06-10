@@ -510,8 +510,10 @@ def create_app() -> FastAPI:
         return {"items": repo.news_items(topics=topics, days=days, limit=limit), **base}
 
     @app.post("/api/news/refresh")
-    def news_refresh():
-        """Pull the latest headlines + tag them in the background. One at a time."""
+    def news_refresh(reenrich: bool = False):
+        """Pull the latest headlines + tag them in the background. One at a time.
+        `reenrich=true` re-tags the already-stored feed instead (a one-off backfill
+        after the enrich model gains fields)."""
         if getattr(app.state, "news_running", False):
             return {"started": False, "busy": True}
         app.state.news_running = True
@@ -524,7 +526,9 @@ def create_app() -> FastAPI:
                 op.record(step="news_enrich", actual_usd=usd, model="news")
 
             try:
-                summary = await news.run_once(app.state.repo, on_cost=on_cost)
+                summary = await (news.reenrich_stored(app.state.repo, on_cost=on_cost)
+                                 if reenrich
+                                 else news.run_once(app.state.repo, on_cost=on_cost))
                 app.state.last_news = {**summary, "at": datetime.now(UTC).isoformat()}
             except Exception:  # noqa: BLE001 — never crash the loop
                 logger.exception("news refresh failed")

@@ -108,3 +108,23 @@ def test_json_repo_news_ranked_by_get_behind(tmp_path):
     ])
     # higher get-behind wins over recency
     assert [r["url"] for r in repo.news_items()] == ["b", "a"]
+
+
+@pytest.mark.asyncio
+async def test_reenrich_stored_backfills_new_fields(monkeypatch, tmp_path):
+    from auto_search.db.repository import JsonFileRepository
+    repo = JsonFileRepository(path=str(tmp_path / "d.json"))
+    repo.save_news_items([{"url": "u1", "title": "CMS prior auth rule",
+                           "topic": "prior_auth", "relevant": True}])
+
+    async def fake_enrich(items):
+        for it in items:
+            it.get_behind = 88
+            it.play = "target prior-auth-heavy systems"
+        return 0.01
+
+    monkeypatch.setattr(enrich_mod, "enrich", fake_enrich)
+    summary = await runner.reenrich_stored(repo)
+    assert summary["reenriched"] == 1
+    back = repo.news_items()[0]
+    assert back["get_behind"] == 88 and back["play"] == "target prior-auth-heavy systems"

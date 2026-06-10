@@ -13,6 +13,6 @@ tags each with a topic + a one-line "why it matters for an RCM-automation seller
 from __future__ import annotations
 
 from auto_search.news.models import TOPIC_LABELS, TOPICS, NewsItem
-from auto_search.news.runner import run_once
+from auto_search.news.runner import reenrich_stored, run_once
 
-__all__ = ["TOPICS", "TOPIC_LABELS", "NewsItem", "run_once"]
+__all__ = ["TOPICS", "TOPIC_LABELS", "NewsItem", "reenrich_stored", "run_once"]

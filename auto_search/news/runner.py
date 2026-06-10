@@ -11,8 +11,32 @@ import logging
 
 from auto_search.news import enrich as _enrich
 from auto_search.news import feeds
+from auto_search.news.models import NewsItem
 
 logger = logging.getLogger(__name__)
+
+
+async def reenrich_stored(repo, *, days: int | None = None, limit: int = 500, on_cost=None) -> dict:
+    """Re-run enrich over already-stored items so a model change backfills the new
+    fields (get_behind / play) on the existing feed. One-off; cheap (one batched
+    pass over titles). No-op on a repo without the news methods."""
+    if not (hasattr(repo, "news_items") and hasattr(repo, "save_news_items")):
+        return {"reenriched": 0, "cost_usd": 0.0}
+    fields = set(NewsItem.model_fields)
+    items = [NewsItem(**{k: v for k, v in r.items() if k in fields})
+             for r in repo.news_items(days=days, limit=limit)]
+    cost = 0.0
+    if items:
+        cost = await _enrich.enrich(items)
+        if on_cost and cost:
+            try:
+                on_cost(cost)
+            except Exception:  # noqa: BLE001 — accounting must not break the run
+                logger.exception("news on_cost hook failed")
+        repo.save_news_items([it.model_dump() for it in items])
+    summary = {"reenriched": len(items), "cost_usd": round(cost, 4)}
+    logger.info("news reenrich: %s", summary)
+    return summary
 
 
 async def run_once(repo, *, max_per_query: int = 15, do_enrich: bool = True,

@@ -703,8 +703,8 @@ function App() {
       await window.API.promote(key);
       removeCompany(key);
       bumpScored();
-      pushToast(`Promoted ${c ? c.name : 'company'} → Scoring`, 'success');
-    } catch (e) { pushToast(`Promote failed: ${e.message}`, 'danger'); }
+      pushToast(`Scoring ${c ? c.name : 'company'}…`, 'success');
+    } catch (e) { pushToast(`Couldn't score ${c ? c.name : 'company'}: ${e.message}`, 'danger'); }
   }
   async function handleDefer(key) {
     const c = companies.find((x) => x.company_key === key);

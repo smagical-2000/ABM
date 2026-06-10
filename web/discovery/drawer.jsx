@@ -257,7 +257,7 @@ function CompanyDrawer({ company, onClose, onPromote, onDefer, onReject, onResto
                 <div className="flex items-center gap-2">
                   <button onClick={onPromote}
                     className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2.5 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300">
-                    <Icons.arrowUp className="h-4 w-4" />Promote to scoring
+                    <Icons.arrowUp className="h-4 w-4" />Score
                   </button>
                   <DeferButton onClick={onDefer} size="lg" />
                   <RejectButton onClick={onReject} size="lg" />

@@ -6,7 +6,7 @@ function PromoteButton({ onClick, size = 'sm' }) {
   return (
     <button onClick={onClick}
       className={`inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 ${pad} font-medium text-white shadow-sm transition-colors hover:bg-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300`}>
-      <Icons.arrowUp className="h-3.5 w-3.5" />Promote
+      <Icons.arrowUp className="h-3.5 w-3.5" />Score
     </button>
   );
 }

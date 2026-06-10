@@ -71,6 +71,14 @@ UPDATE scored_accounts SET warm_intros =
     ]}'::jsonb
 WHERE account_id='ui_demo_social';
 
+-- UI Demo Health System gets a WARM path (warm_count 1) so the Scored board's
+-- "N warm" badge + the drawer's warm linkage are exercised + regressed.
+UPDATE scored_accounts SET warm_intros =
+  '{"state":"ready","source":"apollo","schools_enriched":false,"warm_count":1,
+    "founders_used":["Harpaul","Rosie","Geoffrey"],
+    "contacts":[{"name":"Warm Exec","title":"VP Revenue Cycle","linkedin_url":"https://www.linkedin.com/in/warm-exec","location":"Dallas, Texas","schools":[],"paths":[{"kind":"shared_employer","founder":"Harpaul","evidence":"Both at Olive — overlapping 2019-2021","strength":80}],"warmth":80}]}'::jsonb
+WHERE account_id='ui_demo_job';
+
 -- Discovery: a STACKED company (2 open RCM roles) → exercises the
 -- "🔥 N RCM roles open" headline pill on the row + drawer.
 INSERT INTO discovery_companies
@@ -201,7 +209,15 @@ def test_warm_intros_no_warm_renders_clean(page):
     assert page.locator("text=Jane Roe").count() > 0                 # the contact still renders
     assert page.locator("text=No founder path").count() == 0         # per-row clutter gone
     assert page.locator("text=0 warm of").count() == 0               # footer reframed
-    assert page.get_by_text("decision-makers", exact=False).count() > 0
+    assert page.get_by_text("no warm paths", exact=False).count() > 0  # but it's mentioned once
+
+
+def test_scored_board_highlights_warm_accounts(page):
+    """An account with warm intro paths gets an 'N warm' badge on its board row;
+    a 0-warm account does not."""
+    page.click("text=Scored")
+    page.wait_for_selector("text=UI Demo Health System", timeout=10_000)
+    assert page.get_by_text("1 warm", exact=False).count() > 0       # warm account badged
 
 
 def test_scored_board_has_find_intros_button(page):

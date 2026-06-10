@@ -146,7 +146,7 @@ function WarmIntrosSection({ account }) {
             <div className="flex items-center justify-between bg-zinc-50/60 px-4 py-2 text-[11.5px] text-zinc-400">
               <span>{warmCount > 0
                 ? `${warmCount} warm of ${contacts.length} · ${wi.source === 'apollo' ? 'Apollo' : 'LinkedIn'} · vs ${(wi.founders_used || []).length || 3} founders`
-                : `${contacts.length} decision-maker${contacts.length === 1 ? '' : 's'} · ${wi.source === 'apollo' ? 'Apollo' : 'LinkedIn'}`}</span>
+                : `${contacts.length} decision-maker${contacts.length === 1 ? '' : 's'} · no warm paths · ${wi.source === 'apollo' ? 'Apollo' : 'LinkedIn'}`}</span>
               {wi.generated_at && <span title={wi.generated_at}>{relativeTime(wi.generated_at)}</span>}
             </div>
           </div>
@@ -338,7 +338,7 @@ function ScoreDrawer({ account, onClose, onRescore, onOpenLanding }) {
                     className="flex items-center justify-between gap-3 rounded-xl border border-zinc-200 px-4 py-3 transition-colors hover:bg-zinc-50 hover:border-zinc-300">
                     <div className="flex items-center gap-2.5 text-[13px] text-zinc-600">
                       <window.Icons.compass className="h-4 w-4 text-zinc-400" />
-                      Promoted from Discovery
+                      From Discovery
                     </div>
                     <span className="inline-flex items-center gap-1 text-[12px] text-zinc-400">View discovery signals<Icons.arrowRight className="h-3.5 w-3.5" /></span>
                   </a>

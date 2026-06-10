@@ -739,7 +739,7 @@ function App() {
       try { await window.API.promote(c.company_key); removeCompany(c.company_key); } catch (e) { /* leave it */ }
     }
     bumpScored();
-    pushToast(`${remaining.length} ${remaining.length === 1 ? 'company' : 'companies'} promoted to Scoring`, 'success');
+    pushToast(`Scoring ${remaining.length} ${remaining.length === 1 ? 'company' : 'companies'}…`, 'success');
   }
   useEffect(() => {
     if (!autoEnabled) return;
@@ -865,7 +865,7 @@ function App() {
         <main className="mx-auto max-w-6xl px-8 py-8">
           <div className="mb-6">
             <h1 className="text-[24px] font-semibold tracking-tight text-zinc-900">Discovery Panel</h1>
-            <p className="mt-1 text-[14px] text-zinc-500">Review AI-qualified companies and route each one. Promote or reject.</p>
+            <p className="mt-1 text-[14px] text-zinc-500">Review AI-qualified companies and route each one. Score or reject.</p>
           </div>
 
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -1356,7 +1356,7 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
             <div className="flex flex-col items-center justify-center py-24 text-center">
               <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-zinc-100 text-zinc-400"><Icons.layers className="h-7 w-7" /></div>
               <h3 className="mt-5 text-[15px] font-semibold text-zinc-900">No scored accounts yet</h3>
-              <p className="mt-1.5 max-w-xs text-[13px] text-zinc-500">Promote a company from Discovery, or import a CSV to start scoring.</p>
+              <p className="mt-1.5 max-w-xs text-[13px] text-zinc-500">Score a company from Discovery, or import a CSV to start scoring.</p>
               <button onClick={() => setImporting(true)} className="mt-5 inline-flex items-center gap-2 rounded-lg bg-zinc-900 px-3.5 py-2 text-[13px] font-medium text-white transition-colors hover:bg-zinc-800">
                 <Icons.upload className="h-4 w-4" />Import accounts
               </button>
@@ -1370,7 +1370,7 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
             ))
           )}
         </div>
-        <p className="mt-4 text-center text-[12px] text-zinc-400">Promoted accounts and CSV imports converge here · QA runs independently on every score</p>
+        <p className="mt-4 text-center text-[12px] text-zinc-400">Scored accounts and CSV imports converge here · QA runs independently on every score</p>
       </main>
 
       <ScoreDrawer account={openAccount} onClose={() => setOpenAcc(null)}

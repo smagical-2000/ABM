@@ -618,7 +618,8 @@ class JsonFileRepository:
             cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
             rows = [r for r in rows
                     if (r.get("published_at") or r.get("fetched_at") or "") >= cutoff]
-        rows.sort(key=lambda r: r.get("published_at") or r.get("fetched_at") or "", reverse=True)
+        rows.sort(key=lambda r: (r.get("get_behind") or 0,
+                                 r.get("published_at") or r.get("fetched_at") or ""), reverse=True)
         return rows[:limit]
 
     # ── monitored social accounts (sidecar file) ─────────────────────

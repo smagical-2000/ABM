@@ -166,9 +166,14 @@ CREATE TABLE IF NOT EXISTS news_items (
     snippet         TEXT,
     topic           TEXT,
     why_it_matters  TEXT,
+    get_behind      INTEGER NOT NULL DEFAULT 0,   -- 0-100: how hard to get behind it
+    play            TEXT,                         -- who to target + the hook to use
     relevant        BOOLEAN NOT NULL DEFAULT true,
     fetched_at      TEXT
 );
+-- Backfill for tables created before get_behind/play existed (idempotent).
+ALTER TABLE news_items ADD COLUMN IF NOT EXISTS get_behind INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE news_items ADD COLUMN IF NOT EXISTS play TEXT;
 CREATE INDEX IF NOT EXISTS idx_news_topic_pub ON news_items (topic, published_at DESC);
 
 -- Monitored LinkedIn accounts: profiles/companies whose post engagers we scrape

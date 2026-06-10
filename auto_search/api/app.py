@@ -499,7 +499,8 @@ def create_app() -> FastAPI:
 
     @app.get("/api/news")
     def get_news(topic: str | None = None, days: int = 30, limit: int = 200):
-        """Recent RCM / regulation headlines for the News tab, newest first."""
+        """RCM / regulation headlines for the News tab, ranked by get-behind (how
+        hard Magical should act on each as an outreach wedge), newest breaking ties."""
         repo = app.state.repo
         base = {"topics": list(news.TOPICS), "labels": news.TOPIC_LABELS,
                 "last_run": getattr(app.state, "last_news", None)}

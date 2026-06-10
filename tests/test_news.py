@@ -76,3 +76,35 @@ async def test_runner_enriches_only_new_and_drops_irrelevant(monkeypatch):
     assert summary["stored"] == 1                     # only u1 stored
     assert [it["url"] for it in repo.saved] == ["u1"]
     assert costs == [0.02]
+
+
+@pytest.mark.asyncio
+async def test_enrich_parses_get_behind_and_play(monkeypatch):
+    import json as _json
+    items = [NewsItem(url="u1", title="CMS forces 72-hour prior auth decisions")]
+    verdict = [{"id": "0", "relevant": True, "topic": "prior_auth",
+                "why_it_matters": "manual auth can't keep up",
+                "get_behind": 92, "play": "target systems hiring prior-auth staff"}]
+
+    async def fake_call(**_kw):
+        return object()
+
+    monkeypatch.setattr(enrich_mod.llm, "call_plain", fake_call)
+    monkeypatch.setattr(enrich_mod.llm, "extract_text", lambda _r: _json.dumps(verdict))
+    monkeypatch.setattr(enrich_mod.llm, "spend_from_response", lambda _r, model=None: None)
+
+    await enrich_mod.enrich(items)
+    assert items[0].get_behind == 92
+    assert items[0].play == "target systems hiring prior-auth staff"
+    assert items[0].topic == "prior_auth" and items[0].why_it_matters
+
+
+def test_json_repo_news_ranked_by_get_behind(tmp_path):
+    from auto_search.db.repository import JsonFileRepository
+    repo = JsonFileRepository(path=str(tmp_path / "disco.json"))
+    repo.save_news_items([
+        {"url": "a", "title": "low", "get_behind": 30, "relevant": True, "published_at": "2026-06-10"},
+        {"url": "b", "title": "high", "get_behind": 90, "relevant": True, "published_at": "2026-06-01"},
+    ])
+    # higher get-behind wins over recency
+    assert [r["url"] for r in repo.news_items()] == ["b", "a"]

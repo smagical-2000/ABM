@@ -36,12 +36,20 @@ SYSTEM_PROMPT = textwrap.dedent("""
     - topic: one of prior_auth | denials | rcm_ai | eligibility | policy |
       operations (best single fit; "policy" for CMS/regulatory, "rcm_ai" when
       automation/AI is the angle, "operations" for general RCM ops).
-    - why_it_matters: ONE sentence on the angle for a seller of RCM automation
-      (the wedge / urgency it creates). "" when not relevant.
+    - why_it_matters: ONE sentence on why it's relevant to a seller of RCM
+      automation (the wedge / urgency it creates). "" when not relevant.
+    - get_behind: 0-100 — how hard Magical should get behind this as an outreach
+      wedge RIGHT NOW. HIGH when Magical directly automates the problem it raises
+      (prior auth, denials, eligibility, claims) AND it is urgent (a new rule,
+      mandate, deadline, or record-high stat) AND broad (national / all-payer).
+      LOW when narrow, regional, vague, or only loosely about reimbursement.
+      0 when not relevant.
+    - play: ONE sentence a rep can actually use — WHO to target + the hook to open
+      with (quote a crisp line). "" when not relevant.
 
     Return ONLY a JSON array, one object per id, every id echoed exactly:
-    [{"id": "<id>", "relevant": true|false,
-      "topic": "prior_auth"|..., "why_it_matters": "<one sentence>"}]
+    [{"id": "<id>", "relevant": true|false, "topic": "prior_auth"|...,
+      "why_it_matters": "<one sentence>", "get_behind": <0-100>, "play": "<one sentence>"}]
     No prose, no markdown fences.
 """).strip()
 
@@ -78,4 +86,9 @@ async def enrich(items: list[NewsItem]) -> float:
             if topic in TOPICS:
                 it.topic = topic
             it.why_it_matters = (v.get("why_it_matters") or "").strip() or None
+            it.play = (v.get("play") or "").strip() or None
+            try:
+                it.get_behind = max(0, min(100, int(v.get("get_behind") or 0)))
+            except (TypeError, ValueError):
+                it.get_behind = 0
     return round(total, 4)

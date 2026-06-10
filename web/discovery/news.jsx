@@ -24,9 +24,12 @@ function NewsTopicChip({ topic, labels }) {
 }
 
 function NewsCard({ item, labels }) {
+  const score = item.get_behind || 0;
+  const lead = score >= 70;            // worth getting behind right now
   return (
     <div className="border-b border-zinc-100 px-6 py-4 transition-colors last:border-0 hover:bg-zinc-50/60">
       <div className="mb-1.5 flex items-center gap-2 text-[12px] text-zinc-400">
+        {item.topic && <NewsTopicChip topic={item.topic} labels={labels} />}
         {item.source && <span className="font-medium text-zinc-500">{item.source}</span>}
         {item.published_at && (
           <>
@@ -34,16 +37,26 @@ function NewsCard({ item, labels }) {
             <span title={formatDateTime(item.published_at)}>{relativeTime(item.published_at)}</span>
           </>
         )}
-        {item.topic && <span className="ml-auto"><NewsTopicChip topic={item.topic} labels={labels} /></span>}
+        {score > 0 && (
+          <span title={`Get-behind ${score} of 100`}
+            className={`ml-auto inline-flex shrink-0 items-center rounded-md px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset ${lead ? 'bg-amber-50 text-amber-700 ring-amber-100' : 'bg-zinc-100 text-zinc-500 ring-zinc-200'}`}>
+            {lead ? 'Get behind' : 'Context'} · {score}
+          </span>
+        )}
       </div>
       <a href={safeHref(item.url)} target="_blank" rel="noreferrer"
         className="block text-[15px] font-semibold leading-snug text-zinc-900 underline-offset-2 hover:text-indigo-600 hover:underline">
         {item.title}
       </a>
       {item.why_it_matters && (
-        <div className="mt-2 flex items-start gap-2 rounded-lg bg-amber-50/60 px-3 py-2 text-[12.5px] text-amber-800 ring-1 ring-inset ring-amber-100">
-          <Icons.zap className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
-          <span><span className="font-semibold">Why it matters:</span> {item.why_it_matters}</span>
+        <div className="mt-2 text-[12.5px] leading-relaxed text-zinc-500">
+          <span className="font-medium text-zinc-600">Why it matters</span> · {item.why_it_matters}
+        </div>
+      )}
+      {item.play && (
+        <div className="mt-2 flex items-start gap-2 rounded-lg bg-zinc-50 px-3 py-2 text-[12.5px] leading-relaxed text-zinc-600 ring-1 ring-inset ring-zinc-100">
+          <Icons.arrowRight className="mt-0.5 h-3.5 w-3.5 shrink-0 text-zinc-400" />
+          <span><span className="font-medium text-zinc-700">The play</span> · {item.play}</span>
         </div>
       )}
     </div>

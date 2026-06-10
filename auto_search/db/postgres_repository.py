@@ -465,13 +465,16 @@ class PostgresRepository:
                 cur = conn.execute(
                     """INSERT INTO news_items
                          (url, title, source, published_at, snippet, topic,
-                          why_it_matters, relevant, fetched_at)
+                          why_it_matters, get_behind, play, relevant, fetched_at)
                        VALUES (%(url)s, %(title)s, %(source)s, %(published_at)s,
                                %(snippet)s, %(topic)s, %(why_it_matters)s,
+                               coalesce(%(get_behind)s, 0), %(play)s,
                                coalesce(%(relevant)s, true), %(fetched_at)s)
                        ON CONFLICT (url) DO UPDATE SET
                          topic = EXCLUDED.topic,
                          why_it_matters = EXCLUDED.why_it_matters,
+                         get_behind = EXCLUDED.get_behind,
+                         play = EXCLUDED.play,
                          snippet = COALESCE(EXCLUDED.snippet, news_items.snippet),
                          relevant = EXCLUDED.relevant
                        RETURNING (xmax = 0) AS inserted""",
@@ -479,6 +482,7 @@ class PostgresRepository:
                      "source": it.get("source"), "published_at": it.get("published_at"),
                      "snippet": it.get("snippet"), "topic": it.get("topic"),
                      "why_it_matters": it.get("why_it_matters"),
+                     "get_behind": it.get("get_behind", 0), "play": it.get("play"),
                      "relevant": it.get("relevant", True), "fetched_at": it.get("fetched_at")})
                 row = cur.fetchone()
                 if row and row.get("inserted"):
@@ -498,8 +502,8 @@ class PostgresRepository:
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT url, title, source, published_at, snippet, topic, "
-                "why_it_matters, fetched_at FROM news_items "
-                f"{where} ORDER BY coalesce(published_at, fetched_at) DESC "
+                "why_it_matters, get_behind, play, fetched_at FROM news_items "
+                f"{where} ORDER BY get_behind DESC, coalesce(published_at, fetched_at) DESC "
                 "LIMIT %(limit)s", params).fetchall()
         return [dict(r) for r in rows]
 

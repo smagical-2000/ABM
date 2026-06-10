@@ -28,6 +28,8 @@ class NewsItem(BaseModel):
     published_at: str | None = None       # ISO-8601
     snippet: str | None = None            # best-effort, from the feed
     topic: str | None = None              # one of TOPICS (assigned by enrich)
-    why_it_matters: str | None = None     # one-line angle for an RCM-automation seller
+    why_it_matters: str | None = None     # one-line: why it's relevant
+    get_behind: int = 0                   # 0-100: how hard to get behind it as a wedge
+    play: str | None = None               # one-line: who to target + the hook to use
     relevant: bool = True                 # enrich drops the rest
     fetched_at: str | None = None

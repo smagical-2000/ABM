@@ -144,9 +144,6 @@ function CompanyRow({ company, leaving, selected, onToggleSelect, onOpen, onProm
             <SegmentBadge segment={company.segment} />
             <AbmBadge match={company.abm_match} />
           </div>
-          {company.intent_reason && (
-            <div className={`mt-1 truncate text-[12.5px] ${company.intent_tier === 'hot' ? 'font-medium text-amber-700' : 'text-zinc-500'}`}>{company.intent_reason}</div>
-          )}
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <SignalChips signals={company.signals} />
           </div>

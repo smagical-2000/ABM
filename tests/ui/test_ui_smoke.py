@@ -60,6 +60,17 @@ ON CONFLICT (account_id) DO UPDATE SET
   discovery_signals=EXCLUDED.discovery_signals, scored_at=EXCLUDED.scored_at,
   total=EXCLUDED.total, tier_band=EXCLUDED.tier_band, dimensions=EXCLUDED.dimensions;
 
+-- UI Demo Clinic gets a READY warm-intros payload with NO warm paths (all direct),
+-- so the drawer's decluttered "no warm contacts" view is exercised + regressed.
+UPDATE scored_accounts SET warm_intros =
+  '{"state":"ready","source":"apollo","schools_enriched":true,"warm_count":0,
+    "founders_used":["Harpaul","Rosie","Geoffrey"],
+    "contacts":[
+      {"name":"Jane Roe","title":"VP Revenue Cycle","linkedin_url":"https://www.linkedin.com/in/jane-roe","location":"Cincinnati, Ohio","schools":["Xavier University"],"paths":[]},
+      {"name":"John Doe","title":"Chief Financial Officer","linkedin_url":"https://www.linkedin.com/in/john-doe","location":"Cincinnati, Ohio","schools":[],"paths":[]}
+    ]}'::jsonb
+WHERE account_id='ui_demo_social';
+
 -- Discovery: a STACKED company (2 open RCM roles) → exercises the
 -- "🔥 N RCM roles open" headline pill on the row + drawer.
 INSERT INTO discovery_companies
@@ -177,6 +188,20 @@ def test_app_renders_without_console_errors(page):
     real = [e for e in page.console_errors
             if not any(x in e.lower() for x in ("favicon", "tailwind", "cdn", "font"))]
     assert not real, f"console errors: {real[:5]}"
+
+
+def test_warm_intros_no_warm_renders_clean(page):
+    """When no contact has a warm path, the section drops the warm framing: it's
+    titled 'Decision-makers', shows no repeated 'No founder path' line, and the
+    footer reads as a plain decision-maker count (not '0 warm of N')."""
+    page.click("text=Scored")
+    page.wait_for_selector("text=UI Demo Clinic", timeout=10_000)
+    page.click("text=UI Demo Clinic")
+    page.wait_for_selector("text=Decision-makers", timeout=10_000)   # heading adapts to 0-warm
+    assert page.locator("text=Jane Roe").count() > 0                 # the contact still renders
+    assert page.locator("text=No founder path").count() == 0         # per-row clutter gone
+    assert page.locator("text=0 warm of").count() == 0               # footer reframed
+    assert page.get_by_text("decision-makers", exact=False).count() > 0
 
 
 def test_scored_board_has_find_intros_button(page):

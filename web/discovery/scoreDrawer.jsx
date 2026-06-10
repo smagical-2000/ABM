@@ -76,10 +76,15 @@ function WarmIntrosSection({ account }) {
   }
 
   const contacts = (wi && wi.contacts) || [];
+  const warmCount = (wi && wi.warm_count) || 0;
+  // With no warm path on anyone, this is just a decision-maker list — drop the
+  // warm framing (heading, per-row "no path", "0 warm of N" footer) so it reads clean.
+  const heading = wi && wi.state === 'ready' && contacts.length > 0 && warmCount === 0
+    ? 'Decision-makers' : 'Warm intros';
   return (
     <div className="mt-7">
       <div className="mb-3 flex items-center gap-2">
-        <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">Warm intros</span>
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">{heading}</span>
         <span className="h-px flex-1 bg-zinc-100" />
         {wi && wi.state === 'ready' && (
           <button onClick={kick} title="Re-run the search"
@@ -127,21 +132,21 @@ function WarmIntrosSection({ account }) {
                       <span className="text-zinc-300">Alma mater · </span>{c.schools.join(' · ')}
                     </div>
                   )}
-                  {/* The linkage — the whole point. Warm path = how to get the intro;
-                      otherwise an honest "reach out directly" so it's never ambiguous. */}
-                  <div className={`mt-1 flex items-start gap-1.5 text-[12px] ${best ? 'text-amber-700' : 'text-zinc-400'}`}>
-                    <Icons.arrowRight className="mt-0.5 h-3 w-3 shrink-0" />
-                    {best ? (
+                  {/* The linkage — shown only when there IS a warm path (the whole
+                      point). Direct contacts stay clean; the name links to LinkedIn. */}
+                  {best && (
+                    <div className="mt-1 flex items-start gap-1.5 text-[12px] text-amber-700">
+                      <Icons.arrowRight className="mt-0.5 h-3 w-3 shrink-0" />
                       <span>{best.kind === 'engaged' ? '' : `Ask ${best.founder} — `}{best.evidence}</span>
-                    ) : (
-                      <span>No founder path — reach out directly{c.linkedin_url ? ' on LinkedIn' : ''}</span>
-                    )}
-                  </div>
+                    </div>
+                  )}
                 </div>
               );
             })}
             <div className="flex items-center justify-between bg-zinc-50/60 px-4 py-2 text-[11.5px] text-zinc-400">
-              <span>{wi.warm_count || 0} warm of {contacts.length} · {wi.source === 'apollo' ? 'Apollo' : 'LinkedIn'} · vs {(wi.founders_used || []).length || 3} founders</span>
+              <span>{warmCount > 0
+                ? `${warmCount} warm of ${contacts.length} · ${wi.source === 'apollo' ? 'Apollo' : 'LinkedIn'} · vs ${(wi.founders_used || []).length || 3} founders`
+                : `${contacts.length} decision-maker${contacts.length === 1 ? '' : 's'} · ${wi.source === 'apollo' ? 'Apollo' : 'LinkedIn'}`}</span>
               {wi.generated_at && <span title={wi.generated_at}>{relativeTime(wi.generated_at)}</span>}
             </div>
           </div>

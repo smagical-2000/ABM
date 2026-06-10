@@ -19,8 +19,10 @@ from auto_search.news.models import TOPICS, NewsItem
 logger = logging.getLogger(__name__)
 
 _MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
-_BATCH = 40
-_MAX_TOKENS = 3000
+# Each item now emits why_it_matters + play (two sentences), so keep the batch
+# small and the output cap generous — a truncated JSON array fails the whole batch.
+_BATCH = 20
+_MAX_TOKENS = 6000
 
 SYSTEM_PROMPT = textwrap.dedent("""
     You triage news for Magical, an agentic-AI revenue cycle management (RCM)

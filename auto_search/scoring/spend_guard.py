@@ -203,8 +203,12 @@ class Operation:
         return self.account_cost(account_id) > max_per_account()
 
     def overheated(self) -> bool:
-        return (self.actual > self.estimated * overrun_ratio()
-                or self.actual > op_hard_cap())
+        # estimated == 0 means "no envelope was estimated" (a news refresh, an
+        # uncapped pull) — only the absolute hard cap applies there. Comparing
+        # against 0 * ratio would brand ANY nonzero spend as overheated.
+        if self.estimated > 0 and self.actual > self.estimated * overrun_ratio():
+            return True
+        return self.actual > op_hard_cap()
 
     def finish(self, status: str | None = None, error: str | None = None) -> None:
         self.status = status or ("overheated" if self.overheated() else "completed")

@@ -45,6 +45,7 @@ class PanelSignal(BaseModel):
     # job_posting extras (null otherwise)
     role: str | None = None
     title: str | None = None
+    tier: str | None = None             # core | standard — feeds buying-intent
     url: str | None = None
     location: str | None = None
     age: str | None = None
@@ -78,6 +79,10 @@ class PanelCompany(BaseModel):
     signal_count: int = 0
     signals: list[PanelSignal] = []
     abm_match: AbmMatch | None = None    # set when this company is on the ABM target list
+    # buying-intent (priority.py) — set by the panel API, drives ranking + the gate
+    intent_score: int = 0                # 0-100
+    intent_tier: str | None = None       # "hot" | "watch"
+    intent_reason: str | None = None     # short human "why" ("3 RCM roles open · ABM target")
 
 
 class DiscoveryStats(BaseModel):
@@ -206,6 +211,7 @@ def _to_panel_company(row: dict) -> PanelCompany:
             strength=s.get("signal_strength"),
             role=(p := s.get("payload") or {}).get("role"),
             title=p.get("job_title"),
+            tier=p.get("tier"),
             # The signal's evidence link: a job posting for hiring signals, the
             # post for social engagement — so the panel + the scored "Why
             # discovered" proof link work for every signal type, not just jobs.

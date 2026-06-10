@@ -109,6 +109,14 @@ class DiscoveryRepository(Protocol):
         """
         ...
 
+    def enter_needs_review(self, company_key: str) -> dict | None:
+        """Demote a stale qualified lead into the needs-review queue (the
+        lifecycle sweep). Flips icp_status qualified -> needs_review only when it
+        is currently qualified (idempotent); review_status stays pending. Returns
+        the updated row, or None if not stored / not currently qualified.
+        """
+        ...
+
     def delete(self, keys: list[str] | None) -> int:
         """Delete companies (and their signals) by normalized key.
 
@@ -383,6 +391,14 @@ class JsonFileRepository:
             row["promoted_at"] = now
         if review_status == "rejected":
             row["rejection_reason"] = reason
+        self._flush()
+        return row
+
+    def enter_needs_review(self, company_key: str) -> dict | None:
+        row = self._store.get(company_key)
+        if row is None or row.get("icp_status") != "qualified":
+            return None
+        row["icp_status"] = "needs_review"
         self._flush()
         return row
 

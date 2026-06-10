@@ -246,6 +246,20 @@ class PostgresRepository:
             ).fetchone()
         return self.get(company_key) if row else None
 
+    def enter_needs_review(self, company_key: str) -> dict | None:
+        """Demote a stale qualified lead into needs-review (lifecycle sweep).
+        Guarded to icp_status='qualified' so it's idempotent."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                UPDATE discovery_companies SET icp_status = 'needs_review'
+                 WHERE normalized_name = %s AND icp_status = 'qualified'
+             RETURNING normalized_name
+                """,
+                (company_key,),
+            ).fetchone()
+        return self.get(company_key) if row else None
+
     # ── reads ──────────────────────────────────────────────────────────
 
     def already_qualified(self, company_key: str) -> bool:

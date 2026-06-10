@@ -86,6 +86,18 @@ function AbmCallout({ match }) {
 window.AbmCallout = AbmCallout;
 
 // ── CompanyRow ──────────────────────────────────────────────────────────────
+function IntentBadge({ tier, score }) {
+  if (!tier) return null;
+  const hot = tier === 'hot';
+  return (
+    <span title={`Buying intent ${score} of 100`}
+      className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-semibold ring-1 ring-inset ${hot ? 'bg-amber-50 text-amber-700 ring-amber-100' : 'bg-zinc-100 text-zinc-500 ring-zinc-200'}`}>
+      {hot && <Icons.zap className="h-3 w-3" />}{hot ? 'Hot' : 'Watch'} {score}
+    </span>
+  );
+}
+window.IntentBadge = IntentBadge;
+
 function CompanyRow({ company, leaving, selected, onToggleSelect, onOpen, onPromote, onReject }) {
   const stop = (fn) => (e) => { e.stopPropagation(); fn(); };
   return (
@@ -112,11 +124,18 @@ function CompanyRow({ company, leaving, selected, onToggleSelect, onOpen, onProm
                 shows in the Recent evaluations feed. */}
             <SegmentBadge segment={company.segment} />
             <AbmBadge match={company.abm_match} />
+            <IntentBadge tier={company.intent_tier} score={company.intent_score} />
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <SignalChips signals={company.signals} />
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[12px] text-zinc-400">
+            {company.intent_reason && (
+              <>
+                <span className={company.intent_tier === 'hot' ? 'font-medium text-amber-700' : 'text-zinc-500'}>{company.intent_reason}</span>
+                <span className="text-zinc-300">·</span>
+              </>
+            )}
             <span>{company.signal_count} {company.signal_count === 1 ? 'signal' : 'signals'}</span>
             {company.qualified_at && (
               <>

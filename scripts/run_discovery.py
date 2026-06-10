@@ -44,7 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dotenv import load_dotenv
 
-from auto_search import job_qualifier, pipeline
+from auto_search import job_qualifier, lifecycle, pipeline
 from auto_search.connectors.acquisitions import AcquisitionsConnector
 from auto_search.connectors.funding import FundingConnector
 from auto_search.connectors.job_postings import JobPostingsConnector
@@ -314,6 +314,10 @@ async def main(args: argparse.Namespace) -> int:
         print(f"  {DIM}panel (qualified) → python scripts/run_discovery.py --panel{RESET}")
         if spend_op is not None:
             spend_op.finish(status="completed")
+        # Self-cleaning pass: stale Watch -> Needs review -> auto-reject (free).
+        sweep = lifecycle.sweep(repo)
+        print(f"  {DIM}lifecycle: {sweep.demoted} → needs-review, "
+              f"{sweep.rejected} auto-rejected{RESET}")
 
     # Production exit code: a single source failing keeps exit 0 (resilient), but
     # a TOTAL failure (every selected source errored) exits non-zero so the

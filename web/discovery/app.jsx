@@ -732,7 +732,8 @@ function App() {
 
   async function doAutoScore() {
     const { companies: cs, leaving: lv } = stateRef.current;
-    const remaining = cs.filter((c) => c.bucket === 'qualified' && !lv[c.company_key]);
+    // Only HOT leads auto-score — Watch leads stay in Discovery (and self-clean).
+    const remaining = cs.filter((c) => c.bucket === 'qualified' && c.intent_tier === 'hot' && !lv[c.company_key]);
     if (remaining.length === 0) return;
     setOpenKey(null); setRejectFor(null);
     for (const c of remaining) {
@@ -778,7 +779,8 @@ function App() {
   const needsCount = companies.filter((c) => c.bucket === 'needs_review' && !leaving[c.company_key]).length;
   const abmMatchCount = companies.filter((c) => c.bucket === tab && c.abm_match && !leaving[c.company_key]).length;
   const remainingMs = deadline - now;
-  const queuedCount = qualifiedCount;
+  // Auto-score touches only HOT leads, so the countdown counts those — not all qualified.
+  const queuedCount = companies.filter((c) => c.bucket === 'qualified' && c.intent_tier === 'hot' && !leaving[c.company_key]).length;
   const urgent = autoEnabled && remainingMs <= 10 * 60 * 1000 && queuedCount > 0;
   function changeHour(h) { setScoreHour(h); setDeadline(window.nextDeadline(h, Date.now())); }
   function previewCountdown() { setAutoEnabled(true); setDeadline(Date.now() + 12000); setAutoOpen(false); }

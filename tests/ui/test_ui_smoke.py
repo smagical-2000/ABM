@@ -114,6 +114,25 @@ VALUES
   ('uisoloclinic','UI Solo Clinic','uisolo.example','Coder','["Coder"]',1,'OH',
    'https://example.com/solo','Medical Coder', now())
 ON CONFLICT (company_key) DO UPDATE SET last_seen_at=EXCLUDED.last_seen_at;
+
+-- A HOT discovery lead (new-exec trigger) → 'Hot' intent badge, sorts to the top
+-- above the Watch-tier stacked company. Exercises the buying-intent ranking.
+INSERT INTO discovery_companies
+  (normalized_name, display_name, domain, icp_status, segment, confidence,
+   reasoning, hq_state, qualified_at, first_seen_at)
+VALUES
+  ('uihothealth','UI Hot Health System','uihot.example','qualified','health_system',
+   0.95,'New CFO — fresh buying window.','OH', now()-interval '2 hours', now()-interval '2 hours')
+ON CONFLICT (normalized_name) DO UPDATE SET
+  icp_status=EXCLUDED.icp_status, qualified_at=EXCLUDED.qualified_at;
+
+INSERT INTO discovery_signals
+  (company_id, source, signal_type, source_external_id, summary,
+   signal_strength, observed_at, payload)
+SELECT dc.id, 'signalbase', 'leadership_change', 'uihot-cfo', 'New CFO appointed',
+       0.9, now()-interval '1 day', '{}'::jsonb
+FROM discovery_companies dc WHERE dc.normalized_name='uihothealth'
+ON CONFLICT (source, source_external_id) DO NOTHING;
 """
 
 
@@ -232,6 +251,17 @@ def test_scored_board_has_find_intros_button(page):
     real = [e for e in page.console_errors
             if not any(x in e.lower() for x in ("favicon", "tailwind", "cdn", "font"))]
     assert not real, f"console errors: {real[:5]}"
+
+
+def test_discovery_panel_ranks_by_buying_intent(page):
+    """Every Discovery row shows a Hot/Watch intent badge; a new-exec lead is Hot
+    and sorts above a Watch-tier stacked-jobs lead."""
+    page.click("text=Discovery")
+    page.wait_for_selector("text=UI Hot Health System", timeout=10_000)
+    assert page.get_by_text("Hot", exact=False).count() > 0      # hot badge present
+    assert page.get_by_text("Watch", exact=False).count() > 0    # watch badge present
+    body = page.inner_text("body")
+    assert body.index("UI Hot Health System") < body.index("UI Stack Health System")
 
 
 def test_discovery_signal_filter_has_social_types(page):

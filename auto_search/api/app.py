@@ -34,7 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from auto_search import discovery_runner, job_stacking, news
+from auto_search import discovery_runner, job_stacking, lifecycle, news, priority
 from auto_search.abm import (
     AbmIndex,
     TargetAccount,
@@ -430,10 +430,16 @@ def create_app() -> FastAPI:
         for c in companies:
             cost = costs.get(c.company_key)
             states = states_from_locations(s.location for s in (c.signals or []))
+            abm_match = match_one(index, name=c.name, domain=c.domain, states=states)
+            sigs = [{"signal_type": s.signal_type, "title": s.title, "role": s.role,
+                     "tier": s.tier, "observed_at": s.observed_at} for s in (c.signals or [])]
+            it = priority.intent(
+                sigs, abm_confirmed=bool(abm_match and abm_match.tier == "confirmed"))
             out.append(c.model_copy(update={
                 "qualify_cost_usd": cost if cost is not None
                 else (est if c.qualified_at else None),
-                "abm_match": match_one(index, name=c.name, domain=c.domain, states=states),
+                "abm_match": abm_match,
+                "intent_score": it.score, "intent_tier": it.tier, "intent_reason": it.reason,
             }))
         return out
 
@@ -479,7 +485,15 @@ def create_app() -> FastAPI:
                          if c.abm_match and c.abm_match.tier == "confirmed"]
         elif abm in ("match", "any", "1", "true"):
             companies = [c for c in companies if c.abm_match]
+        companies.sort(key=lambda c: -c.intent_score)   # hottest intent first
         return companies
+
+    @app.post("/api/discovery/sweep")
+    def discovery_sweep():
+        """Run one self-cleaning lifecycle pass: stale Watch leads -> Needs review,
+        stale Needs-review leads -> auto-rejected. Free (no LLM); the daily cron
+        runs it too. Reversible — an auto-reject restores like any manual reject."""
+        return lifecycle.sweep(app.state.repo).as_dict()
 
     # ── market-intelligence news (RCM / regulation headlines) ────────
 

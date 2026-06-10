@@ -73,7 +73,10 @@ def _sb_kwargs(limit):
 
 
 def _jobs_rows(limit):
-    return limit if limit is not None else int(os.getenv("DISCOVERY_JOBS_MAX_ROWS", "200"))
+    # PER title-query, per board (24 titles -> ~35 searches). Must match the
+    # runner's default (12): the old 200 here meant a cron redeploy quietly
+    # scraped ~16x the rows the panel Run does. Override via env for a deep sweep.
+    return limit if limit is not None else int(os.getenv("DISCOVERY_JOBS_MAX_ROWS", "12"))
 
 
 CONNECTORS = {

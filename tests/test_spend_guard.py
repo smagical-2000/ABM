@@ -167,3 +167,22 @@ async def test_batch_continues_when_one_account_overheats(monkeypatch, tmp_path)
     assert b["state"] == "scored"                           # the other still completes
     # both scorer steps recorded as cost_events
     assert sum(1 for e in repo._events if e["step"] == "score") == 2
+
+
+def test_fail_orphaned_operations_sweeps_running_rows(tmp_path):
+    """A 'running' op at boot has no live task behind it (ops finish in a
+    finally) — the startup sweep must fail it so the feed shows no phantom."""
+    repo = _repo(tmp_path)
+    spend_guard.Operation(repo, "discovery_manual", estimated_usd=1.0)  # row: running
+
+    swept = repo.fail_orphaned_operations()
+
+    assert swept == 1
+    row = repo.recent_operations(limit=1)[0]
+    assert row["status"] == "failed"
+    assert row["finished_at"] is not None
+
+    # A finished op is left alone on subsequent sweeps.
+    op2 = spend_guard.Operation(repo, "news_refresh", estimated_usd=0.1)
+    op2.finish()
+    assert repo.fail_orphaned_operations() == 0

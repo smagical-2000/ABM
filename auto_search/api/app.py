@@ -220,7 +220,8 @@ def _import_label(filename: str | None) -> str:
 
 # Upload caps: a CSV import is raw-bodied, so bound it to avoid an OOM body or a
 # runaway queue that a later "Score all" could turn into a big spend.
-_MAX_UPLOAD_BYTES = 5_000_000   # 5 MB
+_MAX_UPLOAD_BYTES = 5_000_000        # 5 MB (CSV imports)
+_MAX_XLSX_BYTES = 10_000_000         # 10 MB (ABM workbook — openpyxl loads it all)
 _MAX_CSV_ROWS = 5_000
 
 
@@ -334,6 +335,13 @@ async def lifespan(app: FastAPI):
     orphaned = scoring_repo.recover_orphaned_scoring()
     if orphaned:
         logger.warning("recovered %d orphaned 'scoring' account(s) -> queued", orphaned)
+    # Same sweep for spend operations: ops finish in a finally, so a row still
+    # 'running' at boot was orphaned by a crash/restart mid-run. Fail it so the
+    # ops feed can't show phantom in-flight spend forever.
+    stale_ops = scoring_repo.fail_orphaned_operations()
+    if stale_ops:
+        logger.warning("failed %d orphaned spend operation(s) from a prior process",
+                       stale_ops)
     # A discovery run lives in-memory; rows left 'running' by a prior crash/restart
     # have no process behind them. Clear them so the panel can't show a phantom
     # in-progress run (stale progress, dead pause/cancel).
@@ -537,6 +545,10 @@ def create_app() -> FastAPI:
         data = await request.body()
         if not data:
             raise HTTPException(status_code=400, detail="empty upload")
+        if len(data) > _MAX_XLSX_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"workbook too large (limit {_MAX_XLSX_BYTES // 1_000_000} MB)")
         try:
             targets = parse_workbook(data)
         except Exception as e:  # noqa: BLE001 — surface a clean 400, not a 500

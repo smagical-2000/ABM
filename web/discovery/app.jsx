@@ -424,7 +424,7 @@ function WatchStrip({ parked }) {
                   {c.role && <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[11px] font-medium text-zinc-500">{c.role}</span>}
                   {c.state && <span>{c.state}</span>}
                   {c.sample_url && (
-                    <a href={c.sample_url} target="_blank" rel="noreferrer"
+                    <a href={safeHref(c.sample_url)} target="_blank" rel="noreferrer"
                       className="text-zinc-400 transition-colors hover:text-indigo-600" title="View the open role">
                       <Icons.ext className="h-3.5 w-3.5" />
                     </a>
@@ -1000,7 +1000,10 @@ function App() {
 
 // ── CSV export (client-side, from the already-loaded accounts) ───────────────
 function csvCell(v) {
-  const s = v == null ? '' : String(v);
+  let s = v == null ? '' : String(v);
+  // Excel formula-injection guard: a cell starting =, +, -, @ (or a sneaky
+  // tab/CR) executes as a formula when the export is opened in Excel/Sheets.
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 function segLabel(seg) {

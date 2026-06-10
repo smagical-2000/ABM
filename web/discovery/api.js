@@ -5,8 +5,6 @@
 // expect (the design was built to the ReviewService DTOs), so there's no
 // mapping layer — the JSON flows straight into the UI.
 
-window.NOW = Date.now(); // for relativeTime() in ui.jsx
-
 const BASE = ''; // same origin as the served page
 
 async function http(path, opts) {

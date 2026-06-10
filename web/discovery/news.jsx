@@ -36,7 +36,7 @@ function NewsCard({ item, labels }) {
         )}
         {item.topic && <span className="ml-auto"><NewsTopicChip topic={item.topic} labels={labels} /></span>}
       </div>
-      <a href={item.url} target="_blank" rel="noreferrer"
+      <a href={safeHref(item.url)} target="_blank" rel="noreferrer"
         className="block text-[15px] font-semibold leading-snug text-zinc-900 underline-offset-2 hover:text-indigo-600 hover:underline">
         {item.title}
       </a>

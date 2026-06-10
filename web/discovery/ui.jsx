@@ -1,7 +1,9 @@
 // ── Helpers ───────────────────────────────────────────────────────────────
 function relativeTime(iso) {
   const then = new Date(iso).getTime();
-  const diff = Math.max(0, window.NOW - then);
+  // Date.now() per call — a frozen page-load timestamp makes every "2h ago"
+  // drift stale the longer the tab stays open.
+  const diff = Math.max(0, Date.now() - then);
   const min = Math.round(diff / 60000);
   if (min < 60) return min <= 1 ? 'just now' : `${min}m ago`;
   const hr = Math.round(min / 60);
@@ -10,6 +12,14 @@ function relativeTime(iso) {
   if (d < 30) return `${d}d ago`;
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
+// Only ever link out to a real web URL. Signal/news/LLM data supplies these
+// hrefs, so an off-scheme value (javascript:, data:) must render an inert link.
+function safeHref(url) {
+  const s = (url || '').trim();
+  return /^https?:\/\//i.test(s) ? s : undefined;
+}
+window.safeHref = safeHref;
+
 function shortDate(iso) {
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }

@@ -59,6 +59,10 @@ class ScoringRepository(Protocol):
     def reset_to_queued(self) -> int: ...
     # spend guardrails
     def create_spend_operation(self, op: dict) -> None: ...
+
+    def fail_orphaned_operations(self) -> int:
+        """Fail any spend operation left 'running' (no live task owns it at boot)."""
+        ...
     def finish_spend_operation(self, op_id: str, *, status: str, actual_usd: float,
                                accounts_done: int, error: str | None = None) -> None: ...
     def record_cost_event(self, event: dict) -> None: ...
@@ -420,6 +424,16 @@ class ScoringPostgresRepository:
                 "error_message=%s, finished_at=now() WHERE id=%s",
                 (status, actual_usd, accounts_done, error, op_id))
 
+    def fail_orphaned_operations(self) -> int:
+        """Fail any op left 'running' — every op finishes in a finally, so a
+        'running' row at boot means the process died mid-run (phantom spend)."""
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "UPDATE spend_operations SET status='failed', "
+                "error_message='orphaned by restart', finished_at=now() "
+                "WHERE status='running'")
+            return cur.rowcount or 0
+
     def record_cost_event(self, event: dict) -> None:
         payload = {**event, "metadata": json.dumps(event["metadata"])
                    if event.get("metadata") else None}
@@ -663,6 +677,20 @@ class ScoringJsonRepository:
                           "finished_at": datetime.now(UTC).isoformat()})
                 break
         self._flush_spend()
+
+    def fail_orphaned_operations(self) -> int:
+        """Fail any op left 'running' — every op finishes in a finally, so a
+        'running' row at boot means the process died mid-run (phantom spend)."""
+        n = 0
+        for o in self._ops:
+            if o.get("status") == "running":
+                o.update({"status": "failed",
+                          "error_message": "orphaned by restart",
+                          "finished_at": datetime.now(UTC).isoformat()})
+                n += 1
+        if n:
+            self._flush_spend()
+        return n
 
     def record_cost_event(self, event: dict) -> None:
         self._events.append({**event, "created_at": datetime.now(UTC).isoformat()})

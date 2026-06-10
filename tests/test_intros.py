@@ -199,6 +199,72 @@ async def test_generate_prefers_apollo_and_skips_apify(monkeypatch):
     assert "overlapping 2020-2021" in out["contacts"][0]["paths"][0]["evidence"]
 
 
+# ── school enrichment (Apollo + freshdata hybrid, green/yellow only) ───
+
+
+def test_normalize_linkedin_url_fixes_apollo_shape():
+    n = profiles.normalize_linkedin_url
+    # Apollo's raw http:// + no trailing slash is what freshdata 400s on.
+    assert n("http://www.linkedin.com/in/kscaccia") == "https://www.linkedin.com/in/kscaccia/"
+    assert n("https://www.linkedin.com/in/abc/") == "https://www.linkedin.com/in/abc/"
+    assert n("https://example.com/x") is None        # not a personal profile
+    assert n(None) is None
+
+
+@pytest.mark.asyncio
+async def test_generate_enrich_schools_adds_shared_school(monkeypatch):
+    repo = _FakeDiscoRepo()
+
+    async def fake_founder(url):
+        return _founder(edu=[_stint("University of Waterloo", 2004, 2009, school=True)])
+
+    async def apollo_ok(domain):
+        return [{"name": "Pat Alum", "title": "VP Revenue Cycle",
+                 "linkedin": "http://www.linkedin.com/in/pat-alum",
+                 "city": "X", "state": "Y", "employment_history": []}]
+
+    async def fake_schools(url):
+        assert url == "https://www.linkedin.com/in/pat-alum/"     # normalized first
+        return [_stint("University of Waterloo", 2003, 2007, school=True)]
+
+    monkeypatch.setattr(service.profiles, "fetch_founder", fake_founder)
+    monkeypatch.setattr(service.profiles, "apollo_contacts", apollo_ok)
+    monkeypatch.setattr(service.profiles, "fetch_schools", fake_schools)
+
+    costs = []
+    out = await service.generate({"name": "Acme", "domain": "acme.com"},
+                                 discovery_repo=repo, enrich_schools=True,
+                                 on_cost=lambda usd, step: costs.append(step))
+    assert out["schools_enriched"] is True
+    assert out["contacts"][0]["paths"][0]["kind"] == "shared_school"
+    assert out["warm_count"] == 1
+    assert "school_enrich" in costs                   # the paid enrich was recorded
+
+
+@pytest.mark.asyncio
+async def test_generate_skips_school_enrich_when_disabled(monkeypatch):
+    repo = _FakeDiscoRepo()
+
+    async def fake_founder(url):
+        return _founder(edu=[_stint("University of Waterloo", 2004, 2009, school=True)])
+
+    async def apollo_ok(domain):
+        return [{"name": "Pat Alum", "title": "VP Revenue Cycle",
+                 "linkedin": "http://www.linkedin.com/in/pat-alum", "employment_history": []}]
+
+    async def must_not_run(url):
+        raise AssertionError("fetch_schools must not run for a red/low account")
+
+    monkeypatch.setattr(service.profiles, "fetch_founder", fake_founder)
+    monkeypatch.setattr(service.profiles, "apollo_contacts", apollo_ok)
+    monkeypatch.setattr(service.profiles, "fetch_schools", must_not_run)
+
+    out = await service.generate({"name": "Acme", "domain": "acme.com"},
+                                 discovery_repo=repo)        # enrich_schools defaults False
+    assert out["schools_enriched"] is False
+    assert out["warm_count"] == 0                            # no school -> no path
+
+
 # ── persistence ────────────────────────────────────────────────────────
 
 

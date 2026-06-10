@@ -101,6 +101,9 @@ window.API = {
   generateDossier: (id) => http(`/api/account/${encodeURIComponent(id)}/dossier`, { method: 'POST' }),
   // Find ICP decision-makers + founder warm paths; poll account(id) until ready.
   findWarmIntros: (id) => http(`/api/account/${encodeURIComponent(id)}/warm-intros`, { method: 'POST' }),
+  // Backfill warm intros across every scored account (Apollo free; green/yellow
+  // also get paid school enrichment). Returns {scheduled, enrich_green_yellow, estimated_usd}.
+  runAllWarmIntros: (force = false) => http(`/api/scoring/warm-intros/run-all${force ? '?force=true' : ''}`, { method: 'POST' }),
   scoringActivity: () => http('/api/scoring/activity'),
   // Spend summary for the cost meter (month-to-date vs budget, total, avg).
   scoringStats: () => http('/api/scoring/stats'),

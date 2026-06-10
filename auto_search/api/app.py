@@ -50,6 +50,7 @@ from auto_search.db.scoring_repository import (
     STALE_SCORING_SECONDS,
     get_scoring_repository,
 )
+from auto_search.intros import profiles as intros_profiles
 from auto_search.intros import service as intros_service
 from auto_search.normalize import normalize_linkedin_url
 from auto_search.run_control import RunControl
@@ -1173,6 +1174,10 @@ def create_app() -> FastAPI:
             return account                            # already in flight
         _assert_budget(app, 0.25)
         app.state.scoring_repo.set_warm_intros(account_id, {"state": "generating"})
+        # Green/yellow (high/medium fit) earn the paid school enrichment; red/low
+        # stay Apollo-only and free — a shared alma mater only matters on accounts
+        # we'd actually pursue.
+        enrich = account.get("tier_band") in ("high", "medium")
 
         async def _run() -> None:
             op = spend_guard.Operation(app.state.scoring_repo, "warm_intros",
@@ -1184,7 +1189,8 @@ def create_app() -> FastAPI:
 
             try:
                 payload = await intros_service.generate(
-                    account, discovery_repo=app.state.repo, on_cost=on_cost)
+                    account, discovery_repo=app.state.repo, on_cost=on_cost,
+                    enrich_schools=enrich)
                 app.state.scoring_repo.set_warm_intros(account_id, payload)
             except Exception as e:  # noqa: BLE001 — land in 'error', never crash the loop
                 logger.exception("warm intros failed for %s", account_id)
@@ -1195,6 +1201,74 @@ def create_app() -> FastAPI:
 
         _schedule_coro(app, _run())
         return app.state.scoring.get(account_id)
+
+    @app.post("/api/scoring/warm-intros/run-all")
+    def run_all_warm_intros(force: bool = False):
+        """Backfill warm intros across every scored account that lacks them.
+
+        Apollo (free) finds the decision-makers for ALL accounts; green/yellow
+        (high/medium fit) additionally get freshdata school enrichment, so a
+        shared alma mater — the widest warm net — can surface. Idempotent: an
+        account already 'ready' or in flight is skipped unless force=true. Returns
+        at once; the board polls each account's warm_intros.state to 'ready'."""
+        rows = app.state.scoring.list_scored()
+        todo = [r["account_id"] for r in rows
+                if force or (r.get("warm_intros") or {}).get("state")
+                not in ("ready", "generating")]
+        if not todo:
+            return {"scheduled": 0, "skipped": len(rows)}
+        # Apollo is free; only the green/yellow school enrichment costs. Size the
+        # estimate at the per-contact cap so the monthly guard can refuse a run
+        # it can't afford (429) before any money is spent.
+        todo_set = set(todo)
+        green_yellow = sum(1 for r in rows if r["account_id"] in todo_set
+                           and r.get("tier_band") in ("high", "medium"))
+        est = spend_guard.estimate_batch(
+            green_yellow * intros_profiles.max_contacts(),
+            intros_profiles.ENRICH_CONTACT_COST_USD)
+        _assert_budget(app, est)
+        for aid in todo:
+            app.state.scoring_repo.set_warm_intros(aid, {"state": "generating"})
+
+        async def _run_all() -> None:
+            op = spend_guard.Operation(app.state.scoring_repo, "warm_intros_batch",
+                                       estimated_usd=est, accounts_planned=len(todo))
+            limit = max(1, int(os.getenv("INTROS_BATCH_CONCURRENCY", "6")))
+            sem = asyncio.Semaphore(limit)
+
+            async def _one(aid: str) -> None:
+                account = app.state.scoring.get(aid)
+                if not account:
+                    return
+                # Stop paying once the op overheats: everyone still gets the free
+                # Apollo contact list, the paid school net just switches off.
+                enrich = (account.get("tier_band") in ("high", "medium")
+                          and not op.overheated())
+
+                def on_cost(usd: float, step: str) -> None:
+                    op.record(step=step, actual_usd=usd, account_id=aid, model="apify")
+
+                async with sem:
+                    try:
+                        payload = await intros_service.generate(
+                            account, discovery_repo=app.state.repo,
+                            on_cost=on_cost, enrich_schools=enrich)
+                        app.state.scoring_repo.set_warm_intros(aid, payload)
+                    except Exception as e:  # noqa: BLE001 — one account mustn't kill the batch
+                        logger.exception("batch warm intros failed for %s", aid)
+                        app.state.scoring_repo.set_warm_intros(aid, {
+                            "state": "error", "error": f"{type(e).__name__}: {e}"})
+                    finally:
+                        op.accounts_done += 1
+
+            try:
+                await asyncio.gather(*(_one(a) for a in todo))
+            finally:
+                op.finish()
+
+        _schedule_coro(app, _run_all())
+        return {"scheduled": len(todo), "enrich_green_yellow": green_yellow,
+                "estimated_usd": est}
 
     @app.post("/api/scoring/import/preview")
     async def import_preview(request: Request):

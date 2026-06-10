@@ -179,6 +179,20 @@ def test_app_renders_without_console_errors(page):
     assert not real, f"console errors: {real[:5]}"
 
 
+def test_scored_board_has_find_intros_button(page):
+    """The board-level warm-intros backfill: a 'Find intros' action with a
+    two-click confirm that previews the count + the green/yellow spend. Must
+    render (seeded accounts are high/medium with no intros yet) and not crash."""
+    page.click("text=Scored")
+    page.wait_for_selector("text=UI Demo Health System", timeout=10_000)
+    assert page.locator("text=Find intros").count() > 0          # the batch button
+    page.click("text=Find intros")                               # open the confirm
+    assert page.locator("text=Find intros for").count() > 0      # count + cost preview
+    real = [e for e in page.console_errors
+            if not any(x in e.lower() for x in ("favicon", "tailwind", "cdn", "font"))]
+    assert not real, f"console errors: {real[:5]}"
+
+
 def test_discovery_signal_filter_has_social_types(page):
     page.click("text=Discovery")
     options = page.locator("select").nth(1).locator("option").all_inner_texts()

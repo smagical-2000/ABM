@@ -216,3 +216,43 @@ def parse_apollo(item: dict) -> tuple[WarmContact, list[Stint], list[Stint]] | N
         name=name, title=item.get("title"),
         linkedin_url=(item.get("linkedin") or None), location=loc)
     return contact, exp, []
+
+
+# ── school enrichment (freshdata, green/yellow only) ──────────────────
+# Apollo carries employment but no schools, and a shared alma mater is the widest
+# warm net there is — a university has orders of magnitude more alumni than an
+# ex-employer. For high-value (green/yellow) accounts we backfill education by
+# enriching each surviving decision-maker's profile, so shared-school paths can
+# fire. freshdata rejects Apollo's raw URL shape (http://, no trailing slash)
+# with HTTP 400, so we normalize first — that was the whole reason an earlier
+# probe came back empty.
+
+# freshdata ~ $9/1k per profile (the user's quoted rate): one enrich per kept DM.
+ENRICH_CONTACT_COST_USD = 0.009
+
+
+def normalize_linkedin_url(url: str | None) -> str | None:
+    """Apollo's `http://www.linkedin.com/in/slug` -> the `https://.../in/slug/`
+    form freshdata accepts. None when it isn't a personal LinkedIn profile URL."""
+    if not url:
+        return None
+    u = url.strip().replace("http://", "https://")
+    if "linkedin.com/in/" not in u:
+        return None
+    return u.rstrip("/") + "/"
+
+
+async def fetch_schools(normalized_url: str) -> list[Stint]:
+    """freshdata enrich (URL already normalized) -> education Stints. [] on any
+    failure, so a single dead enrich never kills the batch — the contact just
+    stays school-less and matching degrades to employer/engaged."""
+    try:
+        items = await apify._run_actor(_ACTOR_ENRICH, {"linkedin_url": normalized_url})
+    except Exception:  # noqa: BLE001 — one enrich failing mustn't break the run
+        logger.exception("school enrich failed for %s", normalized_url)
+        return []
+    if not items or not isinstance(items[0], dict):
+        return []
+    raw = items[0].get("data") if isinstance(items[0].get("data"), dict) else items[0]
+    _, edu = _founder_stints(raw)        # reuse the freshdata educations parser
+    return edu

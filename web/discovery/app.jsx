@@ -1072,6 +1072,7 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
   const [importF, setImportF] = useState('all');
   const [imports, setImports] = useState([]);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [confirmIntros, setConfirmIntros] = useState(false);
   const [selected, setSelected] = useState(() => new Set());   // row-selection for export
   const [openAcc, setOpenAcc] = useState(null);
   const [openLanding, setOpenLanding] = useState(null);
@@ -1175,6 +1176,16 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
     } catch (e) { pushToast(`Couldn't reset: ${e.message}`, 'danger'); }
   }
 
+  async function handleRunAllIntros() {
+    setConfirmIntros(false);
+    try {
+      const res = await window.API.runAllWarmIntros();
+      if (!res || !res.scheduled) { pushToast('All scored accounts already have intros.', 'success'); return; }
+      pushToast(`Finding intros for ${res.scheduled} ${res.scheduled === 1 ? 'account' : 'accounts'}…`, 'success');
+      load(true);
+    } catch (e) { pushToast(`Couldn't start: ${e.message}`, 'danger'); }
+  }
+
   const bandOf = (a) => (a.total != null ? window.tierFor(a.framework, a.total).band : null);
   const withinDate = (iso, key) => {
     if (key === 'all') return true;
@@ -1226,6 +1237,12 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
   const batchRunning = batchKick || !!(stats && stats.batch_running);
   const fitCounts = { high: 0, medium: 0, low: 0, out: 0 };
   scoredOnly.forEach((a) => { const b = bandOf(a); if (b in fitCounts) fitCounts[b] += 1; });
+  // Warm-intros backfill: accounts still without intros (Apollo is free for all);
+  // green/yellow also get paid school enrichment (~$9/1k profiles, ≤8/account —
+  // mirrors the server estimate, display-only since the budget guard is server-side).
+  const introTodo = scoredOnly.filter((a) => !['ready', 'generating'].includes((a.warm_intros || {}).state));
+  const introGY = introTodo.filter((a) => ['high', 'medium'].includes(bandOf(a))).length;
+  const introCost = introGY * 8 * 0.009;
 
   const filteredScoredIds = scoredList.filter((a) => a.state === 'scored').map((a) => a.account_id);
   const allFilteredSelected = filteredScoredIds.length > 0 && filteredScoredIds.every((id) => selected.has(id));
@@ -1256,6 +1273,18 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
                 <Icons.download className="h-4 w-4" />Export{selected.size > 0 ? ` ${selected.size}` : ''}
               </button>
             )}
+            {scoredOnly.length > 0 && introTodo.length > 0 && (confirmIntros ? (
+              <span className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2 py-1.5 text-[12.5px]">
+                <span className="px-1 text-zinc-500">Find intros for {introTodo.length}? {introGY > 0 ? `~$${introCost.toFixed(2)}` : 'free'}</span>
+                <button onClick={() => setConfirmIntros(false)} className="rounded-md px-2 py-1 font-medium text-zinc-500 transition-colors hover:bg-zinc-100">Cancel</button>
+                <button onClick={handleRunAllIntros} className="rounded-md bg-zinc-900 px-2.5 py-1 font-medium text-white transition-colors hover:bg-zinc-800">Run</button>
+              </span>
+            ) : (
+              <button onClick={() => setConfirmIntros(true)} title="Find ICP decision-makers for every scored account (Apollo, free); green/yellow also get school enrichment for warm paths"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[13px] font-medium text-zinc-500 transition-colors hover:bg-zinc-50 hover:text-zinc-700">
+                <Icons.leadership className="h-4 w-4" />Find intros
+              </button>
+            ))}
             {scoredOnly.length > 0 && (confirmReset ? (
               <span className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2 py-1.5 text-[12.5px]">
                 <span className="px-1 text-zinc-500">Clear all scores?</span>

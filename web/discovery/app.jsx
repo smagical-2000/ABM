@@ -526,7 +526,9 @@ function App() {
       const tagged = [
         ...qualified.map((c) => ({ ...c, bucket: 'qualified' })),
         ...needsReview.map((c) => ({ ...c, bucket: 'needs_review' })),
-      ].sort((a, b) => new Date(b.qualified_at || b.first_seen_at) - new Date(a.qualified_at || a.first_seen_at));
+        // Rank by buying intent (hottest first); newest qualified breaks ties.
+      ].sort((a, b) => (b.intent_score || 0) - (a.intent_score || 0)
+        || new Date(b.qualified_at || b.first_seen_at) - new Date(a.qualified_at || a.first_seen_at));
       setCompanies(tagged);
       setStats(s);
       // Best-effort: the stacking watch list (parked single-standard companies).
@@ -954,14 +956,24 @@ function App() {
             ) : visibleCount === 0 ? (
               <EmptyState variant={tab} onRun={() => pushToast('Discovery runs on a schedule', 'muted')} />
             ) : (
-              filtered.map((c) => (
-                <CompanyRow key={c.company_key} company={c} leaving={!!leaving[c.company_key]}
-                  selected={selected.has(c.company_key)}
-                  onToggleSelect={() => toggleSelect(c.company_key)}
-                  onOpen={() => setOpenKey(c.company_key)}
-                  onPromote={() => handlePromote(c.company_key)}
-                  onReject={() => setRejectFor(c)} />
-              ))
+              filtered.map((c, i) => {
+                // The auto-score line: drawn once, before the first Watch lead that
+                // follows a Hot one (qualified tab only) — Hot above, Watch below.
+                const showLine = tab === 'qualified' && c.bucket === 'qualified'
+                  && c.intent_tier === 'watch' && i > 0
+                  && filtered[i - 1].bucket === 'qualified' && filtered[i - 1].intent_tier === 'hot';
+                return (
+                  <React.Fragment key={c.company_key}>
+                    {showLine && <AutoScoreLine />}
+                    <CompanyRow company={c} leaving={!!leaving[c.company_key]}
+                      selected={selected.has(c.company_key)}
+                      onToggleSelect={() => toggleSelect(c.company_key)}
+                      onOpen={() => setOpenKey(c.company_key)}
+                      onPromote={() => handlePromote(c.company_key)}
+                      onReject={() => setRejectFor(c)} />
+                  </React.Fragment>
+                );
+              })
             )}
           </div>
 

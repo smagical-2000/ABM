@@ -258,8 +258,9 @@ def test_discovery_panel_ranks_by_buying_intent(page):
     and sorts above a Watch-tier stacked-jobs lead."""
     page.click("text=Discovery")
     page.wait_for_selector("text=UI Hot Health System", timeout=10_000)
-    assert page.get_by_text("Hot", exact=False).count() > 0      # hot badge present
-    assert page.get_by_text("Watch", exact=False).count() > 0    # watch badge present
+    assert page.get_by_text("Hot", exact=False).count() > 0      # hot tier pill present
+    assert page.get_by_text("Watch", exact=False).count() > 0    # watch tier pill present
+    assert page.get_by_text("Auto-score line", exact=False).count() > 0   # the Hot/Watch divider
     body = page.inner_text("body")
     assert body.index("UI Hot Health System") < body.index("UI Stack Health System")
 

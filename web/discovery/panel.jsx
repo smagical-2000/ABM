@@ -86,17 +86,40 @@ function AbmCallout({ match }) {
 window.AbmCallout = AbmCallout;
 
 // ── CompanyRow ──────────────────────────────────────────────────────────────
-function IntentBadge({ tier, score }) {
+// The buying-intent readout on a row: a fill bar + the score + the Hot/Watch pill.
+function IntentMeter({ tier, score }) {
   if (!tier) return null;
   const hot = tier === 'hot';
   return (
-    <span title={`Buying intent ${score} of 100`}
-      className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-semibold ring-1 ring-inset ${hot ? 'bg-amber-50 text-amber-700 ring-amber-100' : 'bg-zinc-100 text-zinc-500 ring-zinc-200'}`}>
-      {hot && <Icons.zap className="h-3 w-3" />}{hot ? 'Hot' : 'Watch'} {score}
-    </span>
+    <div className="flex shrink-0 items-center gap-3" title={`Buying intent ${score} of 100`}>
+      <div className="hidden w-20 sm:block">
+        <div className="h-1.5 rounded-full bg-zinc-100">
+          <div className={`h-full rounded-full ${hot ? 'bg-amber-500' : 'bg-zinc-300'}`}
+            style={{ width: `${Math.max(4, Math.min(100, score))}%` }} />
+        </div>
+      </div>
+      <div className={`w-7 text-right text-[18px] font-semibold tabular-nums ${hot ? 'text-zinc-900' : 'text-zinc-400'}`}>{score}</div>
+      <span className={`inline-flex w-[60px] shrink-0 items-center justify-center gap-1 rounded-full px-2 py-1 text-[11px] font-semibold ring-1 ring-inset ${hot ? 'bg-amber-50 text-amber-700 ring-amber-100' : 'bg-zinc-100 text-zinc-500 ring-zinc-200'}`}>
+        {hot ? <><Icons.zap className="h-3 w-3" />Hot</> : <><Icons.clock className="h-3 w-3" />Watch</>}
+      </span>
+    </div>
   );
 }
-window.IntentBadge = IntentBadge;
+window.IntentMeter = IntentMeter;
+
+// The divider between the Hot leads (auto-scored) and the Watch leads (held).
+function AutoScoreLine() {
+  return (
+    <div className="flex items-center gap-3 border-b border-zinc-100 bg-amber-50/30 px-6 py-2">
+      <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-[11px] font-semibold text-amber-700">
+        <Icons.zap className="h-3.5 w-3.5" />Auto-score line
+      </span>
+      <span className="h-px flex-1 border-t border-dashed border-zinc-300" />
+      <span className="hidden whitespace-nowrap text-[11px] text-zinc-400 sm:inline">above: scored automatically · below: watched</span>
+    </div>
+  );
+}
+window.AutoScoreLine = AutoScoreLine;
 
 function CompanyRow({ company, leaving, selected, onToggleSelect, onOpen, onPromote, onReject }) {
   const stop = (fn) => (e) => { e.stopPropagation(); fn(); };
@@ -118,24 +141,16 @@ function CompanyRow({ company, leaving, selected, onToggleSelect, onOpen, onProm
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2.5">
             <h3 className="truncate text-[15px] font-semibold text-zinc-900">{company.name}</h3>
-            {/* No verdict chip on the row: the panel only ever lists a tab's own
-                verdict (Qualified / Needs review), so a chip would just echo the
-                section header. The full verdict — including disqualified — still
-                shows in the Recent evaluations feed. */}
             <SegmentBadge segment={company.segment} />
             <AbmBadge match={company.abm_match} />
-            <IntentBadge tier={company.intent_tier} score={company.intent_score} />
           </div>
+          {company.intent_reason && (
+            <div className={`mt-1 truncate text-[12.5px] ${company.intent_tier === 'hot' ? 'font-medium text-amber-700' : 'text-zinc-500'}`}>{company.intent_reason}</div>
+          )}
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <SignalChips signals={company.signals} />
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[12px] text-zinc-400">
-            {company.intent_reason && (
-              <>
-                <span className={company.intent_tier === 'hot' ? 'font-medium text-amber-700' : 'text-zinc-500'}>{company.intent_reason}</span>
-                <span className="text-zinc-300">·</span>
-              </>
-            )}
             <span>{company.signal_count} {company.signal_count === 1 ? 'signal' : 'signals'}</span>
             {company.qualified_at && (
               <>
@@ -158,11 +173,8 @@ function CompanyRow({ company, leaving, selected, onToggleSelect, onOpen, onProm
           </div>
         </div>
 
-        {/* Middle: confidence */}
-        <div className="hidden shrink-0 md:block">
-          <div className="mb-1 text-right text-[11px] uppercase tracking-wide text-zinc-400">Confidence</div>
-          <ConfidenceMeter value={company.confidence} />
-        </div>
+        {/* Middle: buying intent — the bar + score + tier, the ranking at a glance */}
+        <IntentMeter tier={company.intent_tier} score={company.intent_score} />
 
         {/* Right: actions */}
         <div className="flex shrink-0 items-center gap-1.5">

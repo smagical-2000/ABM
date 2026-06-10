@@ -133,6 +133,22 @@ SELECT dc.id, 'signalbase', 'leadership_change', 'uihot-cfo', 'New CFO appointed
        0.9, now()-interval '1 day', '{}'::jsonb
 FROM discovery_companies dc WHERE dc.normalized_name='uihothealth'
 ON CONFLICT (source, source_external_id) DO NOTHING;
+
+-- News-to-plays: ranked by get_behind, with a "Get behind" pill + "The play".
+INSERT INTO news_items
+  (url, title, source, published_at, topic, why_it_matters, get_behind, play, relevant, fetched_at)
+VALUES
+ ('https://ex.test/n1','New rule forces payers to decide prior auth in 72 hours','RevCycleIntelligence',
+  (now()-interval '2 hours')::text,'prior_auth','the timeline makes manual prior-auth untenable for every provider',
+  94,'hit health systems hiring prior-auth staff: the 72-hour rule breaks manual auth; Magical handles it end-to-end',true,(now())::text),
+ ('https://ex.test/n2','Survey: claim denials climb to record highs','Becker''s',
+  (now()-interval '1 day')::text,'denials','rising denials are direct revenue leakage — the pain Magical removes',
+  88,'target denials-heavy systems: denials are up double digits; Magical auto-works appeals',true,(now())::text),
+ ('https://ex.test/n3','One state tweaks its Medicaid redetermination timeline','State Health Dept',
+  (now()-interval '4 days')::text,'eligibility','narrow and regional — low urgency, no broad wedge',
+  38,'',true,(now())::text)
+ON CONFLICT (url) DO UPDATE SET
+  get_behind=EXCLUDED.get_behind, play=EXCLUDED.play, why_it_matters=EXCLUDED.why_it_matters;
 """
 
 
@@ -273,6 +289,17 @@ def test_intent_scoring_hint_popover(page):
     page.click("text=How intent is scored")
     assert page.get_by_text("Deterministic", exact=False).count() > 0   # the rubric opened
     assert page.get_by_text("deals won", exact=False).count() > 0       # the "next" provision line
+
+
+def test_news_tab_ranks_plays_by_get_behind(page):
+    """News reads as ranked sales plays: a 'Get behind' pill + 'The play', highest
+    get-behind first."""
+    page.click("text=News")
+    page.wait_for_selector("text=72 hours", timeout=10_000)
+    assert page.get_by_text("Get behind", exact=False).count() > 0   # high-score pill
+    assert page.get_by_text("The play", exact=False).count() > 0     # the action box
+    body = page.inner_text("body")
+    assert body.index("72 hours") < body.index("Medicaid redetermination")  # 94 above 38
 
 
 def test_discovery_signal_filter_has_social_types(page):

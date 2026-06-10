@@ -1212,9 +1212,20 @@ def create_app() -> FastAPI:
         account already 'ready' or in flight is skipped unless force=true. Returns
         at once; the board polls each account's warm_intros.state to 'ready'."""
         rows = app.state.scoring.list_scored()
-        todo = [r["account_id"] for r in rows
-                if force or (r.get("warm_intros") or {}).get("state")
-                not in ("ready", "generating")]
+
+        def _needs(r: dict) -> bool:
+            wi = r.get("warm_intros") or {}
+            if wi.get("state") == "generating":
+                return False                      # already in flight
+            if force or wi.get("state") != "ready":
+                return True                       # forced, or no intros yet
+            # Already has intros: re-run only green/yellow whose intros predate
+            # school enrichment, so the alma-mater net is backfilled exactly once.
+            # Red/low keep their free Apollo list untouched (no re-pay, no churn).
+            return (r.get("tier_band") in ("high", "medium")
+                    and not wi.get("schools_enriched"))
+
+        todo = [r["account_id"] for r in rows if _needs(r)]
         if not todo:
             return {"scheduled": 0, "skipped": len(rows)}
         # Apollo is free; only the green/yellow school enrichment costs. Size the

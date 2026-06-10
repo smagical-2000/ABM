@@ -1237,10 +1237,18 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
   const batchRunning = batchKick || !!(stats && stats.batch_running);
   const fitCounts = { high: 0, medium: 0, low: 0, out: 0 };
   scoredOnly.forEach((a) => { const b = bandOf(a); if (b in fitCounts) fitCounts[b] += 1; });
-  // Warm-intros backfill: accounts still without intros (Apollo is free for all);
-  // green/yellow also get paid school enrichment (~$9/1k profiles, ≤8/account —
-  // mirrors the server estimate, display-only since the budget guard is server-side).
-  const introTodo = scoredOnly.filter((a) => !['ready', 'generating'].includes((a.warm_intros || {}).state));
+  // Warm-intros backfill (mirrors the server's _needs): an account needs a run
+  // if it has no intros yet, or it's green/yellow with intros that predate the
+  // school net (schools_enriched falsy). Green/yellow also pay for school
+  // enrichment (~$9/1k profiles, ≤8/account — display estimate; the budget guard
+  // is server-side). Red/low keep their free Apollo list, so they never re-run.
+  const introNeeds = (a) => {
+    const wi = a.warm_intros || {};
+    if (wi.state === 'generating') return false;
+    if (wi.state !== 'ready') return true;
+    return ['high', 'medium'].includes(bandOf(a)) && !wi.schools_enriched;
+  };
+  const introTodo = scoredOnly.filter(introNeeds);
   const introGY = introTodo.filter((a) => ['high', 'medium'].includes(bandOf(a))).length;
   const introCost = introGY * 8 * 0.009;
 

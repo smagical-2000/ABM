@@ -313,6 +313,38 @@ class TestCostControls:
         out = client.post("/api/account/acc_d/dossier").json()
         assert out["dossier_state"] == "generating"
 
+    def test_run_all_warm_intros_reenriches_green_without_schools(self, client, monkeypatch):
+        """Batch backfill: runs accounts lacking intros AND re-runs green/yellow
+        whose intros predate the school net, but skips red/low and already-
+        enriched ones so it never re-pays or churns."""
+        from auto_search.scoring.models import Account, Dimension, ScoreResult
+
+        repo = client.app.state.scoring_repo
+
+        def _scored(aid, band):
+            repo.upsert_account(Account(account_id=aid, name=aid, segment="payer",
+                                        framework="payer", source="discovery"), state="queued")
+            repo.save_score(aid, ScoreResult(
+                account_id=aid, framework="payer", framework_version="v",
+                dimensions=[Dimension(key="k", label="k", score=5, max=10)],
+                total=5, max_total=10, tier_band=band, tier_label=band))
+
+        _scored("g_old", "high")        # green, pre-school intros  -> re-run
+        _scored("g_done", "high")       # green, already enriched   -> skip
+        _scored("red_old", "low")       # red, has intros           -> skip (free list stays)
+        _scored("y_new", "medium")      # yellow, no intros yet      -> run
+        repo.set_warm_intros("g_old", {"state": "ready", "contacts": []})
+        repo.set_warm_intros("g_done", {"state": "ready", "schools_enriched": True, "contacts": []})
+        repo.set_warm_intros("red_old", {"state": "ready", "contacts": []})
+
+        monkeypatch.setattr(_app_module, "_schedule_coro", lambda app, coro: coro.close())
+        out = client.post("/api/scoring/warm-intros/run-all").json()
+        assert out["scheduled"] == 2 and out["enrich_green_yellow"] == 2
+        assert repo.get("g_old")["warm_intros"]["state"] == "generating"
+        assert repo.get("y_new")["warm_intros"]["state"] == "generating"
+        assert repo.get("g_done")["warm_intros"].get("schools_enriched") is True   # untouched
+        assert repo.get("red_old")["warm_intros"]["state"] == "ready"              # not re-run
+
     def test_activity_poll_reaps_stalled_scoring(self, client):
         """A score orphaned by a dead task self-heals: polling activity sweeps a
         long-stalled 'scoring' row back to the queue so it never sticks."""

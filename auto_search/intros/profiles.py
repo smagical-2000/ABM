@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import UTC, datetime
 
 from auto_search.intros.models import FounderProfile, Stint, WarmContact
 from auto_search.intros.paths import norm_company, norm_school
+from auto_search.scoring import apollo
 from auto_search.social import apify
 
 logger = logging.getLogger(__name__)
@@ -173,3 +175,44 @@ async def search_contacts(company_name: str, *, limit: int | None = None) -> lis
         "profileScraperMode": "Full",
         "maxItems": limit or max_contacts(),
     })
+
+
+# ── Apollo contacts (primary - free, domain-matched, seniority-filtered) ──
+
+
+_YEAR = re.compile(r"(\d{4})")
+
+
+def _year_of(s) -> int | None:
+    m = _YEAR.match(str(s or ""))
+    return int(m.group(1)) if m else None
+
+
+async def apollo_contacts(domain: str | None) -> list[dict]:
+    """Senior decision-makers at `domain` via Apollo (free). [] -> use Apify."""
+    return await apollo.contacts_for_intros(domain)
+
+
+def parse_apollo(item: dict) -> tuple[WarmContact, list[Stint], list[Stint]] | None:
+    """One Apollo contact -> (contact, experiences, educations[]). Apollo gives
+    employment history (matchable) but no schools, so educations is always []."""
+    if not isinstance(item, dict):
+        return None
+    name = (item.get("name") or "").strip()
+    if not name:
+        return None
+    exp: list[Stint] = []
+    for e in item.get("employment_history") or []:
+        org = (e.get("org") or "").strip()
+        if not org:
+            continue
+        end = _year_of(e.get("end"))
+        exp.append(Stint(
+            org=org, norm=norm_company(org), title=e.get("title"),
+            start_year=_year_of(e.get("start")),
+            end_year=9999 if (e.get("current") or not end) else end))
+    loc = ", ".join(x for x in (item.get("city"), item.get("state")) if x) or None
+    contact = WarmContact(
+        name=name, title=item.get("title"),
+        linkedin_url=(item.get("linkedin") or None), location=loc)
+    return contact, exp, []

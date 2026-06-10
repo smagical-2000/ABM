@@ -80,21 +80,30 @@ async def generate(account: dict, *, discovery_repo, on_cost=None) -> dict:
     """Build the warm-intros payload for one scored account. Raises on a dead
     search so the caller can persist state='error' (retryable)."""
     company = account.get("name") or ""
+    domain = account.get("domain")
     founders = await ensure_founders(discovery_repo, on_cost=on_cost)
 
-    items = await profiles.search_contacts(company)
-    if on_cost is not None and items:
-        on_cost(round(len(items) * profiles.CONTACT_COST_USD, 4), "contact_search")
+    # Apollo first - free, matches on the account's DOMAIN (so it never returns a
+    # plumbing CFO for a cancer institute the way a name search can) and filters
+    # to real decision-makers. Fall back to the Apify people search only when
+    # Apollo finds nothing (no key, no domain, or a thin org).
+    source = "apollo"
+    parsed_contacts = [p for p in
+                       (profiles.parse_apollo(it) for it in await profiles.apollo_contacts(domain))
+                       if p]
+    if not parsed_contacts:
+        source = "apify"
+        items = await profiles.search_contacts(company)
+        if on_cost is not None and items:
+            on_cost(round(len(items) * profiles.CONTACT_COST_USD, 4), "contact_search")
+        parsed_contacts = [p for p in (profiles.parse_contact(it) for it in items) if p]
 
     engaged_urls, engaged_names = engaged_identity_sets(
         discovery_repo, account.get("discovery_company_key"))
 
     contacts = []
     dropped = 0
-    for item in items:
-        parsed = profiles.parse_contact(item)
-        if parsed is None:
-            continue
+    for parsed in parsed_contacts:
         contact, exp, edu = parsed
         # The board search matches titles loosely; hold the product bar here
         # (Director & above) so a "Revenue Cycle Supervisor" never ships.
@@ -111,11 +120,12 @@ async def generate(account: dict, *, discovery_repo, on_cost=None) -> dict:
 
     ranked = paths.rank(contacts)
     warm = sum(1 for c in ranked if c.warmth > 0)
-    logger.info("warm intros for %s: %d contacts (%d warm, %d sub-bar dropped)",
-                company, len(ranked), warm, dropped)
+    logger.info("warm intros for %s: %d contacts via %s (%d warm, %d sub-bar dropped)",
+                company, len(ranked), source, warm, dropped)
     return {
         "state": "ready",
         "generated_at": datetime.now(UTC).isoformat(),
+        "source": source,
         "founders_used": [f.name for f in founders],
         "contacts": [
             {**c.model_dump(), "warmth": c.warmth} for c in ranked

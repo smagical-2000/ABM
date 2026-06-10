@@ -101,8 +101,10 @@ function WarmIntrosSection({ account }) {
           <div className="rounded-xl border border-zinc-200">
             {contacts.map((c, i) => {
               const best = (c.paths || [])[0];
+              const m = best && (PATH_BADGE[best.kind] || PATH_BADGE.shared_employer);
+              const loc = c.location ? ` · ${c.location.split(',')[0]}` : '';
               return (
-                <div key={i} className="border-b border-zinc-100 px-4 py-3 last:border-0">
+                <div key={i} className={`border-b border-zinc-100 px-4 py-3 last:border-0 ${best ? 'bg-amber-50/20' : ''}`}>
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex min-w-0 items-center gap-1.5">
                       {c.linkedin_url ? (
@@ -113,29 +115,28 @@ function WarmIntrosSection({ account }) {
                       ) : <span className="truncate text-[13.5px] font-semibold text-zinc-800">{c.name}</span>}
                       {c.linkedin_url && <Icons.ext className="h-3 w-3 shrink-0 text-zinc-300" />}
                     </div>
-                    <div className="flex shrink-0 items-center gap-1.5">
-                      {(c.paths || []).slice(0, 2).map((p, j) => {
-                        const m = PATH_BADGE[p.kind] || PATH_BADGE.shared_employer;
-                        return (
-                          <span key={j} title={p.evidence}
-                            className={`rounded-md px-1.5 py-0.5 text-[10.5px] font-semibold ring-1 ring-inset ${m.cls}`}>
-                            {m.label}
-                          </span>
-                        );
-                      })}
-                    </div>
+                    {m && (
+                      <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10.5px] font-semibold ring-1 ring-inset ${m.cls}`}>
+                        {m.label}
+                      </span>
+                    )}
                   </div>
-                  {c.title && <div className="mt-0.5 truncate text-[12.5px] text-zinc-500">{c.title}</div>}
-                  {best && (
-                    <div className="mt-1 text-[12px] text-zinc-400">
-                      {best.founder ? `${best.founder}: ` : ''}{best.evidence}
-                    </div>
-                  )}
+                  {c.title && <div className="mt-0.5 truncate text-[12.5px] text-zinc-500">{c.title}{loc}</div>}
+                  {/* The linkage — the whole point. Warm path = how to get the intro;
+                      otherwise an honest "reach out directly" so it's never ambiguous. */}
+                  <div className={`mt-1 flex items-start gap-1.5 text-[12px] ${best ? 'text-amber-700' : 'text-zinc-400'}`}>
+                    <Icons.arrowRight className="mt-0.5 h-3 w-3 shrink-0" />
+                    {best ? (
+                      <span>{best.kind === 'engaged' ? '' : `Ask ${best.founder} — `}{best.evidence}</span>
+                    ) : (
+                      <span>No founder path — reach out directly{c.linkedin_url ? ' on LinkedIn' : ''}</span>
+                    )}
+                  </div>
                 </div>
               );
             })}
             <div className="flex items-center justify-between bg-zinc-50/60 px-4 py-2 text-[11.5px] text-zinc-400">
-              <span>{wi.warm_count || 0} warm of {contacts.length} · via {(wi.founders_used || []).join(', ') || 'founders'}</span>
+              <span>{wi.warm_count || 0} warm of {contacts.length} · {wi.source === 'apollo' ? 'Apollo' : 'LinkedIn'} · vs {(wi.founders_used || []).length || 3} founders</span>
               {wi.generated_at && <span title={wi.generated_at}>{relativeTime(wi.generated_at)}</span>}
             </div>
           </div>

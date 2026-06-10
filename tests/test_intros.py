@@ -135,7 +135,11 @@ async def test_generate_filters_sub_director_and_ranks_engaged(monkeypatch):
              "experience": [], "education": []},
         ]
 
+    async def no_apollo(domain):
+        return []                                        # force the Apify fallback path
+
     monkeypatch.setattr(service.profiles, "fetch_founder", fake_founder)
+    monkeypatch.setattr(service.profiles, "apollo_contacts", no_apollo)
     monkeypatch.setattr(service.profiles, "search_contacts", fake_search)
 
     costs = []
@@ -143,7 +147,7 @@ async def test_generate_filters_sub_director_and_ranks_engaged(monkeypatch):
     out = await service.generate(account, discovery_repo=repo,
                                  on_cost=lambda usd, step: costs.append(step))
 
-    assert out["state"] == "ready"
+    assert out["state"] == "ready" and out["source"] == "apify"
     names = [c["name"] for c in out["contacts"]]
     assert "Too Junior" not in names                      # sub-Director dropped
     assert names[0] == "Warm Exec"                        # engaged outranks overlap
@@ -152,6 +156,47 @@ async def test_generate_filters_sub_director_and_ranks_engaged(monkeypatch):
     assert out["warm_count"] == 2
     assert len(repo.profiles) == 3                        # founders cached after scrape
     assert "founder_profile" in costs and "contact_search" in costs
+
+
+def test_parse_apollo_builds_stints_from_employment_history():
+    item = {"name": "Jane Roe", "title": "VP Revenue Cycle",
+            "linkedin": "http://www.linkedin.com/in/jane", "city": "Cincinnati", "state": "Ohio",
+            "employment_history": [
+                {"org": "TriHealth", "title": "VP", "start": "2017-04-01", "end": None, "current": True},
+                {"org": "Olive", "title": "Lead", "start": "2014-01-01", "end": "2017-01-01", "current": False}]}
+    contact, exp, edu = profiles.parse_apollo(item)
+    assert contact.name == "Jane Roe" and contact.location == "Cincinnati, Ohio"
+    assert exp[0].norm == "trihealth" and exp[0].end_year == 9999       # current -> open
+    assert exp[1].norm == "olive" and exp[1].start_year == 2014 and exp[1].end_year == 2017
+    assert edu == []                                                    # Apollo: no schools
+    assert profiles.parse_apollo({}) is None
+
+
+@pytest.mark.asyncio
+async def test_generate_prefers_apollo_and_skips_apify(monkeypatch):
+    repo = _FakeDiscoRepo()
+
+    async def fake_founder(url):
+        return _founder(exp=[_stint("Olive", 2019, 2022)])
+
+    async def apollo_ok(domain):
+        return [{"name": "Olive Alum", "title": "VP Revenue Cycle",
+                 "linkedin": "http://www.linkedin.com/in/olive-alum", "city": "Cincinnati", "state": "OH",
+                 "employment_history": [{"org": "Olive", "title": "Lead",
+                                         "start": "2020-01-01", "end": "2021-01-01", "current": False}]}]
+
+    async def apify_must_not_run(company, limit=None):
+        raise AssertionError("Apify must not run when Apollo returns contacts")
+
+    monkeypatch.setattr(service.profiles, "fetch_founder", fake_founder)
+    monkeypatch.setattr(service.profiles, "apollo_contacts", apollo_ok)
+    monkeypatch.setattr(service.profiles, "search_contacts", apify_must_not_run)
+
+    out = await service.generate({"name": "TriHealth", "domain": "trihealth.com"},
+                                 discovery_repo=repo)
+    assert out["source"] == "apollo"
+    assert out["contacts"][0]["paths"][0]["kind"] == "shared_employer"
+    assert "overlapping 2020-2021" in out["contacts"][0]["paths"][0]["evidence"]
 
 
 # ── persistence ────────────────────────────────────────────────────────

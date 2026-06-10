@@ -1,6 +1,4 @@
-<svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Magical">
-  <!-- Placeholder mark. Replace this file (or set window.MAGICAL_LOGO_URL) with
-       the official Magical logo when brand provides it. -->
-  <rect width="32" height="32" rx="8" fill="#4f46e5"/>
-  <path d="M16 6.5l2.05 5.9 6.45 2.1-6.45 2.1L16 22.5l-2.05-5.9L7.5 14.5l6.45-2.1L16 6.5z" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200" fill="none" role="img" aria-label="Magical">
+  <rect width="200" height="200" x=".001" fill="#C1FE73" rx="100"/>
+  <path fill="#222528" d="M158.982 146.915h-24.265l-8.089-54.008-22.151 54.008H94.77l-16.56-42.524 5.323-35.063c.309-2.037 3.123-2.332 3.849-.404l12.863 34.187 18.667-50.026h24.142l15.928 93.83Zm-93.448 0h-24.15l14.111-93.83h24.093l-14.054 93.83Z"/>
 </svg>

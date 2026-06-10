@@ -133,17 +133,21 @@ function IntentInfo() {
       {open && (
         <>
           <div className="fixed inset-0 z-20" onClick={() => setOpen(false)} />
-          <div className="absolute left-0 z-30 mt-2 w-[290px] rounded-xl border border-zinc-200 bg-white p-4 text-[12px] leading-relaxed text-zinc-600 shadow-lg shadow-zinc-900/5">
-            <div className="mb-1.5 text-[12.5px] font-semibold text-zinc-800">How intent is scored</div>
-            <p className="text-zinc-500">Deterministic — no AI. The strongest signal sets the base:</p>
-            <div className="mt-1.5 space-y-1">
-              <div className="flex justify-between"><span>New exec · exec engaged</span><span className="tabular-nums text-zinc-400">65 · 60</span></div>
-              <div className="flex justify-between"><span>Revenue-cycle leader hire</span><span className="tabular-nums text-zinc-400">50</span></div>
-              <div className="flex justify-between"><span>Core · standard RCM role</span><span className="tabular-nums text-zinc-400">30 · 18</span></div>
+          <div className="absolute left-0 z-30 mt-2 w-[280px] rounded-xl border border-zinc-200 bg-white p-4 shadow-lg shadow-zinc-900/5">
+            <div className="text-[12.5px] font-semibold text-zinc-800">How intent is scored</div>
+            <p className="mt-1 text-[11.5px] leading-relaxed text-zinc-500">Deterministic — no AI. The strongest signal sets the base:</p>
+            <div className="mt-2.5 space-y-1.5 text-[12px] text-zinc-600">
+              <div className="flex items-baseline justify-between gap-3"><span>New exec</span><span className="tabular-nums font-medium text-zinc-500">65</span></div>
+              <div className="flex items-baseline justify-between gap-3"><span>Exec engaged</span><span className="tabular-nums font-medium text-zinc-500">60</span></div>
+              <div className="flex items-baseline justify-between gap-3"><span>Revenue-cycle leader hire</span><span className="tabular-nums font-medium text-zinc-500">50</span></div>
+              <div className="flex items-baseline justify-between gap-3"><span>Core RCM role</span><span className="tabular-nums font-medium text-zinc-500">30</span></div>
+              <div className="flex items-baseline justify-between gap-3"><span>Standard RCM role</span><span className="tabular-nums font-medium text-zinc-500">18</span></div>
             </div>
-            <p className="mt-2 text-zinc-500">then +15 per extra open role · +20 multi-signal · +20 ABM · +5 fresh</p>
-            <p className="mt-2"><span className="font-medium text-amber-700">Hot ≥ 65</span> auto-scores · below is watched</p>
-            <p className="mt-2.5 border-t border-zinc-100 pt-2 text-[11.5px] text-zinc-400">Next: tuned by your outcomes — engagement, meetings booked, deals won.</p>
+            <div className="mt-3 border-t border-zinc-100 pt-2.5 text-[11.5px] leading-relaxed text-zinc-500">
+              <span className="font-medium text-zinc-600">+ boosts</span> &nbsp;15 per extra role&nbsp;·&nbsp;20 multi-signal&nbsp;·&nbsp;20 ABM&nbsp;·&nbsp;5 fresh
+            </div>
+            <div className="mt-2.5 text-[12px]"><span className="font-medium text-amber-700">Hot ≥ 65</span> <span className="text-zinc-500">auto-scores, below is watched</span></div>
+            <p className="mt-3 border-t border-zinc-100 pt-2.5 text-[11px] leading-relaxed text-zinc-400">Next: tuned by your outcomes — engagement, meetings, deals won.</p>
           </div>
         </>
       )}

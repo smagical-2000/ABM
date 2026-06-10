@@ -39,6 +39,127 @@ function QAVerdict({ qa }) {
   );
 }
 
+// ── WarmIntrosSection — ICP decision-makers + founder warm paths ─────────────
+// On demand (a small Apify spend per run, no LLM). Self-polls while generating
+// so the drawer resolves live; results persist on the account (warm_intros).
+// Paths are deterministic profile overlaps with evidence — never inferred.
+const PATH_BADGE = {
+  engaged: { label: 'Engaged with Magical', cls: 'bg-violet-50 text-violet-700 ring-violet-100' },
+  shared_employer: { label: 'Shared employer', cls: 'bg-indigo-50 text-indigo-700 ring-indigo-100' },
+  shared_school: { label: 'Shared school', cls: 'bg-teal-50 text-teal-700 ring-teal-100' },
+};
+
+function WarmIntrosSection({ account }) {
+  const [wi, setWi] = React.useState(account.warm_intros || null);
+  const [kicking, setKicking] = React.useState(false);
+  React.useEffect(() => {
+    setWi(account.warm_intros || null);
+    setKicking(false);
+  }, [account.account_id]);
+  const generating = kicking || (wi && wi.state === 'generating');
+
+  React.useEffect(() => {
+    if (!generating) return;
+    const id = setInterval(() => {
+      window.API.account(account.account_id).then((fresh) => {
+        const w = fresh && fresh.warm_intros;
+        if (w && w.state !== 'generating') { setWi(w); setKicking(false); }
+      }).catch(() => {});
+    }, 3000);
+    return () => clearInterval(id);
+  }, [generating, account.account_id]);
+
+  async function kick() {
+    setKicking(true);
+    try { await window.API.findWarmIntros(account.account_id); }
+    catch (e) { setKicking(false); setWi({ state: 'error', error: e.message }); }
+  }
+
+  const contacts = (wi && wi.contacts) || [];
+  return (
+    <div className="mt-7">
+      <div className="mb-3 flex items-center gap-2">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">Warm intros</span>
+        <span className="h-px flex-1 bg-zinc-100" />
+        {wi && wi.state === 'ready' && (
+          <button onClick={kick} title="Re-run the search"
+            className="text-zinc-300 transition-colors hover:text-indigo-600">
+            <Icons.refresh className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+
+      {generating ? (
+        <div className="flex items-center gap-2.5 rounded-xl border border-zinc-200 bg-zinc-50/60 px-4 py-3.5 text-[13px] text-zinc-500">
+          <Icons.refresh className="h-4 w-4 animate-spin text-indigo-500" />
+          Finding decision-makers and matching the founders' networks…
+        </div>
+      ) : wi && wi.state === 'ready' ? (
+        contacts.length === 0 ? (
+          <p className="text-[13px] text-zinc-400">No Director-and-above contacts surfaced — re-run later or check the account name.</p>
+        ) : (
+          <div className="rounded-xl border border-zinc-200">
+            {contacts.map((c, i) => {
+              const best = (c.paths || [])[0];
+              return (
+                <div key={i} className="border-b border-zinc-100 px-4 py-3 last:border-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      {c.linkedin_url ? (
+                        <a href={safeHref(c.linkedin_url)} target="_blank" rel="noreferrer"
+                          className="truncate text-[13.5px] font-semibold text-zinc-800 underline-offset-2 hover:text-indigo-600 hover:underline">
+                          {c.name}
+                        </a>
+                      ) : <span className="truncate text-[13.5px] font-semibold text-zinc-800">{c.name}</span>}
+                      {c.linkedin_url && <Icons.ext className="h-3 w-3 shrink-0 text-zinc-300" />}
+                    </div>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      {(c.paths || []).slice(0, 2).map((p, j) => {
+                        const m = PATH_BADGE[p.kind] || PATH_BADGE.shared_employer;
+                        return (
+                          <span key={j} title={p.evidence}
+                            className={`rounded-md px-1.5 py-0.5 text-[10.5px] font-semibold ring-1 ring-inset ${m.cls}`}>
+                            {m.label}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  {c.title && <div className="mt-0.5 truncate text-[12.5px] text-zinc-500">{c.title}</div>}
+                  {best && (
+                    <div className="mt-1 text-[12px] text-zinc-400">
+                      {best.founder ? `${best.founder}: ` : ''}{best.evidence}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            <div className="flex items-center justify-between bg-zinc-50/60 px-4 py-2 text-[11.5px] text-zinc-400">
+              <span>{wi.warm_count || 0} warm of {contacts.length} · via {(wi.founders_used || []).join(', ') || 'founders'}</span>
+              {wi.generated_at && <span title={wi.generated_at}>{relativeTime(wi.generated_at)}</span>}
+            </div>
+          </div>
+        )
+      ) : (
+        <div className="rounded-xl border border-zinc-200 bg-zinc-50/40 px-4 py-3.5">
+          <p className="text-[13px] leading-relaxed text-zinc-500">
+            Find the ICP decision-makers at {account.name} and rank them by warmth
+            against the founders' networks — engagement with Magical's posts, shared
+            employers, shared schools. Evidence on every path.
+          </p>
+          {wi && wi.state === 'error' && (
+            <p className="mt-2 text-[12.5px] text-rose-600">Last run failed: {wi.error || 'unknown error'}</p>
+          )}
+          <button onClick={kick}
+            className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 px-3.5 py-2 text-[12.5px] font-medium text-white transition-colors hover:bg-zinc-800">
+            <Icons.leadership className="h-4 w-4" />Find warm intros
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ScoreDrawer({ account, onClose, onRescore, onOpenLanding }) {
   const open = !!account;
   const animate = typeof document === 'undefined' || document.visibilityState !== 'hidden';
@@ -177,6 +298,9 @@ function ScoreDrawer({ account, onClose, onRescore, onOpenLanding }) {
                   <p className="text-[13.5px] leading-relaxed text-zinc-700 text-pretty">{a.recommendation}</p>
                 </div>
               </div>
+
+              {/* Warm intros — decision-makers + founder paths (scored only) */}
+              {a.state === 'scored' && <WarmIntrosSection account={a} />}
 
               {/* Known facts — carried into the scorer so it does not re-research */}
               {a.firmographics && Object.keys(a.firmographics).length > 0 && (

@@ -50,6 +50,7 @@ from auto_search.db.scoring_repository import (
     STALE_SCORING_SECONDS,
     get_scoring_repository,
 )
+from auto_search.intros import service as intros_service
 from auto_search.normalize import normalize_linkedin_url
 from auto_search.run_control import RunControl
 from auto_search.runtime import is_production
@@ -1148,6 +1149,47 @@ def create_app() -> FastAPI:
                                        accounts_planned=1)
             try:
                 await app.state.scoring.generate_dossier(account_id, op=op)
+            finally:
+                op.finish()
+
+        _schedule_coro(app, _run())
+        return app.state.scoring.get(account_id)
+
+    @app.post("/api/account/{account_id}/warm-intros")
+    def find_warm_intros(account_id: str):
+        """Find ICP decision-makers at this scored account, ranked by warmth
+        against the founders' networks (engaged with Magical's posts > shared
+        employer > shared school; evidence on every path).
+
+        On demand (~$0.10-0.25/run: a people search + a one-time founder
+        scrape), one at a time per account. The UI polls GET /api/account/{id}
+        until warm_intros.state flips to 'ready'."""
+        account = app.state.scoring.get(account_id)
+        if account is None:
+            raise HTTPException(status_code=404, detail="account not found")
+        if account.get("state") != "scored":
+            raise HTTPException(status_code=409, detail="account must be scored first")
+        if (account.get("warm_intros") or {}).get("state") == "generating":
+            return account                            # already in flight
+        _assert_budget(app, 0.25)
+        app.state.scoring_repo.set_warm_intros(account_id, {"state": "generating"})
+
+        async def _run() -> None:
+            op = spend_guard.Operation(app.state.scoring_repo, "warm_intros",
+                                       estimated_usd=0.25, accounts_planned=1)
+
+            def on_cost(usd: float, step: str) -> None:
+                op.record(step=step, actual_usd=usd, account_id=account_id,
+                          model="apify")
+
+            try:
+                payload = await intros_service.generate(
+                    account, discovery_repo=app.state.repo, on_cost=on_cost)
+                app.state.scoring_repo.set_warm_intros(account_id, payload)
+            except Exception as e:  # noqa: BLE001 — land in 'error', never crash the loop
+                logger.exception("warm intros failed for %s", account_id)
+                app.state.scoring_repo.set_warm_intros(account_id, {
+                    "state": "error", "error": f"{type(e).__name__}: {e}"})
             finally:
                 op.finish()
 

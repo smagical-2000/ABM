@@ -556,6 +556,24 @@ class PostgresRepository:
                                (_keyword_key(keyword),))
             return cur.rowcount > 0
 
+    # ── founder profiles (warm intros) ────────────────────────────────
+
+    def founder_profiles(self) -> list[dict]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT data FROM founder_profiles ORDER BY id").fetchall()
+        return [r["data"] for r in rows if isinstance(r.get("data"), dict)]
+
+    def replace_founder_profiles(self, profiles: list[dict]) -> int:
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute("DELETE FROM founder_profiles")
+            for p in profiles:
+                conn.execute(
+                    "INSERT INTO founder_profiles (name, linkedin_url, data) "
+                    "VALUES (%s, %s, %s)",
+                    (p.get("name"), p.get("linkedin_url"), Json(p)))
+        return len(profiles)
+
     # ── stacking watch ledger ─────────────────────────────────────────
 
     def upsert_parked(self, record: dict) -> dict:

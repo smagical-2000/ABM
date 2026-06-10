@@ -169,6 +169,14 @@ class DiscoveryRepository(Protocol):
         """Counts for the UI: total, by segment, last upload time."""
         ...
 
+    def founder_profiles(self) -> list[dict]:
+        """Cached founder LinkedIn profiles for warm-intro matching."""
+        ...
+
+    def replace_founder_profiles(self, profiles: list[dict]) -> int:
+        """Replace the cached founder profiles wholesale; return rows stored."""
+        ...
+
     def news_urls(self) -> list[str]:
         """URLs already stored — lets the news runner enrich only NEW articles."""
         ...
@@ -620,6 +628,28 @@ class JsonFileRepository:
 
     def social_targets(self) -> list[dict]:
         return self._social_targets()
+
+    # ── founder profiles (warm intros, sidecar file) ─────────────────
+
+    def _founders_path(self) -> Path:
+        return self._path.with_name("founder_profiles.json")
+
+    def founder_profiles(self) -> list[dict]:
+        p = self._founders_path()
+        if not p.exists():
+            return []
+        try:
+            return json.loads(p.read_text()).get("profiles", [])
+        except json.JSONDecodeError:
+            return []
+
+    def replace_founder_profiles(self, profiles: list[dict]) -> int:
+        p = self._founders_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(json.dumps({"profiles": profiles}, default=str))
+        tmp.replace(p)
+        return len(profiles)
 
     def upsert_social_target(self, target: dict) -> dict:
         targets = self._social_targets()

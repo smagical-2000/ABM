@@ -218,3 +218,15 @@ CREATE TABLE IF NOT EXISTS parked_companies (
 );
 CREATE INDEX IF NOT EXISTS idx_parked_last_seen
     ON parked_companies (last_seen_at DESC);
+
+
+-- ── founder profiles (warm intros) ────────────────────────────────────────
+-- The founders' scraped LinkedIn profiles (experience + education), cached so
+-- warm-intro matching never re-pays the scrape. Replaced wholesale on refresh.
+CREATE TABLE IF NOT EXISTS founder_profiles (
+    id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name          TEXT,
+    linkedin_url  TEXT,
+    data          JSONB NOT NULL,
+    scraped_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);

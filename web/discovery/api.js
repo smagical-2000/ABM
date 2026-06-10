@@ -99,6 +99,8 @@ window.API = {
   scoreAccount: (id) => http(`/api/account/${encodeURIComponent(id)}/score`, { method: 'POST' }),
   // Kick the on-demand deep-research dossier; poll account(id) until ready.
   generateDossier: (id) => http(`/api/account/${encodeURIComponent(id)}/dossier`, { method: 'POST' }),
+  // Find ICP decision-makers + founder warm paths; poll account(id) until ready.
+  findWarmIntros: (id) => http(`/api/account/${encodeURIComponent(id)}/warm-intros`, { method: 'POST' }),
   scoringActivity: () => http('/api/scoring/activity'),
   // Spend summary for the cost meter (month-to-date vs budget, total, avg).
   scoringStats: () => http('/api/scoring/stats'),

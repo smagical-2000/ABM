@@ -108,8 +108,10 @@ and the stacking **parked** ledger (see §5).
    - *Event attendees* — keyword post-search (`datadoping~linkedin-posts-search-scraper`)
      → confirm the **author attended** from the post **text** (`is_attending`
      regex) → enrich → US + decision-maker → `event_attendance` signal.
-   - Pivoted **Trigify → Apify** (cheaper, better data). Stores: `social_targets`,
-     `event_keywords` (+ CRUD + API). Files: `auto_search/social/*`.
+   - **Apify-only** (pivoted off Trigify; the Trigify webhook + adapter are now
+     fully removed). The daily `discovery-cron` runs `scripts/run_daily.py` =
+     discovery scan **+** social poll in one scheduled job (no separate social-cron).
+     Stores: `social_targets`, `event_keywords` (+ CRUD + API). Files: `auto_search/social/*`.
    - **Known result, not a bug:** an event run "qualified 0" because **`HIMSS26`
      this window = HIMSS *Europe*** → 7/9 attendees non-US (correctly dropped), the
      2 US ones were vendors (not provider ICP). **Fix = track US-provider events**

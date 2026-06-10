@@ -24,8 +24,6 @@ import json
 import logging
 import os
 import re
-import secrets
-from collections import deque
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -63,8 +61,6 @@ from auto_search.scoring.service import ScoringService
 from auto_search.services import DiscoveryStats, PanelCompany, ReviewService
 from auto_search.social import (
     SocialTarget,
-    engager_from_trigify,
-    ingest_engager,
     poll_events,
     poll_targets,
 )
@@ -317,9 +313,6 @@ async def lifespan(app: FastAPI):
     app.state.scoring_repo = scoring_repo
     app.state.abm_index = _load_abm_index(repo)   # ABM target list -> match index
     _seed_social_targets(repo)                    # ensure Magical is always monitored
-    # Ring buffer of the last social-webhook payloads + outcomes, for debugging
-    # the Trigify field mapping (read via GET /api/social/debug). In-memory only.
-    app.state.social_debug = deque(maxlen=50)
     app.state.social_running = False              # one social poll at a time
     app.state.news_running = False                # one news refresh at a time
     app.state.last_news = None
@@ -385,12 +378,9 @@ def create_app() -> FastAPI:
     # HTTP Basic auth — gated by BASIC_AUTH_USER/PASS. In production we FAIL
     # CLOSED: refuse to start without credentials rather than serve a public,
     # spend-bearing API. Localhost (no production markers) stays frictionless.
-    # /api/health is exempt for the platform healthcheck; /api/social/trigify is
-    # exempt because Trigify can't send Basic auth — it carries its own
-    # shared-secret header instead (verified in the handler). Added after CORS so
-    # it runs outermost.
-    auth_enabled = install_basic_auth(
-        app, exempt_paths=("/api/health", "/api/social/trigify"))
+    # /api/health is exempt for the platform healthcheck. Added after CORS so it
+    # runs outermost.
+    auth_enabled = install_basic_auth(app, exempt_paths=("/api/health",))
     if not auth_enabled and is_production():
         raise RuntimeError(
             "Refusing to start in production without auth: set BASIC_AUTH_USER "
@@ -573,91 +563,6 @@ def create_app() -> FastAPI:
         matched.sort(
             key=lambda c: 0 if c.abm_match and c.abm_match.tier == "confirmed" else 1)
         return matched
-
-    @app.post("/api/social/trigify")
-    async def trigify_webhook(request: Request):
-        """Inbound webhook for Trigify social-listening workflows.
-
-        Each enriched engager (one object, or a `{"engagers": [...]}` / bare-array
-        batch) is filtered — decision-maker (Director & above), not a Magical
-        employee, and for events a confirmed attendee — then the COMPANY runs
-        through the existing discovery qualifier and lands on the panel with a
-        social signal. The person is carried as a contact in the signal payload.
-
-        Auth: shared secret in the `X-Trigify-Secret` header vs env
-        TRIGIFY_WEBHOOK_SECRET (this route is exempt from Basic auth). Per-record
-        errors are reported, never 500 the batch."""
-        secret = os.getenv("TRIGIFY_WEBHOOK_SECRET")
-        if not secret:
-            raise HTTPException(status_code=503, detail="social webhook not configured")
-        if not secrets.compare_digest(request.headers.get("X-Trigify-Secret", ""), secret):
-            raise HTTPException(status_code=401, detail="invalid webhook secret")
-
-        raw = await request.body()
-        try:
-            data = json.loads(raw) if raw else None
-        except (ValueError, TypeError) as e:
-            raise HTTPException(status_code=400, detail="invalid JSON body") from e
-        if isinstance(data, dict) and isinstance(data.get("engagers"), list):
-            records = data["engagers"]
-        elif isinstance(data, list):
-            records = data
-        elif isinstance(data, dict):
-            records = [data]
-        else:
-            raise HTTPException(
-                status_code=400, detail="expected an engager object or list")
-
-        # Cost guard — this is a paid path (each NEW company = an LLM qualify),
-        # so it gets the SAME defenses as /api/discovery/run: a per-request cap
-        # on new qualifications, a monthly-budget pre-check, and a spend Operation
-        # so every qualify is recorded in the discovery cost meter. Appending a
-        # signal to an already-known company is free and never gated.
-        gate, cap, est, _blocked = spend_guard.make_social_gate(app.state.scoring_repo)
-
-        op = spend_guard.Operation(
-            app.state.scoring_repo, "social_webhook",
-            estimated_usd=round(min(len(records), cap) * est, 4),
-            accounts_planned=len(records))
-        results: list[dict] = []
-        try:
-            for rec in records:
-                if not isinstance(rec, dict):
-                    results.append({"accepted": False, "action": "skipped",
-                                    "reason": "invalid_record"})
-                    continue
-                try:
-                    engager = engager_from_trigify(rec)
-                except Exception as e:  # noqa: BLE001 — one bad record mustn't 500 the batch
-                    results.append({"accepted": False, "action": "skipped",
-                                    "reason": f"invalid_payload: {e}"})
-                    continue
-                try:
-                    res = await ingest_engager(
-                        engager, repo=app.state.repo, op=op, can_qualify=gate)
-                    results.append(res.model_dump())
-                except Exception:  # noqa: BLE001 — isolate per-record ingest failures
-                    logger.exception("social ingest failed for %r", rec.get("full_name"))
-                    results.append({"accepted": False, "action": "error",
-                                    "reason": "ingest_error"})
-        finally:
-            op.finish()
-        # Record raw payload + outcome (newest pushed last) so the Trigify field
-        # mapping can be inspected via GET /api/social/debug while wiring it up.
-        stamp = datetime.now(UTC).isoformat()
-        for rec, outcome in zip(records, results, strict=True):
-            app.state.social_debug.append({"at": stamp, "raw": rec, "outcome": outcome})
-        accepted = sum(1 for r in results if r.get("accepted"))
-        qualified_new = sum(1 for r in results if r.get("action") == "qualified")
-        return {"received": len(records), "accepted": accepted,
-                "skipped": len(records) - accepted,
-                "qualified_new": qualified_new, "results": results}
-
-    @app.get("/api/social/debug")
-    def social_debug():
-        """Last ~50 social-webhook payloads + what we did with each (newest
-        first). Behind Basic auth — a wiring aid while mapping Trigify fields."""
-        return {"events": list(reversed(app.state.social_debug))}
 
     # ── monitored LinkedIn accounts (Apify post-engagement) ──────────────────
 

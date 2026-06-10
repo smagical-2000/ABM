@@ -1,7 +1,7 @@
 """Normalized social-engagement payload + the RawSignal it becomes.
 
-`Engager` is the shape our webhook accepts from Trigify (one person who liked or
-commented, already enriched by the Trigify workflow). `to_signal()` turns it into
+`Engager` is the normalized shape of one person who liked or commented on a
+tracked post (scraped + enriched via Apify in poll.py). `to_signal()` turns it into
 the source-agnostic `RawSignal` the rest of the discovery pipeline already
 understands — so a social engager flows through the same qualifier, dedup, and
 panel as a layoff or a funding round, just with `signal_type='social_engagement'`
@@ -50,7 +50,7 @@ class SocialTarget(BaseModel):
 class Engager(BaseModel):
     """One enriched person who engaged with a tracked post / event."""
 
-    # person (from Trigify person_enrichment)
+    # person (from Apify profile enrichment)
     full_name: str
     job_title: str | None = None
     job_title_levels: list[str] = Field(default_factory=list)
@@ -72,8 +72,8 @@ class Engager(BaseModel):
     @field_validator("job_title_levels", mode="before")
     @classmethod
     def _coerce_levels(cls, v: object) -> list[str]:
-        """Trigify sends job_title_levels inconsistently (list, comma string, or
-        absent). Normalize to a list so a string never bounces the whole record."""
+        """Enrichment sends job_title_levels inconsistently (list, comma string,
+        or absent). Normalize to a list so a string never bounces the whole record."""
         if v is None:
             return []
         if isinstance(v, str):

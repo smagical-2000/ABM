@@ -5,7 +5,7 @@
     "dockerfilePath": "Dockerfile.cron"
   },
   "deploy": {
-    "startCommand": "python scripts/run_discovery.py --days 1 --no-limit",
+    "startCommand": "python scripts/run_daily.py",
     "cronSchedule": "0 14 * * 1-5",
     "healthcheckPath": null,
     "restartPolicyType": "NEVER"

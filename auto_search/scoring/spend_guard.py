@@ -46,12 +46,12 @@ def discovery_monthly_budget() -> float: return _f("DISCOVERY_MONTHLY_BUDGET", "
 
 
 def social_webhook_max_qualify() -> int:
-    """Max NEW companies one social-webhook request may pay to qualify.
+    """Max NEW companies one social poll/run may pay to qualify.
 
-    The Trigify webhook is an external, paid path: without a per-request cap a
-    huge (or malicious) batch could fire hundreds of LLM qualifications. New-
-    company qualifications above this are skipped (already-known companies still
-    get their signal appended for free). Tunable via SOCIAL_WEBHOOK_MAX_QUALIFY.
+    A social poll is a paid path: without a per-run cap a large batch of engagers
+    could fire hundreds of LLM qualifications. New-company qualifications above
+    this are skipped (already-known companies still get their signal appended for
+    free). Tunable via SOCIAL_WEBHOOK_MAX_QUALIFY.
     """
     try:
         return max(1, int(os.getenv("SOCIAL_WEBHOOK_MAX_QUALIFY", "25")))
@@ -60,8 +60,8 @@ def social_webhook_max_qualify() -> int:
 
 
 def make_social_gate(scoring_repo) -> tuple:
-    """The ONE budget gate shared by every paid social path (webhook, on-demand
-    run, cron). Returns (gate, cap, est, blocked_now):
+    """The ONE budget gate shared by every paid social path (on-demand run +
+    daily cron). Returns (gate, cap, est, blocked_now):
 
       gate()      -> None to allow a NEW qualification (and counts it), or a
                      skip-reason str ("request_cap" / "budget_blocked").
@@ -70,7 +70,7 @@ def make_social_gate(scoring_repo) -> tuple:
       blocked_now -> True if the monthly budget is already spent (refuse up front).
 
     Counting is increment-on-allow: one gate-pass == one committed paid attempt,
-    so all three callers account for spend identically (the divergence a review
+    so both callers account for spend identically (the divergence a review
     flagged). A failed attempt still consumed budget intent — that's the safe
     direction for a cost guard.
     """

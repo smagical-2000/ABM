@@ -45,6 +45,7 @@ class WarmContact(BaseModel):
     title: str | None = None       # current title / headline
     linkedin_url: str | None = None
     location: str | None = None
+    schools: list[str] = Field(default_factory=list)   # alma maters, on file for reps
     paths: list[WarmPath] = Field(default_factory=list)
 
     @property

@@ -237,6 +237,7 @@ async def test_generate_enrich_schools_adds_shared_school(monkeypatch):
                                  on_cost=lambda usd, step: costs.append(step))
     assert out["schools_enriched"] is True
     assert out["contacts"][0]["paths"][0]["kind"] == "shared_school"
+    assert out["contacts"][0]["schools"] == ["University of Waterloo"]   # on file
     assert out["warm_count"] == 1
     assert "school_enrich" in costs                   # the paid enrich was recorded
 

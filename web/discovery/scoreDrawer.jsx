@@ -122,6 +122,11 @@ function WarmIntrosSection({ account }) {
                     )}
                   </div>
                   {c.title && <div className="mt-0.5 truncate text-[12.5px] text-zinc-500">{c.title}{loc}</div>}
+                  {c.schools && c.schools.length > 0 && (
+                    <div className="mt-0.5 truncate text-[11.5px] text-zinc-400">
+                      <span className="text-zinc-300">Alma mater · </span>{c.schools.join(' · ')}
+                    </div>
+                  )}
                   {/* The linkage — the whole point. Warm path = how to get the intro;
                       otherwise an honest "reach out directly" so it's never ambiguous. */}
                   <div className={`mt-1 flex items-start gap-1.5 text-[12px] ${best ? 'text-amber-700' : 'text-zinc-400'}`}>

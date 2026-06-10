@@ -125,6 +125,9 @@ async def generate(account: dict, *, discovery_repo, on_cost=None,
                 edu = edu + await profiles.fetch_schools(url)
                 if on_cost is not None:
                     on_cost(profiles.ENRICH_CONTACT_COST_USD, "school_enrich")
+        # Keep the alma maters on the record (the user paid for this data) so a rep
+        # sees them even when no founder shares one — useful context regardless.
+        contact.schools = [s.org for s in edu if s.org]
         for f in founders:
             contact.paths.extend(paths.founder_paths(f, contact, exp, edu))
         ep = paths.engaged_path(contact, engaged_urls, engaged_names)

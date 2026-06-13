@@ -70,6 +70,9 @@ window.API = {
   },
   refreshNews: () => http('/api/news/refresh', { method: 'POST' }),
 
+  // ── jobs stacking watch list (parked single-standard-role companies) ─────────
+  parked: () => http('/api/discovery/parked'),
+
   // ── social: monitored LinkedIn accounts (Apify post-engagement) ─────────────
   socialTargets: () => http('/api/social/targets'),
   addSocialTarget: (body) => http('/api/social/targets', {

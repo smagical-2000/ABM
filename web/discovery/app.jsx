@@ -58,6 +58,7 @@ function NavSwitch({ view, onChange, scoredCount, pulse }) {
       {item('discovery', 'Discovery')}
       {item('scored', 'Scored')}
       {item('news', 'News')}
+      {item('watch', 'Watch list')}
     </div>
   );
 }
@@ -986,6 +987,8 @@ function App() {
         </main>
       ) : view === 'news' ? (
         <NewsView pushToast={pushToast} />
+      ) : view === 'watch' ? (
+        <WatchView pushToast={pushToast} />
       ) : (
         <ScoredView refreshKey={scoredRefreshKey} pushToast={pushToast} onCount={setScoredCount} />
       )}

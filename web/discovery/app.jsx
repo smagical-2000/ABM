@@ -1041,11 +1041,19 @@ function segLabel(seg) {
   const m = window.SEGMENT_META && window.SEGMENT_META[seg];
   return (m && m.label) || seg || '';
 }
+// The buying signals that brought an account in (snapshot carried from discovery),
+// flattened for one CSV cell: "job_posting: 3 Coder jobs; leadership_change: new CFO".
+function fmtSignals(signals) {
+  if (!signals || !signals.length) return '';
+  return signals
+    .map((s) => (s.summary ? `${s.signal_type}: ${s.summary}` : s.signal_type))
+    .join('; ');
+}
 function buildAccountsCsv(accounts) {
   const head = ['Account', 'Domain', 'Segment', 'Sub-segment', 'Source', 'Import',
     'Fit', 'Analyst Total', 'Official Total', 'Max', 'Firmographic', 'Technographic',
     'Business Intent', 'Recommendation', 'QA Status', 'QA Notes', 'Scored',
-    'Cost (USD)', 'Key facts'];
+    'Cost (USD)', 'Key facts', 'Signals'];
   const lines = accounts.map((a) => {
     const tier = a.tier || window.tierFor(a.framework, a.total);
     const pillars = window.pillarsFor(a);
@@ -1062,6 +1070,7 @@ function buildAccountsCsv(accounts) {
       a.recommendation || '', qa.status || '', qa.notes || '',
       a.scored_at ? window.shortDate(a.scored_at) : '',
       a.cost_usd != null ? a.cost_usd : '', facts,
+      fmtSignals(a.discovery_signals),
     ].map(csvCell).join(',');
   });
   return [head.join(','), ...lines].join('\n');

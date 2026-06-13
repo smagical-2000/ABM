@@ -508,8 +508,14 @@ function App() {
   const [selected, setSelected] = useState(() => new Set());
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  const [autoEnabled, setAutoEnabled] = useState(false);
-  const [scoreHour, setScoreHour] = useState(15);
+  // Persisted so the toggle + run-hour survive a reload (it was resetting to off).
+  const [autoEnabled, setAutoEnabled] = useState(() => localStorage.getItem('autoScoreEnabled') === '1');
+  const [scoreHour, setScoreHour] = useState(() => {
+    const h = parseInt(localStorage.getItem('autoScoreHour') || '', 10);
+    return Number.isFinite(h) ? h : 15;
+  });
+  useEffect(() => { try { localStorage.setItem('autoScoreEnabled', autoEnabled ? '1' : '0'); } catch (_e) { /* ignore */ } }, [autoEnabled]);
+  useEffect(() => { try { localStorage.setItem('autoScoreHour', String(scoreHour)); } catch (_e) { /* ignore */ } }, [scoreHour]);
   const [deadline, setDeadline] = useState(() => window.nextDeadline(15, Date.now()));
   const [now, setNow] = useState(Date.now());
   const [autoOpen, setAutoOpen] = useState(false);

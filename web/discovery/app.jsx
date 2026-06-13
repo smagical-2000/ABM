@@ -164,8 +164,8 @@ function ActivityBanner({ runs, paused, cancelling, phase }) {
 function SpendMeter({ spend, lastRun }) {
   if (!spend) return null;
   const disc = spend.month_discovery_cost || 0;            // qualify + Apify scrape
-  const scored = spend.month_scoring_cost ?? spend.month_cost ?? 0;
-  const total = spend.month_total_cost ?? (disc + scored);
+  const scored = spend.month_cost ?? spend.month_scoring_cost ?? 0;  // the scoring-budget basis
+  const total = disc + scored;                             // matches both budget gauges
   const discBudget = spend.discovery_budget || 0;
   const scoreBudget = spend.monthly_budget || 0;
   const budget = discBudget + scoreBudget;                 // combined monthly cap

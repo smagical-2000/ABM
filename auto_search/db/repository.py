@@ -112,8 +112,18 @@ class DiscoveryRepository(Protocol):
     def enter_needs_review(self, company_key: str) -> dict | None:
         """Demote a stale qualified lead into the needs-review queue (the
         lifecycle sweep). Flips icp_status qualified -> needs_review only when it
-        is currently qualified (idempotent); review_status stays pending. Returns
-        the updated row, or None if not stored / not currently qualified.
+        is currently qualified (idempotent); review_status stays pending. Starts
+        the review clock (entered_review_at) with origin 'decayed'. Returns the
+        updated row, or None if not stored / not currently qualified.
+        """
+        ...
+
+    def promote_from_review(self, company_key: str) -> dict | None:
+        """Lift a re-heated lead back out of needs-review into qualified (the
+        lifecycle sweep, when intent reaches Hot). Flips icp_status
+        needs_review -> qualified only when currently needs_review (idempotent);
+        clears the review clock; review_status untouched so a pending lead simply
+        rejoins Discovery. Returns the updated row, or None if not applicable.
         """
         ...
 
@@ -286,6 +296,7 @@ class JsonFileRepository:
 
         # Upsert the verdict (newest qualification wins). to_status() keeps
         # operational errors out of the genuine review/disqualified queues.
+        prior_status = existing.get("icp_status")
         existing.update({
             "display_name": candidate.company_name,
             "domain": q.domain,                 # for domain-first promotion match
@@ -300,6 +311,16 @@ class JsonFileRepository:
             "decided_by": q.decided_by,
             "qualified_at": now,
         })
+
+        # Review-TTL clock, mirroring the SQL upsert: entering review starts it
+        # (origin 'ingest'), staying keeps it, leaving (any other verdict) clears it.
+        if existing["icp_status"] == "needs_review":
+            if prior_status != "needs_review" or not existing.get("entered_review_at"):
+                existing["entered_review_at"] = now
+            existing["review_origin"] = existing.get("review_origin") or "ingest"
+        else:
+            existing["entered_review_at"] = None
+            existing["review_origin"] = None
 
         # Lean firmo from the representative signal.
         rep_payload = candidate.primary_signal.payload
@@ -399,6 +420,18 @@ class JsonFileRepository:
         if row is None or row.get("icp_status") != "qualified":
             return None
         row["icp_status"] = "needs_review"
+        row["entered_review_at"] = datetime.now(UTC).isoformat()
+        row["review_origin"] = "decayed"
+        self._flush()
+        return row
+
+    def promote_from_review(self, company_key: str) -> dict | None:
+        row = self._store.get(company_key)
+        if row is None or row.get("icp_status") != "needs_review":
+            return None
+        row["icp_status"] = "qualified"
+        row["entered_review_at"] = None
+        row["review_origin"] = None
         self._flush()
         return row
 

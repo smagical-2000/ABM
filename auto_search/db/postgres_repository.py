@@ -78,6 +78,12 @@ class PostgresRepository:
         q = candidate.qualification
         rep = candidate.primary_signal.payload
         now = datetime.now(UTC)
+        # Ingest-time review clock: a verdict of needs_review starts the clock
+        # (origin 'ingest'); the ON CONFLICT below preserves an existing clock and
+        # clears both when the row leaves review on re-qualification.
+        status = q.to_status()
+        review_ts = now if status == "needs_review" else None
+        review_origin = "ingest" if status == "needs_review" else None
 
         with self._pool.connection() as conn, conn.transaction():
             # Upsert the company. review_status is set only on INSERT (never
@@ -88,12 +94,14 @@ class PostgresRepository:
                     normalized_name, display_name, domain, icp_status,
                     segment, sub_segment, company_type, approximate_employees,
                     confidence, reasoning, evidence_url, decided_by,
-                    hq_state, hq_city, first_seen_at, qualified_at
+                    hq_state, hq_city, first_seen_at, qualified_at,
+                    entered_review_at, review_origin
                 ) VALUES (
                     %(key)s, %(name)s, %(domain)s, %(icp_status)s,
                     %(segment)s, %(sub_segment)s, %(company_type)s, %(employees)s,
                     %(confidence)s, %(reasoning)s, %(evidence_url)s, %(decided_by)s,
-                    %(hq_state)s, %(hq_city)s, %(now)s, %(now)s
+                    %(hq_state)s, %(hq_city)s, %(now)s, %(now)s,
+                    %(entered_review_at)s, %(review_origin)s
                 )
                 ON CONFLICT (normalized_name) DO UPDATE SET
                     display_name = EXCLUDED.display_name,
@@ -107,11 +115,19 @@ class PostgresRepository:
                     reasoning = EXCLUDED.reasoning,
                     evidence_url = EXCLUDED.evidence_url,
                     decided_by = EXCLUDED.decided_by,
-                    qualified_at = EXCLUDED.qualified_at
+                    qualified_at = EXCLUDED.qualified_at,
+                    -- entering review keeps any existing clock (idempotent), leaving
+                    -- it (any non-review verdict) clears the clock + origin.
+                    entered_review_at = CASE WHEN EXCLUDED.icp_status = 'needs_review'
+                        THEN COALESCE(discovery_companies.entered_review_at, EXCLUDED.entered_review_at)
+                        ELSE NULL END,
+                    review_origin = CASE WHEN EXCLUDED.icp_status = 'needs_review'
+                        THEN COALESCE(discovery_companies.review_origin, EXCLUDED.review_origin)
+                        ELSE NULL END
                 """,
                 {
                     "key": key, "name": candidate.company_name,
-                    "domain": q.domain, "icp_status": q.to_status(),
+                    "domain": q.domain, "icp_status": status,
                     "segment": q.segment, "sub_segment": q.sub_segment,
                     "company_type": q.company_type,
                     "employees": q.approximate_employees,
@@ -119,6 +135,7 @@ class PostgresRepository:
                     "evidence_url": q.evidence_url, "decided_by": q.decided_by,
                     "hq_state": rep.get("state"), "hq_city": rep.get("city"),
                     "now": now,
+                    "entered_review_at": review_ts, "review_origin": review_origin,
                 },
             )
             company_id = conn.execute(
@@ -248,12 +265,35 @@ class PostgresRepository:
 
     def enter_needs_review(self, company_key: str) -> dict | None:
         """Demote a stale qualified lead into needs-review (lifecycle sweep).
-        Guarded to icp_status='qualified' so it's idempotent."""
+        Guarded to icp_status='qualified' so it's idempotent. Starts the review
+        clock (origin 'decayed' — it aged out of Watch, vs an 'ingest' unsure)."""
         with self._pool.connection() as conn:
             row = conn.execute(
                 """
-                UPDATE discovery_companies SET icp_status = 'needs_review'
+                UPDATE discovery_companies
+                   SET icp_status = 'needs_review',
+                       entered_review_at = now(),
+                       review_origin = 'decayed'
                  WHERE normalized_name = %s AND icp_status = 'qualified'
+             RETURNING normalized_name
+                """,
+                (company_key,),
+            ).fetchone()
+        return self.get(company_key) if row else None
+
+    def promote_from_review(self, company_key: str) -> dict | None:
+        """Lift a re-heated lead back out of needs-review into the qualified queue
+        (lifecycle sweep, intent reached Hot). Guarded to icp_status='needs_review'
+        so it's idempotent; clears the review clock. review_status is untouched,
+        so a still-pending lead simply rejoins Discovery."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                UPDATE discovery_companies
+                   SET icp_status = 'qualified',
+                       entered_review_at = NULL,
+                       review_origin = NULL
+                 WHERE normalized_name = %s AND icp_status = 'needs_review'
              RETURNING normalized_name
                 """,
                 (company_key,),
@@ -697,6 +737,8 @@ def _to_row(company: dict, signals: list[dict]) -> dict:
         "reasoning": company.get("reasoning"),
         "evidence_url": company.get("evidence_url"),
         "review_status": company.get("review_status", "pending"),
+        "entered_review_at": _iso(company.get("entered_review_at")),
+        "review_origin": company.get("review_origin"),
         "first_seen_at": _iso(company.get("first_seen_at")),
         "qualified_at": _iso(company.get("qualified_at")),
         "signals": [

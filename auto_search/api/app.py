@@ -34,7 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from auto_search import discovery_runner, job_stacking, lifecycle, news, priority
+from auto_search import autoscore, discovery_runner, job_stacking, lifecycle, news, priority
 from auto_search.abm import (
     AbmIndex,
     TargetAccount,
@@ -490,10 +490,25 @@ def create_app() -> FastAPI:
 
     @app.post("/api/discovery/sweep")
     def discovery_sweep():
-        """Run one self-cleaning lifecycle pass: stale Watch leads -> Needs review,
-        stale Needs-review leads -> auto-rejected. Free (no LLM); the daily cron
-        runs it too. Reversible — an auto-reject restores like any manual reject."""
-        return lifecycle.sweep(app.state.repo).as_dict()
+        """Run one self-cleaning lifecycle pass: cold Watch -> Needs review,
+        re-heated (Hot) -> promoted back to Discovery, in-review-too-long ->
+        auto-rejected. ABM-aware so Hot matches the panel. Re-heated leads are
+        auto-scored in the background (budget-permitting); an auto-reject restores
+        like any manual reject."""
+        result = lifecycle.sweep(app.state.repo, abm_index=_abm_index())
+        if autoscore.autoscore_enabled():
+            for key in result.promoted_keys:
+                company = svc(app).get_company(key)
+                if company is None:
+                    continue
+                summary = app.state.scoring_repo.cost_summary()
+                if budget_guard.remaining(summary) < budget_guard.EST_SCORE_COST:
+                    continue                 # no headroom — leave it qualified-Hot
+                svc(app).promote(key)
+                row = app.state.scoring.enqueue_discovery(
+                    company.model_dump(), state="scoring")
+                _schedule_scoring(app, row["account_id"], op_type="promote")
+        return result.as_dict()
 
     # ── market-intelligence news (RCM / regulation headlines) ────────
 

@@ -73,6 +73,8 @@ class PanelCompany(BaseModel):
     domain: str | None = None
     review_status: str = "pending"
     icp_status: str | None = None       # qualified | needs_review | disqualified | error
+    entered_review_at: str | None = None  # when it entered needs_review (review-TTL clock)
+    review_origin: str | None = None     # 'ingest' (AI unsure) | 'decayed' (aged from Watch)
     first_seen_at: str | None = None
     qualified_at: str | None = None     # when the AI verdict landed (absolute timestamp)
     qualify_cost_usd: float | None = None  # from cost_events (measured tokens)
@@ -239,6 +241,8 @@ def _to_panel_company(row: dict) -> PanelCompany:
         domain=row.get("domain"),
         review_status=row.get("review_status", "pending"),
         icp_status=row.get("icp_status"),
+        entered_review_at=row.get("entered_review_at"),
+        review_origin=row.get("review_origin"),
         first_seen_at=row.get("first_seen_at"),
         qualified_at=row.get("qualified_at"),
         signal_count=len(signals),

@@ -257,6 +257,7 @@ async def main(args: argparse.Namespace) -> int:
     totals: dict[str, int] = {}
     ran = failed = 0
     spend_op = None
+    scoring_repo = None
     if not args.no_qualify:
         try:
             from auto_search.db.scoring_repository import get_scoring_repository
@@ -314,10 +315,28 @@ async def main(args: argparse.Namespace) -> int:
         print(f"  {DIM}panel (qualified) → python scripts/run_discovery.py --panel{RESET}")
         if spend_op is not None:
             spend_op.finish(status="completed")
-        # Self-cleaning pass: stale Watch -> Needs review -> auto-reject (free).
-        sweep = lifecycle.sweep(repo)
+        # Self-cleaning pass: cold Watch -> Needs review, re-heated -> promoted
+        # back to Discovery, in-review-too-long -> auto-rejected. ABM-aware so the
+        # sweep's Hot bar matches the panel's.
+        try:
+            from auto_search.abm import AbmIndex, TargetAccount
+            abm_rows = repo.abm_targets() if hasattr(repo, "abm_targets") else []
+            abm_index = AbmIndex([TargetAccount(**r) for r in abm_rows])
+        except Exception:  # noqa: BLE001 — abm match is a bonus; never break the sweep
+            abm_index = None
+        sweep = lifecycle.sweep(repo, abm_index=abm_index)
         print(f"  {DIM}lifecycle: {sweep.demoted} → needs-review, "
-              f"{sweep.rejected} auto-rejected{RESET}")
+              f"{sweep.promoted} → promoted, {sweep.rejected} auto-rejected{RESET}")
+        # Auto-score the re-heated (promoted) leads, budget-permitting.
+        if sweep.promoted_keys and scoring_repo is not None:
+            from auto_search import autoscore
+            from auto_search.scoring.service import ScoringService
+            from auto_search.services.review import ReviewService
+            res = await autoscore.autoscore_promoted(
+                sweep.promoted_keys, review=ReviewService(repo),
+                scoring=ScoringService(scoring_repo), scoring_repo=scoring_repo)
+            if res["scored"]:
+                print(f"  {DIM}auto-scored {len(res['scored'])} promoted lead(s){RESET}")
 
     # Production exit code: a single source failing keeps exit 0 (resilient), but
     # a TOTAL failure (every selected source errored) exits non-zero so the

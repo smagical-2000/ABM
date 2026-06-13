@@ -55,6 +55,12 @@ CREATE TABLE IF NOT EXISTS discovery_companies (
     reviewed_at           TIMESTAMPTZ,               -- when Galyna decided
     rejection_reason      TEXT,                       -- set on reject
 
+    -- review-TTL clock: when the row entered needs_review, and WHY. The reject
+    -- sweep ages off this (time IN review), not signal age — so an AI-unsure
+    -- lead clears even while its signal stays fresh. Cleared on leaving review.
+    entered_review_at     TIMESTAMPTZ,
+    review_origin         TEXT,                       -- 'ingest' (AI unsure) | 'decayed' (aged from Watch)
+
     -- lifecycle ---------------------------------------------------------
     first_seen_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     qualified_at          TIMESTAMPTZ,               -- when Claude ran
@@ -73,6 +79,16 @@ CREATE INDEX IF NOT EXISTS idx_disco_status_seen
 CREATE INDEX IF NOT EXISTS idx_disco_qualified
     ON discovery_companies (segment, confidence DESC)
     WHERE icp_status = 'qualified';
+
+-- Backfill for tables created before the review-TTL clock existed (idempotent).
+ALTER TABLE discovery_companies ADD COLUMN IF NOT EXISTS entered_review_at TIMESTAMPTZ;
+ALTER TABLE discovery_companies ADD COLUMN IF NOT EXISTS review_origin TEXT;
+-- Start the clock for rows already in review (re-runnable: only fills NULLs, so
+-- a deploy doesn't reset anyone's window — it just bootstraps the missing ones).
+UPDATE discovery_companies
+   SET entered_review_at = COALESCE(entered_review_at, now()),
+       review_origin     = COALESCE(review_origin, 'ingest')
+ WHERE icp_status = 'needs_review' AND entered_review_at IS NULL;
 
 
 -- ────────────────────────────────────────────────────────────────────

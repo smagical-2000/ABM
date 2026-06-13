@@ -60,6 +60,25 @@ function AbmBadge({ match }) {
 }
 window.AbmBadge = AbmBadge;
 
+// ── ReviewOriginTag: why a needs-review lead is sitting in the queue ─────────
+// 'ingest'  → the AI wasn't confident enough at discovery time (most of the queue)
+// 'decayed' → it was qualified, then cooled out of Watch with no fresh signal
+function ReviewOriginTag({ icpStatus, origin }) {
+  if (icpStatus !== 'needs_review' || !origin) return null;
+  const decayed = origin === 'decayed';
+  const label = decayed ? 'Cooled from Watch' : 'AI unsure';
+  const title = decayed
+    ? 'Was qualified, then cooled — no fresh signal for a while'
+    : "The AI wasn't confident enough to qualify or disqualify this";
+  return (
+    <span title={title}
+      className="rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] font-medium text-zinc-500 ring-1 ring-inset ring-zinc-200">
+      {label}
+    </span>
+  );
+}
+window.ReviewOriginTag = ReviewOriginTag;
+
 // ── AbmCallout: the detail-drawer banner for an ABM-target match ─────────────
 // Shared by the discovery drawer and the score drawer so a match reads
 // identically on both. Renders nothing when the company isn't on the list.
@@ -178,6 +197,7 @@ function CompanyRow({ company, leaving, selected, onToggleSelect, onOpen, onProm
             <h3 className="truncate text-[15px] font-semibold text-zinc-900">{company.name}</h3>
             <SegmentBadge segment={company.segment} />
             <AbmBadge match={company.abm_match} />
+            <ReviewOriginTag icpStatus={company.icp_status} origin={company.review_origin} />
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <SignalChips signals={company.signals} />

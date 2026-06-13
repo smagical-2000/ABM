@@ -50,7 +50,7 @@ from auto_search.db.scoring_repository import (
 )
 from auto_search.intros import profiles as intros_profiles
 from auto_search.intros import service as intros_service
-from auto_search.normalize import normalize_linkedin_url
+from auto_search.normalize import normalize_company_name, normalize_linkedin_url
 from auto_search.run_control import RunControl
 from auto_search.runtime import is_production
 from auto_search.scoring import budget as budget_guard
@@ -214,6 +214,27 @@ def _import_label(filename: str | None) -> str:
     also disambiguates two uploads of the same filename."""
     name = (filename or "").strip() or "import.csv"
     return f"{name} · {datetime.now(UTC).strftime('%b %d, %H:%M')}"
+
+
+def _classify_import_row(name, account_id, *, get_company, exists):
+    """Decide what to do with one imported CSV row, by company IDENTITY — not the
+    import's own id scheme, which is exactly why duplicates slipped through:
+
+      "skip"  already scored — promoted from discovery ("acc_"+key) or a prior CSV
+      "move"  a live discovery company → promote it into Scored WITH its signals
+              (it leaves the Discovery panel) instead of making a signal-less twin
+      "new"   not seen → create a fresh CSV account
+
+    `get_company(key) -> PanelCompany|None` and `exists(account_id) -> bool` are
+    injected so this is unit-testable without the app. Returns (action, company).
+    """
+    key = normalize_company_name(name)
+    if exists("acc_" + key) or exists(account_id):
+        return "skip", None
+    company = get_company(key)
+    if company is not None and getattr(company, "icp_status", None) in ("qualified", "needs_review"):
+        return "move", company
+    return "new", None
 
 
 # Upload caps: a CSV import is raw-bodied, so bound it to avoid an OOM body or a
@@ -1256,24 +1277,39 @@ def create_app() -> FastAPI:
 
     @app.post("/api/scoring/import")
     async def import_commit(request: Request):
-        """Parse the CSV body and enqueue the new accounts as 'queued' — parked,
-        NOT scored. Scoring is on demand (per-account or a batch) so importing a
-        large file never spends money by itself. Known accounts are skipped.
+        """Parse the CSV body and enqueue accounts as 'queued' — parked, NOT scored.
+        Scoring is on demand (per-account or a batch) so importing a large file
+        never spends money by itself.
 
-        Each batch is tagged with a label (the uploaded filename + time) so the
-        user can later filter to, and export, exactly what they uploaded."""
+        Dedup is by company IDENTITY: a row already scored is skipped, and a row
+        that's a LIVE discovery company is MOVED into Scored carrying its signals
+        (it leaves the Discovery panel) instead of creating a signal-less twin.
+        Each batch is tagged with a label so it can be filtered + exported later."""
         result = _parse_upload(await request.body())
-        fresh = [a for a in result.accounts if not app.state.scoring.exists(a.account_id)]
         label = _import_label(request.headers.get("x-import-filename"))
-        app.state.scoring.enqueue_csv(fresh, state="queued", import_label=label)
+        svc_ = svc(app)
+        scoring = app.state.scoring
+        csv_fresh, moved, skipped = [], [], 0
+        for a in result.accounts:
+            action, company = _classify_import_row(
+                a.name, a.account_id, get_company=svc_.get_company, exists=scoring.exists)
+            if action == "skip":
+                skipped += 1
+            elif action == "move":
+                svc_.promote(company.company_key)          # leaves the Discovery panel
+                moved.append(scoring.enqueue_discovery(company.model_dump(), state="queued"))
+            else:
+                csv_fresh.append(a)
+        csv_rows = scoring.enqueue_csv(csv_fresh, state="queued", import_label=label)
         return {
             "schema_label": result.schema_label,
             "segment": result.segment,
-            "imported": len(fresh),
-            "queued": len(fresh),
-            "skipped_known": len(result.accounts) - len(fresh),
+            "imported": len(csv_rows) + len(moved),
+            "queued": len(csv_rows) + len(moved),
+            "moved_from_discovery": len(moved),
+            "skipped_known": skipped,
             "import_label": label,
-            "accounts": [app.state.scoring.get(a.account_id) for a in fresh],
+            "accounts": csv_rows + moved,
         }
 
     @app.get("/api/scoring/imports")

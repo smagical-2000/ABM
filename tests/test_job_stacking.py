@@ -263,3 +263,23 @@ class TestPersistParked:
         # A repo / test double without upsert_parked must never raise.
         job_stacking.persist_parked(
             object(), "acme", [_job("Acme", "Coder", "standard", ext="a1")])
+
+
+# ── missing-tier recovery (legacy signals) + the panel's flat entry point ─────
+
+
+def test_missing_tier_recovered_from_role_bucket():
+    # Legacy job signals stored before tier was persisted: the gate recovers it
+    # from the role bucket — a lone biller still parks, a lone denials qualifies.
+    assert should_park([_job("Acme", "Biller", None, ext="a1")])
+    assert not should_park([_job("Beta", "Denials", None, ext="b1")])
+
+
+def test_should_park_flat_matches_the_gate():
+    # The panel's flat-signal entry point agrees with the RawSignal gate.
+    assert job_stacking.should_park_flat(
+        [{"signal_type": "job_posting", "role": "Biller", "tier": "standard"}])
+    assert not job_stacking.should_park_flat(   # tier missing → recovered to core
+        [{"signal_type": "job_posting", "role": "Denials", "tier": None}])
+    assert not job_stacking.should_park_flat(   # a real signal never parks
+        [{"signal_type": "leadership_change"}])

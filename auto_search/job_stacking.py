@@ -36,7 +36,9 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
+from types import SimpleNamespace
 
+from auto_search import rcm_titles
 from auto_search.models import RawSignal
 
 logger = logging.getLogger(__name__)
@@ -82,12 +84,16 @@ def stacking_decision(signals: list[RawSignal]) -> StackDecision:
     for s in jobs:
         role = s.payload.get("role") or "RCM"
         tier = (s.payload.get("tier") or "").strip().lower()
+        if not tier:
+            # Legacy signal stored before the connector persisted tier — recover it
+            # from the role bucket so a lone standard hire isn't mis-read as core
+            # (and wrongly qualified). rcm_titles is the source of truth.
+            tier = rcm_titles.tier_for_role(role)
         if tier == _STANDARD:
             standard_postings += 1
             if role not in standard_roles:
                 standard_roles.append(role)
-        # core OR unknown/missing tier → fail open (counts as core, qualifies)
-        elif role not in core_roles:
+        elif role not in core_roles:        # core, or unknown role → core
             core_roles.append(role)
 
     core_t, std_t = tuple(core_roles), tuple(standard_roles)
@@ -160,3 +166,14 @@ def persist_parked(repo, company_key: str, signals: list[RawSignal]) -> None:
         fn(watch_record(company_key, signals, stacking_decision(signals)))
     except Exception as e:  # noqa: BLE001 — the watch ledger must never break a run
         logger.debug("upsert_parked failed for %s: %s", company_key, e)
+
+
+def should_park_flat(flat_signals) -> bool:
+    """`should_park` for already-flattened signals (dicts of
+    ``{signal_type, role, tier}``) — the shape the panel API holds. Adapts them to
+    the gate so the panel and the connector share ONE definition of a lone standard
+    hire, rather than re-deriving it."""
+    sigs = [SimpleNamespace(signal_type=s.get("signal_type"),
+                            payload={"role": s.get("role"), "tier": s.get("tier")})
+            for s in flat_signals]
+    return should_park(sigs)

@@ -70,8 +70,9 @@ window.API = {
   },
   refreshNews: () => http('/api/news/refresh', { method: 'POST' }),
 
-  // ── jobs stacking watch list (parked single-standard-role companies) ─────────
-  parked: () => http('/api/discovery/parked'),
+  // ── watch list: lone-standard-hire leads kept out of Discovery ──────────────
+  parked: () => http('/api/discovery/parked'),                       // not yet qualified
+  watchlistLeads: () => http('/api/panel?status=qualified&watchlist=only'),  // qualified, low intent
 
   // ── social: monitored LinkedIn accounts (Apify post-engagement) ─────────────
   socialTargets: () => http('/api/social/targets'),

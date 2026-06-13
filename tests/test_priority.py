@@ -20,6 +20,12 @@ def _sig(stype: str, days: int = 1) -> dict:
     return {"signal_type": stype, "observed_at": _recent(days)}
 
 
+def _job_no_tier(title: str, role: str, days: int = 1) -> dict:
+    # A legacy stored job signal: role bucket present, tier never persisted.
+    return {"signal_type": "job_posting", "title": title, "role": role,
+            "tier": None, "observed_at": _recent(days)}
+
+
 # ── single roles stay Watch (the flood we stop) ────────────────────────
 
 
@@ -105,3 +111,29 @@ def test_hot_threshold_is_env_tunable(monkeypatch):
     assert priority.intent([_job("Denials Spec")], now=NOW).tier == "watch"
     monkeypatch.setenv("DISCOVERY_INTENT_HOT", "35")
     assert priority.intent([_job("Denials Spec")], now=NOW).tier == "hot"
+
+
+# ── missing-tier fallback: recover tier from the role bucket (rcm_titles) ─────
+
+
+def test_missing_tier_standard_role_recovered_from_bucket():
+    # A biller (standard) stored with NO tier must score as standard, not core —
+    # the fallback recovers it from the role bucket. Without it, it'd read core.
+    biller = priority.intent([_job_no_tier("Medical Biller", "Biller")], now=NOW)
+    core = priority.intent([_job("Denials Specialist", tier="core")], now=NOW)
+    assert "standard RCM role" in biller.reason
+    assert biller.score < core.score
+
+
+def test_missing_tier_core_role_stays_core():
+    i = priority.intent([_job_no_tier("Denials Specialist", "Denials")], now=NOW)
+    assert "core RCM role" in i.reason
+
+
+def test_tier_for_role_matches_canonical_map():
+    from auto_search import rcm_titles
+    assert rcm_titles.tier_for_role("Biller") == "standard"
+    assert rcm_titles.tier_for_role("AR / Collections") == "standard"
+    assert rcm_titles.tier_for_role("Denials") == "core"
+    assert rcm_titles.tier_for_role("Prior Auth") == "core"
+    assert rcm_titles.tier_for_role("nope") == "core"      # unknown → fail open

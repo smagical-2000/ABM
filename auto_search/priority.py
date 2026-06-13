@@ -25,6 +25,8 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from auto_search import rcm_titles
+
 # Hiring one of these is a buying signal (they scope/own the work), not backfill.
 _LEADER_RE = re.compile(
     r"\b(chief|c[a-z]o|cxo|vp|svp|evp|vice[\s-]?president|director|head\s+of"
@@ -75,9 +77,14 @@ def _job_points(sig: dict) -> tuple[int, str]:
     if _LEADER_RE.search(title):
         return _JOB_LEADER, "revenue-cycle leader hire"
     tier = str(sig.get("tier") or "").strip().lower()
+    if not tier:
+        # Legacy signals stored before the connector persisted tier — recover it
+        # from the role bucket instead of failing open to core, which over-scored
+        # standard biller/coder roles (and made the panel read as all hot hiring).
+        tier = rcm_titles.tier_for_role(sig.get("role"))
     if tier == "standard":
         return _JOB_STANDARD, "standard RCM role"
-    return _JOB_CORE, "core RCM role"     # core OR unknown tier → fail toward core
+    return _JOB_CORE, "core RCM role"     # core OR unknown role → core
 
 
 _HUMAN: dict[str, str] = {

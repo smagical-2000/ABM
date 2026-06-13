@@ -435,6 +435,9 @@ def create_app() -> FastAPI:
                      "tier": s.tier, "observed_at": s.observed_at} for s in (c.signals or [])]
             it = priority.intent(
                 sigs, abm_confirmed=bool(abm_match and abm_match.tier == "confirmed"))
+            # Lone standard hire (single biller/coder, nothing stronger) → Watch list,
+            # not Discovery. Same gate the cron parks on, so the views agree.
+            is_watchlist = job_stacking.should_park_flat(sigs)
             # When this lead will auto-move (for the panel TTL badge). Only pending
             # leads decay; the math lives in lifecycle so the badge matches the sweep.
             ttl_action, ttl_days = (None, None)
@@ -449,6 +452,7 @@ def create_app() -> FastAPI:
                 "abm_match": abm_match,
                 "intent_score": it.score, "intent_tier": it.tier, "intent_reason": it.reason,
                 "ttl_action": ttl_action, "ttl_days": ttl_days,
+                "is_watchlist": is_watchlist,
             }))
         return out
 
@@ -478,12 +482,20 @@ def create_app() -> FastAPI:
     def get_stats():
         return svc(app).stats()
 
+    def _belongs_on_watchlist(c: PanelCompany) -> bool:
+        """A lone standard-hire that should sit on the Watch list, not the main
+        Discovery panel — UNLESS it's a confirmed ABM target, which we always
+        surface (a tracked account matters regardless of hiring intent)."""
+        confirmed_abm = bool(c.abm_match and c.abm_match.tier == "confirmed")
+        return c.is_watchlist and not confirmed_abm
+
     @app.get("/api/panel", response_model=list[PanelCompany])
     def get_panel(
         status: str = "qualified",
         segment: str | None = None,
         signal_type: str | None = None,
         abm: str | None = None,    # "confirmed" | "match" -> filter to ABM-target hits
+        watchlist: str | None = None,  # ""/None = Discovery (hide watch-list); "only" = the watch list
     ):
         # `status` selects the tab: qualified (default) / needs_review.
         statuses = ("needs_review",) if status == "needs_review" else ("qualified",)
@@ -494,6 +506,12 @@ def create_app() -> FastAPI:
                          if c.abm_match and c.abm_match.tier == "confirmed"]
         elif abm in ("match", "any", "1", "true"):
             companies = [c for c in companies if c.abm_match]
+        # Discovery shows real-intent leads; lone standard hires live on the Watch
+        # list. Only split the qualified tab — needs_review is its own lifecycle.
+        if status == "qualified":
+            keep = _belongs_on_watchlist if watchlist == "only" else \
+                (lambda c: not _belongs_on_watchlist(c))
+            companies = [c for c in companies if keep(c)]
         companies.sort(key=lambda c: -c.intent_score)   # hottest intent first
         return companies
 

@@ -88,6 +88,7 @@ class PanelCompany(BaseModel):
     # lifecycle TTL countdown for the panel badge (lifecycle.next_transition)
     ttl_action: str | None = None        # "review" (Watch→needs_review) | "reject" (auto-reject) | None
     ttl_days: int | None = None          # whole days until that move; 0 = next sweep acts
+    is_watchlist: bool = False           # lone standard-hire → belongs on the Watch list, not Discovery
 
 
 class DiscoveryStats(BaseModel):

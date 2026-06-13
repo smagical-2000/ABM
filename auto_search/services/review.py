@@ -85,6 +85,9 @@ class PanelCompany(BaseModel):
     intent_score: int = 0                # 0-100
     intent_tier: str | None = None       # "hot" | "watch"
     intent_reason: str | None = None     # short human "why" ("3 RCM roles open · ABM target")
+    # lifecycle TTL countdown for the panel badge (lifecycle.next_transition)
+    ttl_action: str | None = None        # "review" (Watch→needs_review) | "reject" (auto-reject) | None
+    ttl_days: int | None = None          # whole days until that move; 0 = next sweep acts
 
 
 class DiscoveryStats(BaseModel):

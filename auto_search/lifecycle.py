@@ -34,6 +34,7 @@ Only `pending` leads move — a promoted/deferred lead is never touched. The cal
 from __future__ import annotations
 
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -102,6 +103,40 @@ def _parse_dt(v) -> datetime | None:
         return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
     except (ValueError, TypeError):
         return None
+
+
+def _days_until(due: datetime, now: datetime) -> int:
+    """Whole days until `due`, rounded up; 0 once it's due/overdue."""
+    secs = (due - now).total_seconds()
+    return math.ceil(secs / 86400) if secs > 0 else 0
+
+
+def next_transition(*, icp_status: str | None, tier: str | None,
+                    last_signal_at: datetime | None = None,
+                    entered_review_at: str | None = None,
+                    now: datetime | None = None) -> tuple[str | None, int | None]:
+    """The lead's next AUTOMATIC move, for the panel's TTL badge. Lives here so the
+    badge can never drift from sweep() — it mirrors the exact same cutoffs:
+
+        ("review", n)  a qualified Watch lead drops to Needs review in n days
+                       (signal-age clock: last_signal + WATCH_TTL)
+        ("reject", n)  a Needs-review lead auto-rejects in n days
+                       (time-in-review clock: entered_review_at + REVIEW_TTL)
+        (None, None)   Hot (in-market — never decays), or no clock to show
+
+    "in 0d" means the next daily sweep will act. The caller should only ask for
+    `pending` leads — a promoted/deferred lead never decays.
+    """
+    if tier == "hot":
+        return None, None                      # in-market — the sweep never moves it
+    now = now or datetime.now(UTC)
+    if icp_status == "qualified" and last_signal_at is not None:
+        return "review", _days_until(last_signal_at + timedelta(days=watch_ttl_days()), now)
+    if icp_status == "needs_review":
+        entered = _parse_dt(entered_review_at)
+        if entered is not None:
+            return "reject", _days_until(entered + timedelta(days=review_ttl_days()), now)
+    return None, None
 
 
 def _abm_confirmed(abm_index, row: dict) -> bool:

@@ -216,3 +216,39 @@ def test_review_ttl_is_env_tunable(monkeypatch):
     repo = FakeRepo([_row("r", icp="needs_review", entered=_old(5),
                           signals=[_job("Biller", days=1)])])
     assert lifecycle.sweep(repo, now=NOW).rejected == 1
+
+
+# ── next_transition: the panel TTL badge (mirrors the sweep cutoffs) ──────────
+
+
+def test_next_transition_hot_is_safe():
+    # Hot never decays — no countdown, whatever the status.
+    assert lifecycle.next_transition(icp_status="needs_review", tier="hot",
+                                     entered_review_at=_old(99), now=NOW) == (None, None)
+
+
+def test_next_transition_watch_counts_down_to_review():
+    # Watch lead, freshest signal 2d old, WATCH_TTL 7 → drops to review in 5d.
+    last = NOW - timedelta(days=2)
+    assert lifecycle.next_transition(icp_status="qualified", tier="watch",
+                                     last_signal_at=last, now=NOW) == ("review", 5)
+
+
+def test_next_transition_review_counts_down_to_reject():
+    # In review 2d, REVIEW_TTL 7 → auto-rejects in 5d.
+    assert lifecycle.next_transition(icp_status="needs_review", tier="watch",
+                                     entered_review_at=_old(2), now=NOW) == ("reject", 5)
+
+
+def test_next_transition_overdue_is_zero_not_negative():
+    # Sat in review past the TTL → 0 ("today"), never negative.
+    assert lifecycle.next_transition(icp_status="needs_review", tier="watch",
+                                     entered_review_at=_old(10), now=NOW) == ("reject", 0)
+
+
+def test_next_transition_none_without_a_clock():
+    # Qualified but no signal yet, and review with no entry stamp → nothing to show.
+    assert lifecycle.next_transition(icp_status="qualified", tier="watch",
+                                     last_signal_at=None, now=NOW) == (None, None)
+    assert lifecycle.next_transition(icp_status="needs_review", tier="watch",
+                                     entered_review_at=None, now=NOW) == (None, None)

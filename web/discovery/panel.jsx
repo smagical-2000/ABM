@@ -79,6 +79,29 @@ function ReviewOriginTag({ icpStatus, origin }) {
 }
 window.ReviewOriginTag = ReviewOriginTag;
 
+// ── TtlHint: when this lead will auto-move, so nothing rots silently ──────────
+// 'reject' → a needs-review lead auto-rejects once it ages past the review TTL
+// 'review' → a Watch lead drops to Needs review when its signals go stale
+// null     → Hot / in-market: it doesn't decay, so show nothing
+function TtlHint({ action, days }) {
+  if (!action || days == null) return null;
+  const urgent = days <= 2;
+  const when = days <= 0 ? 'today' : `in ${days}d`;
+  const label = action === 'reject' ? `Auto-rejects ${when}` : `To review ${when}`;
+  const title = action === 'reject'
+    ? 'Auto-rejected once it sits in review past the TTL — restore anytime'
+    : 'Drops to Needs review when its signals go stale';
+  return (
+    <span title={title}
+      className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[11px] font-medium ring-1 ring-inset
+        ${urgent ? 'bg-amber-50 text-amber-700 ring-amber-100' : 'bg-zinc-50 text-zinc-500 ring-zinc-200'}`}>
+      <Icons.clock className="h-3 w-3" />
+      {label}
+    </span>
+  );
+}
+window.TtlHint = TtlHint;
+
 // ── AbmCallout: the detail-drawer banner for an ABM-target match ─────────────
 // Shared by the discovery drawer and the score drawer so a match reads
 // identically on both. Renders nothing when the company isn't on the list.
@@ -202,19 +225,12 @@ function CompanyRow({ company, leaving, selected, onToggleSelect, onOpen, onProm
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <SignalChips signals={company.signals} />
           </div>
-          <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[12px] text-zinc-400">
-            <span>{company.signal_count} {company.signal_count === 1 ? 'signal' : 'signals'}</span>
+          <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-zinc-400">
+            <TtlHint action={company.ttl_action} days={company.ttl_days} />
             {company.qualified_at && (
-              <>
-                <span className="text-zinc-300">·</span>
-                <span title={company.qualified_at}>evaluated {formatDateTime(company.qualified_at)}</span>
-              </>
-            )}
-            {company.qualify_cost_usd != null && company.qualify_cost_usd > 0 && (
-              <>
-                <span className="text-zinc-300">·</span>
-                <span className="tabular-nums text-zinc-500">${company.qualify_cost_usd.toFixed(2)}</span>
-              </>
+              <span title={`Evaluated ${formatDateTime(company.qualified_at)}`}>
+                {formatDateTime(company.qualified_at)}
+              </span>
             )}
             {company.approximate_employees && (
               <>

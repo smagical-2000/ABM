@@ -435,11 +435,20 @@ def create_app() -> FastAPI:
                      "tier": s.tier, "observed_at": s.observed_at} for s in (c.signals or [])]
             it = priority.intent(
                 sigs, abm_confirmed=bool(abm_match and abm_match.tier == "confirmed"))
+            # When this lead will auto-move (for the panel TTL badge). Only pending
+            # leads decay; the math lives in lifecycle so the badge matches the sweep.
+            ttl_action, ttl_days = (None, None)
+            if c.review_status == "pending":
+                ttl_action, ttl_days = lifecycle.next_transition(
+                    icp_status=c.icp_status, tier=it.tier,
+                    last_signal_at=priority.last_signal_at(sigs),
+                    entered_review_at=c.entered_review_at)
             out.append(c.model_copy(update={
                 "qualify_cost_usd": cost if cost is not None
                 else (est if c.qualified_at else None),
                 "abm_match": abm_match,
                 "intent_score": it.score, "intent_tier": it.tier, "intent_reason": it.reason,
+                "ttl_action": ttl_action, "ttl_days": ttl_days,
             }))
         return out
 

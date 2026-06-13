@@ -159,46 +159,53 @@ function ActivityBanner({ runs, paused, cancelling, phase }) {
   );
 }
 
-// ── DiscoverySpendMeter — month-to-date qualify spend vs the discovery budget ─
-function DiscoverySpendMeter({ spend, lastRun }) {
+// ── SpendMeter — ALL spend this month in one place: discovery (qualify + Apify
+// scrape) + scored, against the combined monthly budget. One cost area, not three.
+function SpendMeter({ spend, lastRun }) {
   if (!spend) return null;
-  const spent = spend.month_discovery_cost || 0;
-  const budget = spend.discovery_budget || 0;
-  const est = spend.discovery_est_qual_cost || 0.12;
-  const pct = budget ? Math.min(100, Math.round((spent / budget) * 100)) : 0;
-  const over = budget && spent >= budget;
-  const near = !over && budget && spent >= budget * 0.8;
+  const disc = spend.month_discovery_cost || 0;            // qualify + Apify scrape
+  const scored = spend.month_scoring_cost ?? spend.month_cost ?? 0;
+  const total = spend.month_total_cost ?? (disc + scored);
+  const discBudget = spend.discovery_budget || 0;
+  const scoreBudget = spend.monthly_budget || 0;
+  const budget = discBudget + scoreBudget;                 // combined monthly cap
+  const pct = budget ? Math.min(100, Math.round((total / budget) * 100)) : 0;
+  // "over" if EITHER line hit its own guardrail (each is enforced separately).
+  const over = (discBudget && disc >= discBudget) || (scoreBudget && scored >= scoreBudget);
+  const near = !over && budget && total >= budget * 0.8;
   const bar = over ? 'bg-rose-500' : near ? 'bg-amber-500' : 'bg-indigo-500';
-  const tone = over ? 'text-rose-600' : near ? 'text-amber-600' : 'text-zinc-500';
+  const tone = over ? 'text-rose-600' : near ? 'text-amber-600' : 'text-zinc-700';
   const runCost = lastRun && lastRun.cost_usd;
   const runEval = lastRun && (lastRun.evaluated ?? (
     (lastRun.qualified || 0) + (lastRun.needs_review || 0) + (lastRun.disqualified || 0)
   ));
   return (
-    <div className="mt-3 flex flex-wrap items-center gap-3 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 shadow-sm shadow-zinc-900/[0.02]">
-      <Icons.zap className="h-4 w-4 shrink-0 text-zinc-400" />
-      <span className="text-[12.5px] font-medium text-zinc-600">Discovery spend</span>
-      <span className={`text-[12.5px] font-semibold tabular-nums ${tone}`}>
-        ${spent.toFixed(2)}{budget ? ` / $${budget.toFixed(0)}` : ''}
+    <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 shadow-sm shadow-zinc-900/[0.02]">
+      <Icons.dollar className="h-4 w-4 shrink-0 text-zinc-400" />
+      <span className="text-[12.5px] font-medium text-zinc-600">Spend this month</span>
+      <span className={`text-[13px] font-semibold tabular-nums ${tone}`}>
+        ${total.toFixed(2)}{budget ? ` / $${budget.toFixed(0)}` : ''}
       </span>
       {budget > 0 && (
         <div className="hidden h-1.5 w-32 overflow-hidden rounded-full bg-zinc-100 sm:block">
           <div className={`h-full rounded-full transition-all duration-500 ${bar}`} style={{ width: `${pct}%` }} />
         </div>
       )}
+      <span className="text-[11.5px] tabular-nums text-zinc-400">
+        Discovery ${disc.toFixed(2)} <span className="text-zinc-300">incl. Apify</span> · Scored ${scored.toFixed(2)}
+      </span>
       {runEval > 0 && (
         <span className="text-[11.5px] tabular-nums text-indigo-600">
           Last run: {runEval} evaluated{runCost != null ? ` · $${Number(runCost).toFixed(2)}` : ''}
         </span>
       )}
-      <span className="ml-auto text-[11.5px] tabular-nums text-zinc-400">
-        ~${est.toFixed(2)}/company · month to date
-      </span>
       {over ? (
-        <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-600 ring-1 ring-inset ring-rose-100">Budget reached</span>
+        <span className="ml-auto rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-600 ring-1 ring-inset ring-rose-100">Budget reached</span>
       ) : near ? (
-        <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-600 ring-1 ring-inset ring-amber-100">Near budget</span>
-      ) : null}
+        <span className="ml-auto rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-600 ring-1 ring-inset ring-amber-100">Near budget</span>
+      ) : (
+        <span className="ml-auto text-[11px] tabular-nums text-zinc-400">resets monthly</span>
+      )}
     </div>
   );
 }
@@ -886,7 +893,7 @@ function App() {
             <StatTile value={stats.disqualified} label="Disqualified (hidden)" />
           </div>
 
-          <DiscoverySpendMeter spend={spend} lastRun={lastRun} />
+          <SpendMeter spend={spend} lastRun={lastRun} />
           <LastRunSummary lastRun={lastRun} />
 
           <div className="mt-8 overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm shadow-zinc-900/[0.02]">

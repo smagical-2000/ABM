@@ -1,0 +1,77 @@
+{
+  "_about": "Regression registry. Every notable bug we have shipped and fixed, with the test that now guards it. The guide's rule: a bug is not 'done' until a test makes it impossible to reintroduce silently. The actual gate is `pytest` in CI (.github/workflows/ci.yml); this file is the human- and agent-readable index of bug -> guard so a cold-start agent learns the gotchas and never re-opens a closed bug. Add an entry whenever you fix a bug. Prune an entry only after its guard has held for 6+ months and the area was rewritten.",
+  "_schema": {
+    "id": "kebab-case slug",
+    "date": "YYYY-MM-DD the fix landed",
+    "area": "module / surface",
+    "symptom": "what the user/operator saw",
+    "root_cause": "the actual reason, not the symptom",
+    "guard": "test file::test_name that now fails if this regresses",
+    "lesson": "the generalizable rule to carry forward"
+  },
+  "bugs": [
+    {
+      "id": "cron-skips-jobs-park-gate",
+      "date": "2026-06-13",
+      "area": "auto_search/job_stacking.py + the discovery pipeline",
+      "symptom": "Lone single 'standard'-tier hires (noise) kept appearing in Discovery even though the on-demand panel parked them. The daily cron re-admitted the noise the panel would have hidden.",
+      "root_cause": "The park decision lived only on the on-demand panel-annotation path. The cron ingestion path never called it, so the two paths disagreed.",
+      "guard": "tests/test_job_stacking.py",
+      "lesson": "A gate must run on EVERY ingestion path (cron AND panel). When you add a filter, test cron/panel parity, not just the path you are looking at."
+    },
+    {
+      "id": "tier-not-persisted-falls-open-to-core",
+      "date": "2026-06-13",
+      "area": "auto_search/priority.py, rcm_titles.py",
+      "symptom": "~692 historical job signals mis-ranked intent: a 'standard'-tier role scored as 'core' on re-evaluation.",
+      "root_cause": "The RCM tier was denormalized onto the signal but not persisted on older records; when missing, the points logic defaulted to 'core' (too high).",
+      "guard": "tests/test_priority.py",
+      "lesson": "When a denormalized field may be absent on old rows, derive it from the durable field (here role -> rcm_titles.tier_for_role) and fail to the SAFE default, not the generous one."
+    },
+    {
+      "id": "needs-review-reject-clock-used-signal-age",
+      "date": "2026-06-13",
+      "area": "auto_search/lifecycle.py",
+      "symptom": "Accounts freshly demoted to needs_review could be auto-rejected almost immediately.",
+      "root_cause": "The auto-reject TTL measured the age of the underlying signal, not how long the account had been in the review state.",
+      "guard": "tests/test_lifecycle.py",
+      "lesson": "A state TTL must be measured from the state-entry timestamp (entered_review_at), never from the data's age. Promote-on-reheat applies only to decayed accounts."
+    },
+    {
+      "id": "csv-import-creates-discovery-twins",
+      "date": "2026-06-13",
+      "area": "auto_search/api/app.py _classify_import_row, identity/dedup",
+      "symptom": "Importing a CSV that already contained accounts present in Discovery created duplicate 'twin' rows.",
+      "root_cause": "Two id schemes (acc_<key> for promoted, csv_<slug> for imports) were not reconciled at import time, so the same company existed under two ids.",
+      "guard": "tests/test_import_dedup.py",
+      "lesson": "Dedupe on identity ACROSS id schemes at the import boundary. Moving a Discovery record into Scored (carrying its signals) beats creating a new one."
+    },
+    {
+      "id": "autoscore-toggle-resets-on-reload",
+      "date": "2026-06-13",
+      "area": "web/discovery/app.jsx",
+      "symptom": "The auto-score toggle silently flipped back to OFF after any browser reload.",
+      "root_cause": "The toggle state lived only in React memory; nothing persisted it across reloads.",
+      "guard": "tests/ui/test_ui_smoke.py::test_autoscore_toggle_persists_across_reload",
+      "lesson": "Any operator toggle that must survive a reload needs persistence (localStorage) AND a UI regression test that reloads and re-asserts."
+    },
+    {
+      "id": "jsx-syntax-or-missing-icon-white-screens-app",
+      "date": "2026-06-13",
+      "area": "web/discovery/ (in-browser Babel, no build step)",
+      "symptom": "A bad JSX edit or a reference to a non-existent Icons.* white-screened the WHOLE app at runtime, and pytest stayed green.",
+      "root_cause": "There is no compile step. Babel transpiles in the browser, so a syntax error or undefined component is a runtime failure invisible to backend tests.",
+      "guard": "tests/ui/test_ui_smoke.py::test_every_tab_mounts_without_console_errors",
+      "lesson": "In-browser JSX has no compile gate, so the Playwright UI smoke IS the compile gate. Transpile-check JSX and run the UI smoke before every deploy. Only use Icons.* that exist in ui.jsx."
+    },
+    {
+      "id": "single-competitor-like-is-noise",
+      "date": "2026-06-13",
+      "area": "auto_search/social/engagement_gate.py",
+      "symptom": "A single stray like on a competitor's post created a low-value 'signal', cluttering Discovery.",
+      "root_cause": "Social engagement qualified on any single interaction, with no per-person threshold and no competitor-vs-own distinction.",
+      "guard": "tests/test_social_engagement_gate.py",
+      "lesson": "Engagement qualifies only on intent-bearing volume (a comment, or 2+ likes) and ONLY for competitor accounts, not our own (getMagical). Collect multiple touches per person, then decide."
+    }
+  ]
+}

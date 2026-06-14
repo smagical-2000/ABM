@@ -11,10 +11,6 @@ import pytest
 
 from auto_search.clients.apify_jobs import IndeedJob, LinkedInJob
 from auto_search.connectors.job_postings import (
-    CORE,
-    ESSENTIAL_RCM_TITLES,
-    STANDARD,
-    EssentialTitle,
     JobPostingsConnector,
     _domain_from_url,
     _indeed_domain,
@@ -25,6 +21,7 @@ from auto_search.connectors.job_postings import (
     _split_loc,
     select_titles,
 )
+from auto_search.rcm_titles import CORE, ESSENTIAL_RCM_TITLES, STANDARD, EssentialTitle
 
 SINCE = datetime(2026, 6, 1, tzinfo=UTC)
 

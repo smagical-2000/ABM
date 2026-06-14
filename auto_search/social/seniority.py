@@ -6,8 +6,8 @@ above**: keep C-level, VP/SVP/EVP, Director, Head of, Owner/Founder/President,
 Partner/Principal; drop Manager and below.
 
 We classify from the free-text ``job_title`` because that's the reliable field —
-Trigify's structured ``job_title_levels`` is frequently empty (verified on live
-data). When ``job_title_levels`` IS populated we trust it as a confirming signal.
+the structured ``job_title_levels`` (from enrichment) is frequently empty (verified
+on live data). When ``job_title_levels`` IS populated we trust it as a confirming signal.
 Deterministic and unit-tested so the bar can't drift silently.
 """
 
@@ -47,7 +47,7 @@ _DEMOTE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Structured job_title_levels values (when Trigify provides them) that are
+# Structured job_title_levels values (when enrichment provides them) that are
 # decision-maker tier. Normalized to lowercase + underscores before compare.
 _DM_LEVELS = frozenset({
     "owner", "founder", "co_founder", "c_suite", "cxo", "chief", "vp",

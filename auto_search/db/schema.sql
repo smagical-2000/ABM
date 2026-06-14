@@ -55,6 +55,12 @@ CREATE TABLE IF NOT EXISTS discovery_companies (
     reviewed_at           TIMESTAMPTZ,               -- when Galyna decided
     rejection_reason      TEXT,                       -- set on reject
 
+    -- review-TTL clock: when the row entered needs_review, and WHY. The reject
+    -- sweep ages off this (time IN review), not signal age — so an AI-unsure
+    -- lead clears even while its signal stays fresh. Cleared on leaving review.
+    entered_review_at     TIMESTAMPTZ,
+    review_origin         TEXT,                       -- 'ingest' (AI unsure) | 'decayed' (aged from Watch)
+
     -- lifecycle ---------------------------------------------------------
     first_seen_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     qualified_at          TIMESTAMPTZ,               -- when Claude ran
@@ -73,6 +79,16 @@ CREATE INDEX IF NOT EXISTS idx_disco_status_seen
 CREATE INDEX IF NOT EXISTS idx_disco_qualified
     ON discovery_companies (segment, confidence DESC)
     WHERE icp_status = 'qualified';
+
+-- Backfill for tables created before the review-TTL clock existed (idempotent).
+ALTER TABLE discovery_companies ADD COLUMN IF NOT EXISTS entered_review_at TIMESTAMPTZ;
+ALTER TABLE discovery_companies ADD COLUMN IF NOT EXISTS review_origin TEXT;
+-- Start the clock for rows already in review (re-runnable: only fills NULLs, so
+-- a deploy doesn't reset anyone's window — it just bootstraps the missing ones).
+UPDATE discovery_companies
+   SET entered_review_at = COALESCE(entered_review_at, now()),
+       review_origin     = COALESCE(review_origin, 'ingest')
+ WHERE icp_status = 'needs_review' AND entered_review_at IS NULL;
 
 
 -- ────────────────────────────────────────────────────────────────────
@@ -153,6 +169,29 @@ CREATE TABLE IF NOT EXISTS abm_targets (
 );
 CREATE INDEX IF NOT EXISTS idx_abm_targets_domain ON abm_targets (domain);
 
+
+-- ── market-intelligence news ──────────────────────────────────────────────
+-- RCM / regulation headlines (Google News RSS), tagged with a topic + a
+-- "why it matters" angle by a cheap batched Sonnet pass. Industry context for
+-- the GTM team, NOT a per-company signal. Keyed by url so a re-pull dedups.
+CREATE TABLE IF NOT EXISTS news_items (
+    url             TEXT PRIMARY KEY,
+    title           TEXT NOT NULL,
+    source          TEXT,
+    published_at    TEXT,             -- ISO-8601 (string sort == chronological)
+    snippet         TEXT,
+    topic           TEXT,
+    why_it_matters  TEXT,
+    get_behind      INTEGER NOT NULL DEFAULT 0,   -- 0-100: how hard to get behind it
+    play            TEXT,                         -- who to target + the hook to use
+    relevant        BOOLEAN NOT NULL DEFAULT true,
+    fetched_at      TEXT
+);
+-- Backfill for tables created before get_behind/play existed (idempotent).
+ALTER TABLE news_items ADD COLUMN IF NOT EXISTS get_behind INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE news_items ADD COLUMN IF NOT EXISTS play TEXT;
+CREATE INDEX IF NOT EXISTS idx_news_topic_pub ON news_items (topic, published_at DESC);
+
 -- Monitored LinkedIn accounts: profiles/companies whose post engagers we scrape
 -- (Magical's own + competitors). url_key is the normalized dedup key.
 CREATE TABLE IF NOT EXISTS social_targets (
@@ -200,3 +239,15 @@ CREATE TABLE IF NOT EXISTS parked_companies (
 );
 CREATE INDEX IF NOT EXISTS idx_parked_last_seen
     ON parked_companies (last_seen_at DESC);
+
+
+-- ── founder profiles (warm intros) ────────────────────────────────────────
+-- The founders' scraped LinkedIn profiles (experience + education), cached so
+-- warm-intro matching never re-pays the scrape. Replaced wholesale on refresh.
+CREATE TABLE IF NOT EXISTS founder_profiles (
+    id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name          TEXT,
+    linkedin_url  TEXT,
+    data          JSONB NOT NULL,
+    scraped_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);

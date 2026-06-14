@@ -60,6 +60,25 @@ ON CONFLICT (account_id) DO UPDATE SET
   discovery_signals=EXCLUDED.discovery_signals, scored_at=EXCLUDED.scored_at,
   total=EXCLUDED.total, tier_band=EXCLUDED.tier_band, dimensions=EXCLUDED.dimensions;
 
+-- UI Demo Clinic gets a READY warm-intros payload with NO warm paths (all direct),
+-- so the drawer's decluttered "no warm contacts" view is exercised + regressed.
+UPDATE scored_accounts SET warm_intros =
+  '{"state":"ready","source":"apollo","schools_enriched":true,"warm_count":0,
+    "founders_used":["Harpaul","Rosie","Geoffrey"],
+    "contacts":[
+      {"name":"Jane Roe","title":"VP Revenue Cycle","linkedin_url":"https://www.linkedin.com/in/jane-roe","location":"Cincinnati, Ohio","schools":["Xavier University"],"paths":[]},
+      {"name":"John Doe","title":"Chief Financial Officer","linkedin_url":"https://www.linkedin.com/in/john-doe","location":"Cincinnati, Ohio","schools":[],"paths":[]}
+    ]}'::jsonb
+WHERE account_id='ui_demo_social';
+
+-- UI Demo Health System gets a WARM path (warm_count 1) so the Scored board's
+-- "N warm" badge + the drawer's warm linkage are exercised + regressed.
+UPDATE scored_accounts SET warm_intros =
+  '{"state":"ready","source":"apollo","schools_enriched":false,"warm_count":1,
+    "founders_used":["Harpaul","Rosie","Geoffrey"],
+    "contacts":[{"name":"Warm Exec","title":"VP Revenue Cycle","linkedin_url":"https://www.linkedin.com/in/warm-exec","location":"Dallas, Texas","schools":[],"paths":[{"kind":"shared_employer","founder":"Harpaul","evidence":"Both at Olive — overlapping 2019-2021","strength":80}],"warmth":80}]}'::jsonb
+WHERE account_id='ui_demo_job';
+
 -- Discovery: a STACKED company (2 open RCM roles) → exercises the
 -- "🔥 N RCM roles open" headline pill on the row + drawer.
 INSERT INTO discovery_companies
@@ -95,6 +114,61 @@ VALUES
   ('uisoloclinic','UI Solo Clinic','uisolo.example','Coder','["Coder"]',1,'OH',
    'https://example.com/solo','Medical Coder', now())
 ON CONFLICT (company_key) DO UPDATE SET last_seen_at=EXCLUDED.last_seen_at;
+
+-- A HOT discovery lead (new-exec trigger) → 'Hot' intent badge, sorts to the top
+-- above the Watch-tier stacked company. Exercises the buying-intent ranking.
+INSERT INTO discovery_companies
+  (normalized_name, display_name, domain, icp_status, segment, confidence,
+   reasoning, hq_state, qualified_at, first_seen_at)
+VALUES
+  ('uihothealth','UI Hot Health System','uihot.example','qualified','health_system',
+   0.95,'New CFO — fresh buying window.','OH', now()-interval '2 hours', now()-interval '2 hours')
+ON CONFLICT (normalized_name) DO UPDATE SET
+  icp_status=EXCLUDED.icp_status, qualified_at=EXCLUDED.qualified_at;
+
+INSERT INTO discovery_signals
+  (company_id, source, signal_type, source_external_id, summary,
+   signal_strength, observed_at, payload)
+SELECT dc.id, 'signalbase', 'leadership_change', 'uihot-cfo', 'New CFO appointed',
+       0.9, now()-interval '1 day', '{}'::jsonb
+FROM discovery_companies dc WHERE dc.normalized_name='uihothealth'
+ON CONFLICT (source, source_external_id) DO NOTHING;
+
+-- A QUALIFIED lone-standard hire (1 standard role, nothing stronger) → is_watchlist:
+-- HIDDEN from Discovery, shown in the Watch list "Qualified · low intent" section.
+INSERT INTO discovery_companies
+  (normalized_name, display_name, domain, icp_status, segment, confidence,
+   reasoning, hq_state, qualified_at, first_seen_at)
+VALUES
+  ('uiwatchclinic','UI Watch Clinic','uiwatch.example','qualified','specialty',0.80,
+   'Single standard role — low intent.','OH', now()-interval '2 hours', now()-interval '2 hours')
+ON CONFLICT (normalized_name) DO UPDATE SET
+  icp_status=EXCLUDED.icp_status, qualified_at=EXCLUDED.qualified_at;
+
+INSERT INTO discovery_signals
+  (company_id, source, signal_type, source_external_id, summary,
+   signal_strength, observed_at, payload)
+SELECT dc.id, 'indeed', 'job_posting', 'uiwatch-biller', 'Hiring: Medical Biller', 0.66,
+       now()-interval '1 day',
+       '{"role":"Biller","tier":"standard","job_title":"Medical Biller","job_url":"https://example.com/wb"}'::jsonb
+FROM discovery_companies dc WHERE dc.normalized_name='uiwatchclinic'
+ON CONFLICT (source, source_external_id) DO NOTHING;
+
+-- News-to-plays: ranked by get_behind, with a "Get behind" pill + "The play".
+INSERT INTO news_items
+  (url, title, source, published_at, topic, why_it_matters, get_behind, play, relevant, fetched_at)
+VALUES
+ ('https://ex.test/n1','New rule forces payers to decide prior auth in 72 hours','RevCycleIntelligence',
+  (now()-interval '2 hours')::text,'prior_auth','the timeline makes manual prior-auth untenable for every provider',
+  94,'hit health systems hiring prior-auth staff: the 72-hour rule breaks manual auth; Magical handles it end-to-end',true,(now())::text),
+ ('https://ex.test/n2','Survey: claim denials climb to record highs','Becker''s',
+  (now()-interval '1 day')::text,'denials','rising denials are direct revenue leakage — the pain Magical removes',
+  88,'target denials-heavy systems: denials are up double digits; Magical auto-works appeals',true,(now())::text),
+ ('https://ex.test/n3','One state tweaks its Medicaid redetermination timeline','State Health Dept',
+  (now()-interval '4 days')::text,'eligibility','narrow and regional — low urgency, no broad wedge',
+  38,'',true,(now())::text)
+ON CONFLICT (url) DO UPDATE SET
+  get_behind=EXCLUDED.get_behind, play=EXCLUDED.play, why_it_matters=EXCLUDED.why_it_matters;
 """
 
 
@@ -179,6 +253,75 @@ def test_app_renders_without_console_errors(page):
     assert not real, f"console errors: {real[:5]}"
 
 
+def test_warm_intros_no_warm_renders_clean(page):
+    """When no contact has a warm path, the section drops the warm framing: it's
+    titled 'Decision-makers', shows no repeated 'No founder path' line, and the
+    footer reads as a plain decision-maker count (not '0 warm of N')."""
+    page.click("text=Scored")
+    page.wait_for_selector("text=UI Demo Clinic", timeout=10_000)
+    page.click("text=UI Demo Clinic")
+    page.wait_for_selector("text=Decision-makers", timeout=10_000)   # heading adapts to 0-warm
+    assert page.locator("text=Jane Roe").count() > 0                 # the contact still renders
+    assert page.locator("text=No founder path").count() == 0         # per-row clutter gone
+    assert page.locator("text=0 warm of").count() == 0               # footer reframed
+    assert page.get_by_text("no warm paths", exact=False).count() > 0  # but it's mentioned once
+
+
+def test_scored_board_highlights_warm_accounts(page):
+    """An account with warm intro paths gets an 'N warm' badge on its board row;
+    a 0-warm account does not."""
+    page.click("text=Scored")
+    page.wait_for_selector("text=UI Demo Health System", timeout=10_000)
+    assert page.get_by_text("1 warm", exact=False).count() > 0       # warm account badged
+
+
+def test_scored_board_has_find_intros_button(page):
+    """The board-level warm-intros backfill: a 'Find intros' action with a
+    two-click confirm that previews the count + the green/yellow spend. Must
+    render (seeded accounts are high/medium with no intros yet) and not crash."""
+    page.click("text=Scored")
+    page.wait_for_selector("text=UI Demo Health System", timeout=10_000)
+    assert page.locator("text=Find intros").count() > 0          # the batch button
+    page.click("text=Find intros")                               # open the confirm
+    assert page.locator("text=Find intros for").count() > 0      # count + cost preview
+    real = [e for e in page.console_errors
+            if not any(x in e.lower() for x in ("favicon", "tailwind", "cdn", "font"))]
+    assert not real, f"console errors: {real[:5]}"
+
+
+def test_discovery_panel_ranks_by_buying_intent(page):
+    """Every Discovery row shows a Hot/Watch intent badge; a new-exec lead is Hot
+    and sorts above a Watch-tier stacked-jobs lead."""
+    page.click("text=Discovery")
+    page.wait_for_selector("text=UI Hot Health System", timeout=10_000)
+    assert page.get_by_text("Hot", exact=False).count() > 0      # hot tier pill present
+    assert page.get_by_text("Watch", exact=False).count() > 0    # watch tier pill present
+    assert page.get_by_text("Auto-score line", exact=False).count() > 0   # the Hot/Watch divider
+    body = page.inner_text("body")
+    assert body.index("UI Hot Health System") < body.index("UI Stack Health System")
+
+
+def test_intent_scoring_hint_popover(page):
+    """The light 'How intent is scored' hint opens the deterministic rubric + the
+    forward-looking outcomes line."""
+    page.click("text=Discovery")
+    page.wait_for_selector("text=How intent is scored", timeout=10_000)
+    page.click("text=How intent is scored")
+    assert page.get_by_text("Deterministic", exact=False).count() > 0   # the rubric opened
+    assert page.get_by_text("deals won", exact=False).count() > 0       # the "next" provision line
+
+
+def test_news_tab_ranks_plays_by_get_behind(page):
+    """News reads as ranked sales plays: a 'Get behind' pill + 'The play', highest
+    get-behind first."""
+    page.click("text=News")
+    page.wait_for_selector("text=72 hours", timeout=10_000)
+    assert page.get_by_text("Get behind", exact=False).count() > 0   # high-score pill
+    assert page.get_by_text("The play", exact=False).count() > 0     # the action box
+    body = page.inner_text("body")
+    assert body.index("72 hours") < body.index("Medicaid redetermination")  # 94 above 38
+
+
 def test_discovery_signal_filter_has_social_types(page):
     page.click("text=Discovery")
     options = page.locator("select").nth(1).locator("option").all_inner_texts()
@@ -225,7 +368,63 @@ def test_stacked_hiring_pill_and_watch_strip(page):
 
 def test_social_listening_panel_opens(page):
     page.click("text=Discovery")
-    page.click("text=Social listening")
-    page.wait_for_selector("text=Event keywords", timeout=10_000)   # the panel's new section
+    # Social-listening setup now lives inside the unified "Scan signals" control.
+    page.click("text=Scan signals")                                 # open the run popover
+    page.click("text=Manage")                                       # → social-listening setup
+    page.wait_for_selector("text=Event keywords", timeout=10_000)   # the panel's section
     assert page.locator("text=Monitored accounts").count() > 0       # accounts section header
     assert page.locator("text=Back-fill").count() > 0                # the reframed scan
+
+
+# ── this session's features: watch list, Discovery filter, cost, auto-score ──
+
+
+def test_every_tab_mounts_without_console_errors(page):
+    """Each nav tab renders cleanly — catches a white-screen on any tab, including
+    the new Watch list (a fresh babel-compiled file)."""
+    for tab in ("Discovery", "Scored", "News", "Watch list"):
+        page.click(f"text={tab}")
+        page.wait_for_timeout(700)
+        real = [e for e in page.console_errors
+                if not any(x in e.lower() for x in ("favicon", "tailwind", "cdn", "font"))]
+        assert not real, f"console errors on {tab}: {real[:5]}"
+
+
+def test_watch_list_tab_shows_qualified_and_parked(page):
+    """The Watch list tab surfaces both kinds: a qualified-but-low-intent lead and a
+    parked (not-yet-qualified) lead."""
+    page.click("text=Watch list")
+    page.wait_for_selector("text=UI Watch Clinic", timeout=10_000)   # qualified low-intent
+    assert page.locator("text=UI Solo Clinic").count() > 0           # parked, not qualified
+
+
+def test_discovery_hides_lone_standard_hire(page):
+    """The Discovery filter: a qualified single-standard-role company is NOT in the
+    live Discovery list (it lives on the Watch list); a stacked company still is.
+
+    Scope to the live panel only — the 'Recent evaluations' audit feed at the
+    bottom intentionally shows EVERY recent decision (incl. watch-listed +
+    disqualified), so the whole-body text would (correctly) contain it there."""
+    page.click("text=Discovery")
+    page.wait_for_selector("text=UI Stack Health System", timeout=10_000)
+    panel = page.inner_text("body").split("Recent evaluations")[0]
+    assert "UI Stack Health System" in panel         # stacked → stays in Discovery
+    assert "UI Watch Clinic" not in panel            # lone standard → on the Watch list
+
+
+def test_unified_spend_meter_renders(page):
+    """One spend area (discovery incl. Apify + scored) against the combined budget."""
+    page.click("text=Discovery")
+    page.wait_for_selector("text=Spend this month", timeout=10_000)
+    assert page.get_by_text("resets monthly", exact=False).count() > 0
+
+
+def test_autoscore_toggle_persists_across_reload(page):
+    """The fix: auto-score on/off survives a reload (localStorage), instead of
+    silently resetting to off."""
+    page.click("text=Discovery")
+    page.wait_for_selector("text=Auto-score off", timeout=10_000)    # starts off
+    page.evaluate("localStorage.setItem('autoScoreEnabled', '1')")
+    page.reload(wait_until="networkidle")
+    page.wait_for_selector("text=Scored", timeout=20_000)            # app remounted
+    assert page.get_by_text("Auto-score off", exact=False).count() == 0  # read back as ON

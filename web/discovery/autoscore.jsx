@@ -88,7 +88,7 @@ function AutoScorePopover({ enabled, onToggle, hour, onHour, deadline, queued, o
           <div>
             <h3 className="text-[14px] font-semibold text-zinc-900">Automatic scoring</h3>
             <p className="mt-0.5 text-[12px] leading-relaxed text-zinc-500">
-              Each day at the set time, any <span className="font-medium text-zinc-600">qualified</span> company still in the queue is promoted to scoring — so nothing stalls if you're away. Needs-review companies are never auto-scored.
+              Each day at the set time, any <span className="font-medium text-zinc-600">qualified</span> company still in the queue is scored automatically — so nothing stalls if you're away. Needs-review companies are never auto-scored.
             </p>
           </div>
           <Switch on={enabled} onChange={onToggle} />
@@ -113,7 +113,7 @@ function AutoScorePopover({ enabled, onToggle, hour, onHour, deadline, queued, o
               <Icons.clock className="h-3.5 w-3.5" />
               <span className="font-medium">Next run {dayWord(deadline)} at {formatClock(deadline)}</span>
             </div>
-            <div className="mt-1">{queued} qualified {queued === 1 ? 'company' : 'companies'} will be auto-promoted unless you act first.</div>
+            <div className="mt-1">{queued} qualified {queued === 1 ? 'company' : 'companies'} will be auto-scored unless you act first.</div>
           </div>
         </div>
 
@@ -137,7 +137,7 @@ function AutoScoreBanner({ remainingMs, queued }) {
     <div className="flex items-center gap-2.5 border-b border-rose-100 bg-rose-50/70 px-6 py-2.5 text-[13px] text-rose-700">
       <Icons.zap className="h-4 w-4 shrink-0" />
       <span>
-        Auto-scoring in <span className="font-semibold tabular-nums">{label}</span> — {queued} qualified {queued === 1 ? 'company' : 'companies'} will be promoted to scoring unless you act.
+        Auto-scoring in <span className="font-semibold tabular-nums">{label}</span> — {queued} qualified {queued === 1 ? 'company' : 'companies'} will be scored unless you act.
       </span>
     </div>
   );

@@ -33,10 +33,15 @@ the same fail-open stance as the job qualifier.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
+from types import SimpleNamespace
 
+from auto_search import rcm_titles
 from auto_search.models import RawSignal
+
+logger = logging.getLogger(__name__)
 
 # Distinct STANDARD postings a company must have open at once before we spend
 # the company qualifier on it. 2 = "more than one routine backfill" = a
@@ -79,12 +84,16 @@ def stacking_decision(signals: list[RawSignal]) -> StackDecision:
     for s in jobs:
         role = s.payload.get("role") or "RCM"
         tier = (s.payload.get("tier") or "").strip().lower()
+        if not tier:
+            # Legacy signal stored before the connector persisted tier — recover it
+            # from the role bucket so a lone standard hire isn't mis-read as core
+            # (and wrongly qualified). rcm_titles is the source of truth.
+            tier = rcm_titles.tier_for_role(role)
         if tier == _STANDARD:
             standard_postings += 1
             if role not in standard_roles:
                 standard_roles.append(role)
-        # core OR unknown/missing tier → fail open (counts as core, qualifies)
-        elif role not in core_roles:
+        elif role not in core_roles:        # core, or unknown role → core
             core_roles.append(role)
 
     core_t, std_t = tuple(core_roles), tuple(standard_roles)
@@ -140,3 +149,31 @@ def watch_record(
         "sample_title": p.get("job_title"),
         "observed_at": rep.observed_at.isoformat() if rep else None,
     }
+
+
+def persist_parked(repo, company_key: str, signals: list[RawSignal]) -> None:
+    """Persist a parked (stacking-deferred) company to the watch ledger.
+
+    The ONE place both run paths — the daily cron and the on-demand panel Run —
+    record a park, so the side-effect can't drift between them. Guarded: a repo
+    (or test double) without `upsert_parked` simply skips the ledger; parking
+    still works as a pure, no-spend skip — you just don't get the watch row.
+    """
+    fn = getattr(repo, "upsert_parked", None)
+    if not fn:
+        return
+    try:
+        fn(watch_record(company_key, signals, stacking_decision(signals)))
+    except Exception as e:  # noqa: BLE001 — the watch ledger must never break a run
+        logger.debug("upsert_parked failed for %s: %s", company_key, e)
+
+
+def should_park_flat(flat_signals) -> bool:
+    """`should_park` for already-flattened signals (dicts of
+    ``{signal_type, role, tier}``) — the shape the panel API holds. Adapts them to
+    the gate so the panel and the connector share ONE definition of a lone standard
+    hire, rather than re-deriving it."""
+    sigs = [SimpleNamespace(signal_type=s.get("signal_type"),
+                            payload={"role": s.get("role"), "tier": s.get("tier")})
+            for s in flat_signals]
+    return should_park(sigs)

@@ -6,7 +6,7 @@ function PromoteButton({ onClick, size = 'sm' }) {
   return (
     <button onClick={onClick}
       className={`inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 ${pad} font-medium text-white shadow-sm transition-colors hover:bg-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300`}>
-      <Icons.arrowUp className="h-3.5 w-3.5" />Promote
+      <Icons.arrowUp className="h-3.5 w-3.5" />Score
     </button>
   );
 }
@@ -60,6 +60,48 @@ function AbmBadge({ match }) {
 }
 window.AbmBadge = AbmBadge;
 
+// ── ReviewOriginTag: why a needs-review lead is sitting in the queue ─────────
+// 'ingest'  → the AI wasn't confident enough at discovery time (most of the queue)
+// 'decayed' → it was qualified, then cooled out of Watch with no fresh signal
+function ReviewOriginTag({ icpStatus, origin }) {
+  if (icpStatus !== 'needs_review' || !origin) return null;
+  const decayed = origin === 'decayed';
+  const label = decayed ? 'Cooled from Watch' : 'AI unsure';
+  const title = decayed
+    ? 'Was qualified, then cooled — no fresh signal for a while'
+    : "The AI wasn't confident enough to qualify or disqualify this";
+  return (
+    <span title={title}
+      className="rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] font-medium text-zinc-500 ring-1 ring-inset ring-zinc-200">
+      {label}
+    </span>
+  );
+}
+window.ReviewOriginTag = ReviewOriginTag;
+
+// ── TtlHint: when this lead will auto-move, so nothing rots silently ──────────
+// 'reject' → a needs-review lead auto-rejects once it ages past the review TTL
+// 'review' → a Watch lead drops to Needs review when its signals go stale
+// null     → Hot / in-market: it doesn't decay, so show nothing
+function TtlHint({ action, days }) {
+  if (!action || days == null) return null;
+  const urgent = days <= 2;
+  const when = days <= 0 ? 'today' : `in ${days}d`;
+  const label = action === 'reject' ? `Auto-rejects ${when}` : `To review ${when}`;
+  const title = action === 'reject'
+    ? 'Auto-rejected once it sits in review past the TTL — restore anytime'
+    : 'Drops to Needs review when its signals go stale';
+  return (
+    <span title={title}
+      className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[11px] font-medium ring-1 ring-inset
+        ${urgent ? 'bg-amber-50 text-amber-700 ring-amber-100' : 'bg-zinc-50 text-zinc-500 ring-zinc-200'}`}>
+      <Icons.clock className="h-3 w-3" />
+      {label}
+    </span>
+  );
+}
+window.TtlHint = TtlHint;
+
 // ── AbmCallout: the detail-drawer banner for an ABM-target match ─────────────
 // Shared by the discovery drawer and the score drawer so a match reads
 // identically on both. Renders nothing when the company isn't on the list.
@@ -86,6 +128,76 @@ function AbmCallout({ match }) {
 window.AbmCallout = AbmCallout;
 
 // ── CompanyRow ──────────────────────────────────────────────────────────────
+// The buying-intent readout on a row: a fill bar + the score + the Hot/Watch pill.
+function IntentMeter({ tier, score }) {
+  if (!tier) return null;
+  const hot = tier === 'hot';
+  return (
+    <div className="flex shrink-0 items-center gap-3" title={`Buying intent ${score} of 100`}>
+      <div className="hidden w-20 sm:block">
+        <div className="h-1.5 rounded-full bg-zinc-100">
+          <div className={`h-full rounded-full ${hot ? 'bg-amber-500' : 'bg-zinc-300'}`}
+            style={{ width: `${Math.max(4, Math.min(100, score))}%` }} />
+        </div>
+      </div>
+      <div className={`w-7 text-right text-[18px] font-semibold tabular-nums ${hot ? 'text-zinc-900' : 'text-zinc-400'}`}>{score}</div>
+      <span className={`inline-flex w-[60px] shrink-0 items-center justify-center gap-1 rounded-full px-2 py-1 text-[11px] font-semibold ring-1 ring-inset ${hot ? 'bg-amber-50 text-amber-700 ring-amber-100' : 'bg-zinc-100 text-zinc-500 ring-zinc-200'}`}>
+        {hot ? <><Icons.zap className="h-3 w-3" />Hot</> : <><Icons.clock className="h-3 w-3" />Watch</>}
+      </span>
+    </div>
+  );
+}
+window.IntentMeter = IntentMeter;
+
+// The divider between the Hot leads (auto-scored) and the Watch leads (held).
+function AutoScoreLine() {
+  return (
+    <div className="flex items-center gap-3 border-b border-zinc-100 bg-amber-50/30 px-6 py-2">
+      <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-[11px] font-semibold text-amber-700">
+        <Icons.zap className="h-3.5 w-3.5" />Auto-score line
+      </span>
+      <span className="h-px flex-1 border-t border-dashed border-zinc-300" />
+      <span className="hidden whitespace-nowrap text-[11px] text-zinc-400 sm:inline">above: scored automatically · below: watched</span>
+    </div>
+  );
+}
+window.AutoScoreLine = AutoScoreLine;
+
+// A light "how is this scored" hint for the panel header — click to peek the rubric.
+function IntentInfo() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="relative">
+      <button onClick={() => setOpen((o) => !o)}
+        className="inline-flex items-center gap-1 text-[12px] font-medium text-zinc-400 transition-colors hover:text-zinc-600">
+        <Icons.info className="h-3.5 w-3.5" />How intent is scored
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-20" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 z-30 mt-2 w-[280px] rounded-xl border border-zinc-200 bg-white p-4 shadow-lg shadow-zinc-900/5">
+            <div className="text-[12.5px] font-semibold text-zinc-800">How intent is scored</div>
+            <p className="mt-1 text-[11.5px] leading-relaxed text-zinc-500">Deterministic — no AI. The strongest signal sets the base:</p>
+            <div className="mt-2.5 space-y-1.5 text-[12px] text-zinc-600">
+              <div className="flex items-baseline justify-between gap-3"><span>New exec</span><span className="tabular-nums font-medium text-zinc-500">65</span></div>
+              <div className="flex items-baseline justify-between gap-3"><span>Exec engaged</span><span className="tabular-nums font-medium text-zinc-500">60</span></div>
+              <div className="flex items-baseline justify-between gap-3"><span>Revenue-cycle leader hire</span><span className="tabular-nums font-medium text-zinc-500">50</span></div>
+              <div className="flex items-baseline justify-between gap-3"><span>Core RCM role</span><span className="tabular-nums font-medium text-zinc-500">30</span></div>
+              <div className="flex items-baseline justify-between gap-3"><span>Standard RCM role</span><span className="tabular-nums font-medium text-zinc-500">18</span></div>
+            </div>
+            <div className="mt-3 border-t border-zinc-100 pt-2.5 text-[11.5px] leading-relaxed text-zinc-500">
+              <span className="font-medium text-zinc-600">+ boosts</span> &nbsp;15 per extra role&nbsp;·&nbsp;20 multi-signal&nbsp;·&nbsp;20 ABM&nbsp;·&nbsp;5 fresh
+            </div>
+            <div className="mt-2.5 text-[12px]"><span className="font-medium text-amber-700">Hot ≥ 65</span> <span className="text-zinc-500">auto-scores, below is watched</span></div>
+            <p className="mt-3 border-t border-zinc-100 pt-2.5 text-[11px] leading-relaxed text-zinc-400">Next: tuned by your outcomes — engagement, meetings, deals won.</p>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+window.IntentInfo = IntentInfo;
+
 function CompanyRow({ company, leaving, selected, onToggleSelect, onOpen, onPromote, onReject }) {
   const stop = (fn) => (e) => { e.stopPropagation(); fn(); };
   return (
@@ -106,29 +218,19 @@ function CompanyRow({ company, leaving, selected, onToggleSelect, onOpen, onProm
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2.5">
             <h3 className="truncate text-[15px] font-semibold text-zinc-900">{company.name}</h3>
-            {/* No verdict chip on the row: the panel only ever lists a tab's own
-                verdict (Qualified / Needs review), so a chip would just echo the
-                section header. The full verdict — including disqualified — still
-                shows in the Recent evaluations feed. */}
             <SegmentBadge segment={company.segment} />
             <AbmBadge match={company.abm_match} />
+            <ReviewOriginTag icpStatus={company.icp_status} origin={company.review_origin} />
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <SignalChips signals={company.signals} />
           </div>
-          <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[12px] text-zinc-400">
-            <span>{company.signal_count} {company.signal_count === 1 ? 'signal' : 'signals'}</span>
+          <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-zinc-400">
+            <TtlHint action={company.ttl_action} days={company.ttl_days} />
             {company.qualified_at && (
-              <>
-                <span className="text-zinc-300">·</span>
-                <span title={company.qualified_at}>evaluated {formatDateTime(company.qualified_at)}</span>
-              </>
-            )}
-            {company.qualify_cost_usd != null && company.qualify_cost_usd > 0 && (
-              <>
-                <span className="text-zinc-300">·</span>
-                <span className="tabular-nums text-zinc-500">${company.qualify_cost_usd.toFixed(2)}</span>
-              </>
+              <span title={`Evaluated ${formatDateTime(company.qualified_at)}`}>
+                {formatDateTime(company.qualified_at)}
+              </span>
             )}
             {company.approximate_employees && (
               <>
@@ -139,11 +241,8 @@ function CompanyRow({ company, leaving, selected, onToggleSelect, onOpen, onProm
           </div>
         </div>
 
-        {/* Middle: confidence */}
-        <div className="hidden shrink-0 md:block">
-          <div className="mb-1 text-right text-[11px] uppercase tracking-wide text-zinc-400">Confidence</div>
-          <ConfidenceMeter value={company.confidence} />
-        </div>
+        {/* Middle: buying intent — the bar + score + tier, the ranking at a glance */}
+        <IntentMeter tier={company.intent_tier} score={company.intent_score} />
 
         {/* Right: actions */}
         <div className="flex shrink-0 items-center gap-1.5">

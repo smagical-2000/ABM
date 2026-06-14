@@ -74,6 +74,8 @@ ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS dossier_state TEXT;
 ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS dossier_cost DOUBLE PRECISION NOT NULL DEFAULT 0;
 ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS dossier_generated_at TIMESTAMPTZ;
 ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS dossier_error TEXT;
+-- warm-intro contacts + paths ({state, contacts: [...]}; NULL until generated)
+ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS warm_intros JSONB;
 
 
 -- ────────────────────────────────────────────────────────────────────

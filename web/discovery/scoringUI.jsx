@@ -373,6 +373,12 @@ function ScoredRow({ account, entering, onOpen, onScore, onLanding, tw, batchRun
             <h3 className="truncate text-[15px] font-semibold text-zinc-900">{a.name}</h3>
             <SegmentBadge segment={a.segment} />
             <AbmBadge match={a.abm_match} />
+            {a.warm_intros && a.warm_intros.warm_count > 0 && (
+              <span title={`${a.warm_intros.warm_count} warm intro path${a.warm_intros.warm_count === 1 ? '' : 's'} to a decision-maker — open to see how`}
+                className="inline-flex shrink-0 items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10.5px] font-semibold text-amber-700 ring-1 ring-inset ring-amber-100">
+                <Icons.leadership className="h-3 w-3" />{a.warm_intros.warm_count} warm
+              </span>
+            )}
             {flagged && (
               <span title="Independent QA disagrees on a fact that moves the fit. Open to review."
                 className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" />

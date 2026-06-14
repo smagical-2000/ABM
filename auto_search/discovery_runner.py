@@ -150,20 +150,9 @@ async def run_once(repo, *, days: int = 1, sources=None, limit=None,
 
 
 def _park(repo, company_key: str, signals) -> None:
-    """Persist a deferred (stacking-parked) company to the watch ledger.
-
-    Guarded like the heartbeat helpers: a repo (or test double) without
-    `upsert_parked` simply doesn't track the watch — parking still works as a
-    pure skip, you just don't get the UI watch list.
-    """
-    fn = getattr(repo, "upsert_parked", None)
-    if not fn:
-        return
-    try:
-        fn(job_stacking.watch_record(
-            company_key, signals, job_stacking.stacking_decision(signals)))
-    except Exception as e:  # noqa: BLE001 — watch ledger must never break a run
-        logger.debug("upsert_parked failed for %s: %s", company_key, e)
+    """Persist a deferred (stacking-parked) company to the watch ledger — shared
+    with the cron path via job_stacking.persist_parked so the two never drift."""
+    job_stacking.persist_parked(repo, company_key, signals)
 
 
 # ── connector_runs heartbeat (no-op if the repo doesn't track runs) ───────

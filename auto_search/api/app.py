@@ -24,8 +24,6 @@ import json
 import logging
 import os
 import re
-import secrets
-from collections import deque
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -36,7 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from auto_search import discovery_runner, job_stacking
+from auto_search import autoscore, discovery_runner, job_stacking, lifecycle, news, priority
 from auto_search.abm import (
     AbmIndex,
     TargetAccount,
@@ -50,7 +48,9 @@ from auto_search.db.scoring_repository import (
     STALE_SCORING_SECONDS,
     get_scoring_repository,
 )
-from auto_search.normalize import normalize_linkedin_url
+from auto_search.intros import profiles as intros_profiles
+from auto_search.intros import service as intros_service
+from auto_search.normalize import normalize_company_name, normalize_linkedin_url
 from auto_search.run_control import RunControl
 from auto_search.runtime import is_production
 from auto_search.scoring import budget as budget_guard
@@ -61,8 +61,6 @@ from auto_search.scoring.service import ScoringService
 from auto_search.services import DiscoveryStats, PanelCompany, ReviewService
 from auto_search.social import (
     SocialTarget,
-    engager_from_trigify,
-    ingest_engager,
     poll_events,
     poll_targets,
 )
@@ -218,9 +216,31 @@ def _import_label(filename: str | None) -> str:
     return f"{name} · {datetime.now(UTC).strftime('%b %d, %H:%M')}"
 
 
+def _classify_import_row(name, account_id, *, get_company, exists):
+    """Decide what to do with one imported CSV row, by company IDENTITY — not the
+    import's own id scheme, which is exactly why duplicates slipped through:
+
+      "skip"  already scored — promoted from discovery ("acc_"+key) or a prior CSV
+      "move"  a live discovery company → promote it into Scored WITH its signals
+              (it leaves the Discovery panel) instead of making a signal-less twin
+      "new"   not seen → create a fresh CSV account
+
+    `get_company(key) -> PanelCompany|None` and `exists(account_id) -> bool` are
+    injected so this is unit-testable without the app. Returns (action, company).
+    """
+    key = normalize_company_name(name)
+    if exists("acc_" + key) or exists(account_id):
+        return "skip", None
+    company = get_company(key)
+    if company is not None and getattr(company, "icp_status", None) in ("qualified", "needs_review"):
+        return "move", company
+    return "new", None
+
+
 # Upload caps: a CSV import is raw-bodied, so bound it to avoid an OOM body or a
 # runaway queue that a later "Score all" could turn into a big spend.
-_MAX_UPLOAD_BYTES = 5_000_000   # 5 MB
+_MAX_UPLOAD_BYTES = 5_000_000        # 5 MB (CSV imports)
+_MAX_XLSX_BYTES = 10_000_000         # 10 MB (ABM workbook — openpyxl loads it all)
 _MAX_CSV_ROWS = 5_000
 
 
@@ -314,10 +334,9 @@ async def lifespan(app: FastAPI):
     app.state.scoring_repo = scoring_repo
     app.state.abm_index = _load_abm_index(repo)   # ABM target list -> match index
     _seed_social_targets(repo)                    # ensure Magical is always monitored
-    # Ring buffer of the last social-webhook payloads + outcomes, for debugging
-    # the Trigify field mapping (read via GET /api/social/debug). In-memory only.
-    app.state.social_debug = deque(maxlen=50)
     app.state.social_running = False              # one social poll at a time
+    app.state.news_running = False                # one news refresh at a time
+    app.state.last_news = None
     app.state.scoring_tasks = set()           # keep background score tasks alive
     app.state.scoring_inflight = set()        # account_ids being scored (dedupe lock)
     app.state.batch_running = False           # one queued batch at a time
@@ -332,6 +351,13 @@ async def lifespan(app: FastAPI):
     orphaned = scoring_repo.recover_orphaned_scoring()
     if orphaned:
         logger.warning("recovered %d orphaned 'scoring' account(s) -> queued", orphaned)
+    # Same sweep for spend operations: ops finish in a finally, so a row still
+    # 'running' at boot was orphaned by a crash/restart mid-run. Fail it so the
+    # ops feed can't show phantom in-flight spend forever.
+    stale_ops = scoring_repo.fail_orphaned_operations()
+    if stale_ops:
+        logger.warning("failed %d orphaned spend operation(s) from a prior process",
+                       stale_ops)
     # A discovery run lives in-memory; rows left 'running' by a prior crash/restart
     # have no process behind them. Clear them so the panel can't show a phantom
     # in-progress run (stale progress, dead pause/cancel).
@@ -373,12 +399,9 @@ def create_app() -> FastAPI:
     # HTTP Basic auth — gated by BASIC_AUTH_USER/PASS. In production we FAIL
     # CLOSED: refuse to start without credentials rather than serve a public,
     # spend-bearing API. Localhost (no production markers) stays frictionless.
-    # /api/health is exempt for the platform healthcheck; /api/social/trigify is
-    # exempt because Trigify can't send Basic auth — it carries its own
-    # shared-secret header instead (verified in the handler). Added after CORS so
-    # it runs outermost.
-    auth_enabled = install_basic_auth(
-        app, exempt_paths=("/api/health", "/api/social/trigify"))
+    # /api/health is exempt for the platform healthcheck. Added after CORS so it
+    # runs outermost.
+    auth_enabled = install_basic_auth(app, exempt_paths=("/api/health",))
     if not auth_enabled and is_production():
         raise RuntimeError(
             "Refusing to start in production without auth: set BASIC_AUTH_USER "
@@ -406,6 +429,12 @@ def create_app() -> FastAPI:
     def _abm_index() -> AbmIndex | None:
         return getattr(app.state, "abm_index", None)
 
+    def _abm_social_lookup(name, domain=None):
+        """Is this company on the ABM target list? The social flow uses it to
+        treat a tracked account as authoritative — surfaced + highlighted without
+        paying the ICP qualifier (the list IS the qualification)."""
+        return match_one(_abm_index(), name=name, domain=domain)
+
     def _annotate_panel(companies: list[PanelCompany]) -> list[PanelCompany]:
         """Add measured qualify cost + ABM-target match to each panel company.
 
@@ -422,10 +451,29 @@ def create_app() -> FastAPI:
         for c in companies:
             cost = costs.get(c.company_key)
             states = states_from_locations(s.location for s in (c.signals or []))
+            abm_match = match_one(index, name=c.name, domain=c.domain, states=states)
+            sigs = [{"signal_type": s.signal_type, "title": s.title, "role": s.role,
+                     "tier": s.tier, "observed_at": s.observed_at} for s in (c.signals or [])]
+            it = priority.intent(
+                sigs, abm_confirmed=bool(abm_match and abm_match.tier == "confirmed"))
+            # Lone standard hire (single biller/coder, nothing stronger) → Watch list,
+            # not Discovery. Same gate the cron parks on, so the views agree.
+            is_watchlist = job_stacking.should_park_flat(sigs)
+            # When this lead will auto-move (for the panel TTL badge). Only pending
+            # leads decay; the math lives in lifecycle so the badge matches the sweep.
+            ttl_action, ttl_days = (None, None)
+            if c.review_status == "pending":
+                ttl_action, ttl_days = lifecycle.next_transition(
+                    icp_status=c.icp_status, tier=it.tier,
+                    last_signal_at=priority.last_signal_at(sigs),
+                    entered_review_at=c.entered_review_at)
             out.append(c.model_copy(update={
                 "qualify_cost_usd": cost if cost is not None
                 else (est if c.qualified_at else None),
-                "abm_match": match_one(index, name=c.name, domain=c.domain, states=states),
+                "abm_match": abm_match,
+                "intent_score": it.score, "intent_tier": it.tier, "intent_reason": it.reason,
+                "ttl_action": ttl_action, "ttl_days": ttl_days,
+                "is_watchlist": is_watchlist,
             }))
         return out
 
@@ -455,12 +503,20 @@ def create_app() -> FastAPI:
     def get_stats():
         return svc(app).stats()
 
+    def _belongs_on_watchlist(c: PanelCompany) -> bool:
+        """A lone standard-hire that should sit on the Watch list, not the main
+        Discovery panel — UNLESS it's a confirmed ABM target, which we always
+        surface (a tracked account matters regardless of hiring intent)."""
+        confirmed_abm = bool(c.abm_match and c.abm_match.tier == "confirmed")
+        return c.is_watchlist and not confirmed_abm
+
     @app.get("/api/panel", response_model=list[PanelCompany])
     def get_panel(
         status: str = "qualified",
         segment: str | None = None,
         signal_type: str | None = None,
         abm: str | None = None,    # "confirmed" | "match" -> filter to ABM-target hits
+        watchlist: str | None = None,  # ""/None = Discovery (hide watch-list); "only" = the watch list
     ):
         # `status` selects the tab: qualified (default) / needs_review.
         statuses = ("needs_review",) if status == "needs_review" else ("qualified",)
@@ -471,7 +527,80 @@ def create_app() -> FastAPI:
                          if c.abm_match and c.abm_match.tier == "confirmed"]
         elif abm in ("match", "any", "1", "true"):
             companies = [c for c in companies if c.abm_match]
+        # Discovery shows real-intent leads; lone standard hires live on the Watch
+        # list. Only split the qualified tab — needs_review is its own lifecycle.
+        if status == "qualified":
+            keep = _belongs_on_watchlist if watchlist == "only" else \
+                (lambda c: not _belongs_on_watchlist(c))
+            companies = [c for c in companies if keep(c)]
+        companies.sort(key=lambda c: -c.intent_score)   # hottest intent first
         return companies
+
+    @app.post("/api/discovery/sweep")
+    def discovery_sweep():
+        """Run one self-cleaning lifecycle pass: cold Watch -> Needs review,
+        re-heated (Hot) -> promoted back to Discovery, in-review-too-long ->
+        auto-rejected. ABM-aware so Hot matches the panel. Re-heated leads are
+        auto-scored in the background (budget-permitting); an auto-reject restores
+        like any manual reject."""
+        result = lifecycle.sweep(app.state.repo, abm_index=_abm_index())
+        if autoscore.autoscore_enabled():
+            for key in result.promoted_keys:
+                company = svc(app).get_company(key)
+                if company is None:
+                    continue
+                summary = app.state.scoring_repo.cost_summary()
+                if budget_guard.remaining(summary) < budget_guard.EST_SCORE_COST:
+                    continue                 # no headroom — leave it qualified-Hot
+                svc(app).promote(key)
+                row = app.state.scoring.enqueue_discovery(
+                    company.model_dump(), state="scoring")
+                _schedule_scoring(app, row["account_id"], op_type="promote")
+        return result.as_dict()
+
+    # ── market-intelligence news (RCM / regulation headlines) ────────
+
+    @app.get("/api/news")
+    def get_news(topic: str | None = None, days: int = 30, limit: int = 200):
+        """RCM / regulation headlines for the News tab, ranked by get-behind (how
+        hard Magical should act on each as an outreach wedge), newest breaking ties."""
+        repo = app.state.repo
+        base = {"topics": list(news.TOPICS), "labels": news.TOPIC_LABELS,
+                "last_run": getattr(app.state, "last_news", None)}
+        if not hasattr(repo, "news_items"):
+            return {"items": [], **base}
+        topics = (topic,) if topic in news.TOPICS else None
+        return {"items": repo.news_items(topics=topics, days=days, limit=limit), **base}
+
+    @app.post("/api/news/refresh")
+    def news_refresh(reenrich: bool = False):
+        """Pull the latest headlines + tag them in the background. One at a time.
+        `reenrich=true` re-tags the already-stored feed instead (a one-off backfill
+        after the enrich model gains fields)."""
+        if getattr(app.state, "news_running", False):
+            return {"started": False, "busy": True}
+        app.state.news_running = True
+
+        async def _run() -> None:
+            op = spend_guard.Operation(app.state.scoring_repo, "news_refresh",
+                                       estimated_usd=0.0, accounts_planned=0)
+
+            def on_cost(usd: float) -> None:
+                op.record(step="news_enrich", actual_usd=usd, model="news")
+
+            try:
+                summary = await (news.reenrich_stored(app.state.repo, on_cost=on_cost)
+                                 if reenrich
+                                 else news.run_once(app.state.repo, on_cost=on_cost))
+                app.state.last_news = {**summary, "at": datetime.now(UTC).isoformat()}
+            except Exception:  # noqa: BLE001 — never crash the loop
+                logger.exception("news refresh failed")
+            finally:
+                op.finish()
+                app.state.news_running = False
+
+        _schedule_coro(app, _run())
+        return {"started": True}
 
     @app.get("/api/abm/summary")
     def abm_summary():
@@ -490,6 +619,10 @@ def create_app() -> FastAPI:
         data = await request.body()
         if not data:
             raise HTTPException(status_code=400, detail="empty upload")
+        if len(data) > _MAX_XLSX_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"workbook too large (limit {_MAX_XLSX_BYTES // 1_000_000} MB)")
         try:
             targets = parse_workbook(data)
         except Exception as e:  # noqa: BLE001 — surface a clean 400, not a 500
@@ -512,91 +645,6 @@ def create_app() -> FastAPI:
         matched.sort(
             key=lambda c: 0 if c.abm_match and c.abm_match.tier == "confirmed" else 1)
         return matched
-
-    @app.post("/api/social/trigify")
-    async def trigify_webhook(request: Request):
-        """Inbound webhook for Trigify social-listening workflows.
-
-        Each enriched engager (one object, or a `{"engagers": [...]}` / bare-array
-        batch) is filtered — decision-maker (Director & above), not a Magical
-        employee, and for events a confirmed attendee — then the COMPANY runs
-        through the existing discovery qualifier and lands on the panel with a
-        social signal. The person is carried as a contact in the signal payload.
-
-        Auth: shared secret in the `X-Trigify-Secret` header vs env
-        TRIGIFY_WEBHOOK_SECRET (this route is exempt from Basic auth). Per-record
-        errors are reported, never 500 the batch."""
-        secret = os.getenv("TRIGIFY_WEBHOOK_SECRET")
-        if not secret:
-            raise HTTPException(status_code=503, detail="social webhook not configured")
-        if not secrets.compare_digest(request.headers.get("X-Trigify-Secret", ""), secret):
-            raise HTTPException(status_code=401, detail="invalid webhook secret")
-
-        raw = await request.body()
-        try:
-            data = json.loads(raw) if raw else None
-        except (ValueError, TypeError) as e:
-            raise HTTPException(status_code=400, detail="invalid JSON body") from e
-        if isinstance(data, dict) and isinstance(data.get("engagers"), list):
-            records = data["engagers"]
-        elif isinstance(data, list):
-            records = data
-        elif isinstance(data, dict):
-            records = [data]
-        else:
-            raise HTTPException(
-                status_code=400, detail="expected an engager object or list")
-
-        # Cost guard — this is a paid path (each NEW company = an LLM qualify),
-        # so it gets the SAME defenses as /api/discovery/run: a per-request cap
-        # on new qualifications, a monthly-budget pre-check, and a spend Operation
-        # so every qualify is recorded in the discovery cost meter. Appending a
-        # signal to an already-known company is free and never gated.
-        gate, cap, est, _blocked = spend_guard.make_social_gate(app.state.scoring_repo)
-
-        op = spend_guard.Operation(
-            app.state.scoring_repo, "social_webhook",
-            estimated_usd=round(min(len(records), cap) * est, 4),
-            accounts_planned=len(records))
-        results: list[dict] = []
-        try:
-            for rec in records:
-                if not isinstance(rec, dict):
-                    results.append({"accepted": False, "action": "skipped",
-                                    "reason": "invalid_record"})
-                    continue
-                try:
-                    engager = engager_from_trigify(rec)
-                except Exception as e:  # noqa: BLE001 — one bad record mustn't 500 the batch
-                    results.append({"accepted": False, "action": "skipped",
-                                    "reason": f"invalid_payload: {e}"})
-                    continue
-                try:
-                    res = await ingest_engager(
-                        engager, repo=app.state.repo, op=op, can_qualify=gate)
-                    results.append(res.model_dump())
-                except Exception:  # noqa: BLE001 — isolate per-record ingest failures
-                    logger.exception("social ingest failed for %r", rec.get("full_name"))
-                    results.append({"accepted": False, "action": "error",
-                                    "reason": "ingest_error"})
-        finally:
-            op.finish()
-        # Record raw payload + outcome (newest pushed last) so the Trigify field
-        # mapping can be inspected via GET /api/social/debug while wiring it up.
-        stamp = datetime.now(UTC).isoformat()
-        for rec, outcome in zip(records, results, strict=True):
-            app.state.social_debug.append({"at": stamp, "raw": rec, "outcome": outcome})
-        accepted = sum(1 for r in results if r.get("accepted"))
-        qualified_new = sum(1 for r in results if r.get("action") == "qualified")
-        return {"received": len(records), "accepted": accepted,
-                "skipped": len(records) - accepted,
-                "qualified_new": qualified_new, "results": results}
-
-    @app.get("/api/social/debug")
-    def social_debug():
-        """Last ~50 social-webhook payloads + what we did with each (newest
-        first). Behind Basic auth — a wiring aid while mapping Trigify fields."""
-        return {"events": list(reversed(app.state.social_debug))}
 
     # ── monitored LinkedIn accounts (Apify post-engagement) ──────────────────
 
@@ -698,11 +746,13 @@ def create_app() -> FastAPI:
                 if do_accounts:
                     app.state.last_social = await poll_targets(
                         active, repo=app.state.repo, op=op, can_qualify=budget_gate,
+                        abm_lookup=_abm_social_lookup,
                         gate=ctrl.gate, posted_limit_date=since, max_enrich=cap)
                 if do_events and not ctrl.cancelled:
                     app.state.run_phase = f"Scanning event keywords ({window})"
                     app.state.last_events = await poll_events(
                         keywords, repo=app.state.repo, op=op, can_qualify=budget_gate,
+                        abm_lookup=_abm_social_lookup,
                         gate=ctrl.gate, date_filter=date_filter, max_enrich=cap)
             except Exception:  # noqa: BLE001 — a poll failure must not kill the worker
                 logger.exception("social poll failed")
@@ -888,11 +938,13 @@ def create_app() -> FastAPI:
                         app.state.run_phase = "Scanning LinkedIn engagement"
                         app.state.last_social = await poll_targets(
                             active, repo=app.state.repo, op=op, can_qualify=s_gate,
+                            abm_lookup=_abm_social_lookup,
                             gate=ctrl.gate, posted_limit_date=since, max_enrich=cap)
                     if keywords and not blocked and not ctrl.cancelled:
                         app.state.run_phase = "Scanning event keywords"
                         app.state.last_events = await poll_events(
                             keywords, repo=app.state.repo, op=op, can_qualify=s_gate,
+                            abm_lookup=_abm_social_lookup,
                             gate=ctrl.gate, date_filter="past-24h", max_enrich=cap)
                 except Exception:  # noqa: BLE001 — a social failure mustn't fail the run
                     logger.exception("social phase of discovery run failed")
@@ -1091,6 +1143,131 @@ def create_app() -> FastAPI:
         _schedule_coro(app, _run())
         return app.state.scoring.get(account_id)
 
+    @app.post("/api/account/{account_id}/warm-intros")
+    def find_warm_intros(account_id: str):
+        """Find ICP decision-makers at this scored account, ranked by warmth
+        against the founders' networks (engaged with Magical's posts > shared
+        employer > shared school; evidence on every path).
+
+        On demand (~$0.10-0.25/run: a people search + a one-time founder
+        scrape), one at a time per account. The UI polls GET /api/account/{id}
+        until warm_intros.state flips to 'ready'."""
+        account = app.state.scoring.get(account_id)
+        if account is None:
+            raise HTTPException(status_code=404, detail="account not found")
+        if account.get("state") != "scored":
+            raise HTTPException(status_code=409, detail="account must be scored first")
+        if (account.get("warm_intros") or {}).get("state") == "generating":
+            return account                            # already in flight
+        _assert_budget(app, 0.25)
+        app.state.scoring_repo.set_warm_intros(account_id, {"state": "generating"})
+        # Green/yellow (high/medium fit) earn the paid school enrichment; red/low
+        # stay Apollo-only and free — a shared alma mater only matters on accounts
+        # we'd actually pursue.
+        enrich = account.get("tier_band") in ("high", "medium")
+
+        async def _run() -> None:
+            op = spend_guard.Operation(app.state.scoring_repo, "warm_intros",
+                                       estimated_usd=0.25, accounts_planned=1)
+
+            def on_cost(usd: float, step: str) -> None:
+                op.record(step=step, actual_usd=usd, account_id=account_id,
+                          model="apify")
+
+            try:
+                payload = await intros_service.generate(
+                    account, discovery_repo=app.state.repo, on_cost=on_cost,
+                    enrich_schools=enrich)
+                app.state.scoring_repo.set_warm_intros(account_id, payload)
+            except Exception as e:  # noqa: BLE001 — land in 'error', never crash the loop
+                logger.exception("warm intros failed for %s", account_id)
+                app.state.scoring_repo.set_warm_intros(account_id, {
+                    "state": "error", "error": f"{type(e).__name__}: {e}"})
+            finally:
+                op.finish()
+
+        _schedule_coro(app, _run())
+        return app.state.scoring.get(account_id)
+
+    @app.post("/api/scoring/warm-intros/run-all")
+    def run_all_warm_intros(force: bool = False):
+        """Backfill warm intros across every scored account that lacks them.
+
+        Apollo (free) finds the decision-makers for ALL accounts; green/yellow
+        (high/medium fit) additionally get freshdata school enrichment, so a
+        shared alma mater — the widest warm net — can surface. Idempotent: an
+        account already 'ready' or in flight is skipped unless force=true. Returns
+        at once; the board polls each account's warm_intros.state to 'ready'."""
+        rows = app.state.scoring.list_scored()
+
+        def _needs(r: dict) -> bool:
+            wi = r.get("warm_intros") or {}
+            if wi.get("state") == "generating":
+                return False                      # already in flight
+            if force or wi.get("state") != "ready":
+                return True                       # forced, or no intros yet
+            # Already has intros: re-run only green/yellow whose intros predate
+            # school enrichment, so the alma-mater net is backfilled exactly once.
+            # Red/low keep their free Apollo list untouched (no re-pay, no churn).
+            return (r.get("tier_band") in ("high", "medium")
+                    and not wi.get("schools_enriched"))
+
+        todo = [r["account_id"] for r in rows if _needs(r)]
+        if not todo:
+            return {"scheduled": 0, "skipped": len(rows)}
+        # Apollo is free; only the green/yellow school enrichment costs. Size the
+        # estimate at the per-contact cap so the monthly guard can refuse a run
+        # it can't afford (429) before any money is spent.
+        todo_set = set(todo)
+        green_yellow = sum(1 for r in rows if r["account_id"] in todo_set
+                           and r.get("tier_band") in ("high", "medium"))
+        est = spend_guard.estimate_batch(
+            green_yellow * intros_profiles.max_contacts(),
+            intros_profiles.ENRICH_CONTACT_COST_USD)
+        _assert_budget(app, est)
+        for aid in todo:
+            app.state.scoring_repo.set_warm_intros(aid, {"state": "generating"})
+
+        async def _run_all() -> None:
+            op = spend_guard.Operation(app.state.scoring_repo, "warm_intros_batch",
+                                       estimated_usd=est, accounts_planned=len(todo))
+            limit = max(1, int(os.getenv("INTROS_BATCH_CONCURRENCY", "6")))
+            sem = asyncio.Semaphore(limit)
+
+            async def _one(aid: str) -> None:
+                account = app.state.scoring.get(aid)
+                if not account:
+                    return
+                # Stop paying once the op overheats: everyone still gets the free
+                # Apollo contact list, the paid school net just switches off.
+                enrich = (account.get("tier_band") in ("high", "medium")
+                          and not op.overheated())
+
+                def on_cost(usd: float, step: str) -> None:
+                    op.record(step=step, actual_usd=usd, account_id=aid, model="apify")
+
+                async with sem:
+                    try:
+                        payload = await intros_service.generate(
+                            account, discovery_repo=app.state.repo,
+                            on_cost=on_cost, enrich_schools=enrich)
+                        app.state.scoring_repo.set_warm_intros(aid, payload)
+                    except Exception as e:  # noqa: BLE001 — one account mustn't kill the batch
+                        logger.exception("batch warm intros failed for %s", aid)
+                        app.state.scoring_repo.set_warm_intros(aid, {
+                            "state": "error", "error": f"{type(e).__name__}: {e}"})
+                    finally:
+                        op.accounts_done += 1
+
+            try:
+                await asyncio.gather(*(_one(a) for a in todo))
+            finally:
+                op.finish()
+
+        _schedule_coro(app, _run_all())
+        return {"scheduled": len(todo), "enrich_green_yellow": green_yellow,
+                "estimated_usd": est}
+
     @app.post("/api/scoring/import/preview")
     async def import_preview(request: Request):
         """Parse a CSV (raw request body) and report the schema + column mapping
@@ -1100,24 +1277,39 @@ def create_app() -> FastAPI:
 
     @app.post("/api/scoring/import")
     async def import_commit(request: Request):
-        """Parse the CSV body and enqueue the new accounts as 'queued' — parked,
-        NOT scored. Scoring is on demand (per-account or a batch) so importing a
-        large file never spends money by itself. Known accounts are skipped.
+        """Parse the CSV body and enqueue accounts as 'queued' — parked, NOT scored.
+        Scoring is on demand (per-account or a batch) so importing a large file
+        never spends money by itself.
 
-        Each batch is tagged with a label (the uploaded filename + time) so the
-        user can later filter to, and export, exactly what they uploaded."""
+        Dedup is by company IDENTITY: a row already scored is skipped, and a row
+        that's a LIVE discovery company is MOVED into Scored carrying its signals
+        (it leaves the Discovery panel) instead of creating a signal-less twin.
+        Each batch is tagged with a label so it can be filtered + exported later."""
         result = _parse_upload(await request.body())
-        fresh = [a for a in result.accounts if not app.state.scoring.exists(a.account_id)]
         label = _import_label(request.headers.get("x-import-filename"))
-        app.state.scoring.enqueue_csv(fresh, state="queued", import_label=label)
+        svc_ = svc(app)
+        scoring = app.state.scoring
+        csv_fresh, moved, skipped = [], [], 0
+        for a in result.accounts:
+            action, company = _classify_import_row(
+                a.name, a.account_id, get_company=svc_.get_company, exists=scoring.exists)
+            if action == "skip":
+                skipped += 1
+            elif action == "move":
+                svc_.promote(company.company_key)          # leaves the Discovery panel
+                moved.append(scoring.enqueue_discovery(company.model_dump(), state="queued"))
+            else:
+                csv_fresh.append(a)
+        csv_rows = scoring.enqueue_csv(csv_fresh, state="queued", import_label=label)
         return {
             "schema_label": result.schema_label,
             "segment": result.segment,
-            "imported": len(fresh),
-            "queued": len(fresh),
-            "skipped_known": len(result.accounts) - len(fresh),
+            "imported": len(csv_rows) + len(moved),
+            "queued": len(csv_rows) + len(moved),
+            "moved_from_discovery": len(moved),
+            "skipped_known": skipped,
             "import_label": label,
-            "accounts": [app.state.scoring.get(a.account_id) for a in fresh],
+            "accounts": csv_rows + moved,
         }
 
     @app.get("/api/scoring/imports")

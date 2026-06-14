@@ -42,7 +42,7 @@ function JobHiringBlock({ jobs }) {
               {g.items.map((s, j) => (
                 <li key={j} className="flex items-center justify-between gap-2 text-[12px]">
                   {s.url ? (
-                    <a href={s.url} target="_blank" rel="noreferrer"
+                    <a href={safeHref(s.url)} target="_blank" rel="noreferrer"
                       className="min-w-0 truncate font-medium text-zinc-700 underline-offset-2 hover:text-indigo-600 hover:underline">
                       {s.title || s.summary}
                     </a>
@@ -51,9 +51,11 @@ function JobHiringBlock({ jobs }) {
                   )}
                   <span className="flex shrink-0 items-center gap-1.5 text-zinc-400">
                     {s.location && <span className="max-w-[110px] truncate">{s.location}</span>}
-                    {s.age && <span className="whitespace-nowrap">· {s.age}</span>}
+                    {s.observed_at && (
+                      <span className="whitespace-nowrap" title={formatDateTime(s.observed_at)}>· {relativeTime(s.observed_at)}</span>
+                    )}
                     {s.url && (
-                      <a href={s.url} target="_blank" rel="noreferrer"
+                      <a href={safeHref(s.url)} target="_blank" rel="noreferrer"
                         className="shrink-0 text-zinc-400 transition-colors hover:text-indigo-600"
                         title="View job posting">
                         <Icons.ext className="h-3.5 w-3.5" />
@@ -86,7 +88,7 @@ function PeopleEngagingBlock({ signals }) {
                 <div className="min-w-0">
                   <div className="flex items-center gap-1.5 text-[13px] font-semibold text-zinc-800">
                     {s.person_profile_url ? (
-                      <a href={s.person_profile_url} target="_blank" rel="noreferrer"
+                      <a href={safeHref(s.person_profile_url)} target="_blank" rel="noreferrer"
                         className="truncate underline-offset-2 hover:text-indigo-600 hover:underline">
                         {s.person_name || 'Unknown'}
                       </a>
@@ -176,7 +178,7 @@ function CompanyDrawer({ company, onClose, onPromote, onDefer, onReject, onResto
                 <SectionLabel>{company.bucket === 'needs_review' ? 'Why flagged for review' : 'Why qualified'}</SectionLabel>
                 <p className="text-[14px] leading-relaxed text-zinc-700 text-pretty">{company.reasoning}</p>
                 {company.evidence_url && (
-                  <a href={company.evidence_url} target="_blank" rel="noreferrer"
+                  <a href={safeHref(company.evidence_url)} target="_blank" rel="noreferrer"
                     className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[12px] font-medium text-zinc-600 transition-colors hover:bg-zinc-50 hover:text-indigo-600">
                     View evidence<Icons.ext className="h-3.5 w-3.5" />
                   </a>
@@ -255,7 +257,7 @@ function CompanyDrawer({ company, onClose, onPromote, onDefer, onReject, onResto
                 <div className="flex items-center gap-2">
                   <button onClick={onPromote}
                     className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2.5 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300">
-                    <Icons.arrowUp className="h-4 w-4" />Promote to scoring
+                    <Icons.arrowUp className="h-4 w-4" />Score
                   </button>
                   <DeferButton onClick={onDefer} size="lg" />
                   <RejectButton onClick={onReject} size="lg" />

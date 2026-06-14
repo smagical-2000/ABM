@@ -185,6 +185,34 @@ async def test_non_icp_company_is_not_enriched(enrich_calls):
 
 
 @pytest.mark.asyncio
+async def test_competitor_single_like_is_filtered_as_noise(enrich_calls):
+    """On a COMPETITOR post a lone like is noise — dropped before any paid work.
+    A repeated liker (2 posts) and a commenter pass the gate. (Magical's own
+    posts are unaffected — covered by test_filters_before_enriching.)"""
+    from auto_search.social.poll import poll_targets
+
+    one_like = RawEngager(name="One Like", position="CEO at Onelike Health",
+                          linkedin_url="https://www.linkedin.com/in/onelike")
+    two_like = RawEngager(name="Two Like", position="CEO at Twolike Health",
+                          linkedin_url="https://www.linkedin.com/in/twolike")
+    commenter = RawEngager(name="Commenter", position="CEO at Comment Health",
+                           linkedin_url="https://www.linkedin.com/in/commenter",
+                           comment_text="we evaluated this last quarter")
+
+    async def _f(urls, **kw):  # noqa: ARG001
+        return [one_like, two_like, two_like, commenter]   # two_like engaged twice
+
+    repo = FakeRepo()
+    summary = await poll_targets(
+        [SocialTarget(linkedin_url="https://www.linkedin.com/company/rival", kind="competitor")],
+        repo=repo, fetch_fn=_f, enrich_fn=_make_enrich(enrich_calls), qualify_fn=_fake_qualify)
+
+    assert summary["skipped"].get("below_threshold") == 1      # the lone liker, dropped
+    assert summary["decision_makers"] == 2                     # repeat-liker + commenter
+    assert "https://www.linkedin.com/in/onelike" not in enrich_calls  # no paid work on noise
+
+
+@pytest.mark.asyncio
 async def test_duplicate_engagement_not_re_enriched(enrich_calls):
     """A re-seen engagement at an already-known ICP company must NOT re-enrich —
     otherwise every daily poll re-pays to enrich the entire standing book."""

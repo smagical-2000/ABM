@@ -49,6 +49,11 @@ class ScoringRepository(Protocol):
     def set_dossier_state(self, account_id: str, state: str | None,
                           error: str | None = None) -> None: ...
     def save_dossier(self, account_id: str, dossier) -> dict | None: ...
+
+    def set_warm_intros(self, account_id: str, payload: dict | None) -> None:
+        """Persist the warm-intros payload (state lives inside it); None clears."""
+        ...
+
     def get(self, account_id: str) -> dict | None: ...
     def list_accounts(self) -> list[dict]: ...
     def active(self) -> list[dict]: ...
@@ -59,6 +64,10 @@ class ScoringRepository(Protocol):
     def reset_to_queued(self) -> int: ...
     # spend guardrails
     def create_spend_operation(self, op: dict) -> None: ...
+
+    def fail_orphaned_operations(self) -> int:
+        """Fail any spend operation left 'running' (no live task owns it at boot)."""
+        ...
     def finish_spend_operation(self, op_id: str, *, status: str, actual_usd: float,
                                accounts_done: int, error: str | None = None) -> None: ...
     def record_cost_event(self, event: dict) -> None: ...
@@ -113,6 +122,7 @@ def _row(account: dict) -> dict:
         "dossier_cost": _as_float(account.get("dossier_cost")),
         "dossier_generated_at": _iso(account.get("dossier_generated_at")),
         "dossier_error": account.get("dossier_error"),
+        "warm_intros": account.get("warm_intros"),
         "error": account.get("error_message"),
         "scored_at": _iso(account.get("scored_at")),
         "created_at": _iso(account.get("created_at")),
@@ -311,6 +321,15 @@ class ScoringPostgresRepository:
             ).fetchone()
         return self.get(account_id) if row else None
 
+    def set_warm_intros(self, account_id: str, payload: dict | None) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE scored_accounts SET warm_intros=%s::jsonb, updated_at=now() "
+                "WHERE account_id=%s",
+                (json.dumps(payload, default=str) if payload is not None else None,
+                 account_id),
+            )
+
     def get(self, account_id: str) -> dict | None:
         with self._pool.connection() as conn:
             row = conn.execute(
@@ -419,6 +438,16 @@ class ScoringPostgresRepository:
                 "UPDATE spend_operations SET status=%s, actual_usd=%s, accounts_done=%s, "
                 "error_message=%s, finished_at=now() WHERE id=%s",
                 (status, actual_usd, accounts_done, error, op_id))
+
+    def fail_orphaned_operations(self) -> int:
+        """Fail any op left 'running' — every op finishes in a finally, so a
+        'running' row at boot means the process died mid-run (phantom spend)."""
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "UPDATE spend_operations SET status='failed', "
+                "error_message='orphaned by restart', finished_at=now() "
+                "WHERE status='running'")
+            return cur.rowcount or 0
 
     def record_cost_event(self, event: dict) -> None:
         payload = {**event, "metadata": json.dumps(event["metadata"])
@@ -569,6 +598,12 @@ class ScoringJsonRepository:
         self._flush()
         return _row(row)
 
+    def set_warm_intros(self, account_id: str, payload: dict | None) -> None:
+        row = self._store.get(account_id)
+        if row:
+            row["warm_intros"] = payload
+            self._flush()
+
     def get(self, account_id: str) -> dict | None:
         row = self._store.get(account_id)
         return _row(row) if row else None
@@ -663,6 +698,20 @@ class ScoringJsonRepository:
                           "finished_at": datetime.now(UTC).isoformat()})
                 break
         self._flush_spend()
+
+    def fail_orphaned_operations(self) -> int:
+        """Fail any op left 'running' — every op finishes in a finally, so a
+        'running' row at boot means the process died mid-run (phantom spend)."""
+        n = 0
+        for o in self._ops:
+            if o.get("status") == "running":
+                o.update({"status": "failed",
+                          "error_message": "orphaned by restart",
+                          "finished_at": datetime.now(UTC).isoformat()})
+                n += 1
+        if n:
+            self._flush_spend()
+        return n
 
     def record_cost_event(self, event: dict) -> None:
         self._events.append({**event, "created_at": datetime.now(UTC).isoformat()})

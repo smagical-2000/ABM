@@ -42,77 +42,17 @@ import re
 from collections import Counter
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import NamedTuple
 
 from auto_search.clients.apify_jobs import ApifyJobsClient, IndeedJob, LinkedInJob
 from auto_search.models import RawSignal
 from auto_search.normalize import clean_domain, parse_iso_datetime, slugify
+from auto_search.rcm_titles import ESSENTIAL_RCM_TITLES, STANDARD, EssentialTitle
 
 logger = logging.getLogger(__name__)
 
-# The essential RCM titles to search, each a (quoted query, role bucket,
-# base signal strength, TIER). The role bucket is what the UI groups on
-# ("3 Coder jobs"); quotes give an exact-phrase title match. Order high-value
-# first — signal_strength also picks the representative posting for qualify.
-#
-# TIER shapes WHEN we spend the (expensive) company qualifier — see
-# job_stacking.py. It does NOT change what's scraped; every posting is still
-# pulled and stored.
-#   • "core"     — the high-intent RCM work Magical automates directly (prior
-#                  auth, denials/appeals, eligibility, claims, revenue
-#                  cycle/integrity, utilization review). ONE posting is a buying
-#                  signal on its own → qualify the company.
-#   • "standard" — higher-volume / noisier adjacent roles (billers, coders,
-#                  patient access, scheduling…). A lone posting is often routine
-#                  backfill, so we only qualify once a company STACKS (≥2
-#                  standard postings = a real revenue-cycle build-out). A
-#                  single-standard company is parked and watched until it does,
-#                  so we never pay to qualify noise nor lose a company that
-#                  later stacks.
-class EssentialTitle(NamedTuple):
-    query: str          # quoted exact-phrase board query
-    role: str           # UI grouping bucket
-    strength: float     # base signal strength (0–1)
-    tier: str           # CORE | STANDARD
-
-
-CORE, STANDARD = "core", "standard"
-
-ESSENTIAL_RCM_TITLES: list[EssentialTitle] = [
-    # ── CORE (11) — a single posting qualifies the company ───────────────
-    # The high-intent back-office RCM work Magical automates: front-end auth /
-    # eligibility, claims, denials/appeals, revenue cycle/integrity, UM. One
-    # open req at a provider is a buying signal on its own.
-    EssentialTitle('"prior authorization specialist"', "Prior Auth", 0.88, CORE),
-    EssentialTitle('"authorization coordinator"', "Prior Auth", 0.84, CORE),
-    EssentialTitle('"insurance verification specialist"', "Eligibility", 0.85, CORE),
-    EssentialTitle('"eligibility specialist"', "Eligibility", 0.82, CORE),
-    EssentialTitle('"claims specialist"', "Claims", 0.82, CORE),
-    EssentialTitle('"claims processor"', "Claims", 0.80, CORE),
-    EssentialTitle('"denials specialist"', "Denials", 0.86, CORE),
-    EssentialTitle('"appeals specialist"', "Appeals", 0.84, CORE),
-    EssentialTitle('"revenue cycle specialist"', "Revenue Cycle", 0.82, CORE),
-    EssentialTitle('"revenue integrity specialist"', "Revenue Integrity", 0.80, CORE),
-    EssentialTitle('"utilization management nurse"', "Utilization Mgmt", 0.78, CORE),
-    # ── STANDARD (13) — must STACK (≥2 postings) to spend the qualifier ──
-    # Higher-volume / more clinical-adjacent roles. A lone posting is often
-    # routine backfill (and titles like "billing/collections/scheduling/care
-    # coordinator" are cross-industry), so we only qualify once a company
-    # stacks — a single-standard company is parked & watched until it does.
-    EssentialTitle('"medical biller"', "Biller", 0.72, STANDARD),
-    EssentialTitle('"billing specialist"', "Biller", 0.66, STANDARD),
-    EssentialTitle('"medical coder"', "Coder", 0.72, STANDARD),
-    EssentialTitle('"cdi specialist"', "CDI", 0.70, STANDARD),
-    EssentialTitle('"collections specialist"', "AR / Collections", 0.66, STANDARD),
-    EssentialTitle('"payment posting specialist"', "Payment Posting", 0.66, STANDARD),
-    EssentialTitle('"patient access representative"', "Patient Access", 0.68, STANDARD),
-    EssentialTitle('"referral coordinator"', "Patient Access", 0.64, STANDARD),
-    EssentialTitle('"intake coordinator"', "Patient Access", 0.62, STANDARD),
-    EssentialTitle('"scheduling coordinator"', "Scheduling", 0.60, STANDARD),
-    EssentialTitle('"care coordinator"', "Care Coordination", 0.58, STANDARD),
-    EssentialTitle('"patient navigator"', "Care Coordination", 0.58, STANDARD),
-    EssentialTitle('"clinical reviewer"', "Clinical Review", 0.60, STANDARD),
-]
+# The RCM title taxonomy (EssentialTitle, CORE/STANDARD, ESSENTIAL_RCM_TITLES) now
+# lives in auto_search/rcm_titles.py — a pure module shared with priority.py, so the
+# intent scorer can read role→tier without importing this Apify-bound connector.
 
 
 def select_titles(env_value: str | None = None) -> list[EssentialTitle]:

@@ -23,7 +23,7 @@ import re
 
 from auto_search.normalize import normalize_company_name
 from auto_search.scoring import spend_guard
-from auto_search.social import apify
+from auto_search.social import apify, engagement_gate
 from auto_search.social.filters import is_attending, is_us
 from auto_search.social.ingest import ingest_engager
 from auto_search.social.models import Engager, SocialTarget, source_for_kind
@@ -117,6 +117,7 @@ async def poll_targets(
     repo,
     op: spend_guard.Operation | None = None,
     can_qualify=None,
+    abm_lookup=None,
     gate=None,
     max_posts: int = MAX_POSTS_PER_TARGET,
     posted_limit_date: str | None = None,
@@ -172,6 +173,11 @@ async def poll_targets(
             op.record(step="scrape", actual_usd=round(billed * SCRAPE_COST_PER_ITEM_USD, 4),
                       company_key=None, model="apify:linkedin-profile-posts")
 
+        # Per-person engagement tally for the competitor noise gate, computed from
+        # the RAW engagers — before the first-wins dedup below — so repeated likes
+        # across posts are actually counted. Consulted only for competitor posts.
+        tallies = engagement_gate.tally_by_person(engagers)
+
         for e in engagers:
             # Cancel/pause checkpoint (shared RunControl) BEFORE any paid work on
             # this engager — a pause freezes here, a cancel stops the run cleanly.
@@ -198,8 +204,15 @@ async def poll_targets(
             if e.position and _HEADLINE_MAGICAL_RE.search(e.position):
                 _tally_skip(summary, "magical_employee")
                 continue
+            # Competitor noise gate: a lone like on a competitor's post is weak —
+            # require a comment or repeated likes before paying to enrich/qualify.
+            # Magical's own posts are exempt (engaging with us is intent on its own).
+            if source == "competitor_post" and \
+                    not engagement_gate.competitor_engager_qualifies(tallies.get(ident)):
+                _tally_skip(summary, "below_threshold")
+                continue
             summary["decision_makers"] += 1
-            kw = {"repo": repo, "op": op, "can_qualify": can_qualify}
+            kw = {"repo": repo, "op": op, "can_qualify": can_qualify, "abm_lookup": abm_lookup}
             if qualify_fn is not None:
                 kw["qualify_fn"] = qualify_fn
             budget = max_enrich - enrich_count
@@ -277,6 +290,7 @@ async def poll_events(
     repo,
     op: spend_guard.Operation | None = None,
     can_qualify=None,
+    abm_lookup=None,
     gate=None,
     date_filter: str = "past-24h",
     max_posts: int = 25,
@@ -367,7 +381,7 @@ async def poll_events(
             comment_text=p.text,
             event_name=p.keyword or kw_label,
         )
-        kw = {"repo": repo, "op": op, "can_qualify": can_qualify}
+        kw = {"repo": repo, "op": op, "can_qualify": can_qualify, "abm_lookup": abm_lookup}
         if qualify_fn is not None:
             kw["qualify_fn"] = qualify_fn
         _tally_result(summary, await ingest_engager(engager, **kw))

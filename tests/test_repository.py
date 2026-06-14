@@ -115,6 +115,44 @@ def test_stats_counts_by_status(tmp_path):
     assert s["qualified"] == 1 and s["disqualified"] == 1 and s["total"] == 2
 
 
+# ── review-TTL clock (entered_review_at / review_origin) ──────────────
+
+
+def test_ingest_needs_review_starts_clock_origin_ingest(tmp_path):
+    repo = JsonFileRepository(tmp_path / "store.json")
+    repo.save_candidate(_candidate_named("ch", "Charlie CNO", status="needs_review"))
+    row = repo.get("ch")
+    assert row["entered_review_at"] and row["review_origin"] == "ingest"
+
+
+def test_enter_needs_review_marks_decayed(tmp_path):
+    repo = JsonFileRepository(tmp_path / "store.json")
+    repo.save_candidate(_candidate_named("al", "Alpha", status="qualified"))
+    repo.enter_needs_review("al")
+    row = repo.get("al")
+    assert row["icp_status"] == "needs_review"
+    assert row["entered_review_at"] and row["review_origin"] == "decayed"
+
+
+def test_promote_from_review_clears_clock_and_is_idempotent(tmp_path):
+    repo = JsonFileRepository(tmp_path / "store.json")
+    repo.save_candidate(_candidate_named("ch", "Charlie CNO", status="needs_review"))
+    out = repo.promote_from_review("ch")
+    assert out is not None and out["icp_status"] == "qualified"
+    assert out["entered_review_at"] is None and out["review_origin"] is None
+    assert repo.promote_from_review("ch") is None     # no longer in review -> no-op
+
+
+def test_requalify_clears_the_review_clock(tmp_path):
+    repo = JsonFileRepository(tmp_path / "store.json")
+    repo.save_candidate(_candidate_named("ch", "Charlie CNO", status="needs_review"))
+    assert repo.get("ch")["entered_review_at"]
+    repo.save_candidate(_candidate_named("ch", "Charlie CNO", status="qualified"))
+    row = repo.get("ch")
+    assert row["icp_status"] == "qualified" and row["entered_review_at"] is None
+    assert row["review_origin"] is None
+
+
 # ── run heartbeat (live 'processing' marker) ──────────────────────────
 
 

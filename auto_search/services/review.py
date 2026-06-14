@@ -45,6 +45,7 @@ class PanelSignal(BaseModel):
     # job_posting extras (null otherwise)
     role: str | None = None
     title: str | None = None
+    tier: str | None = None             # core | standard — feeds buying-intent
     url: str | None = None
     location: str | None = None
     age: str | None = None
@@ -72,12 +73,22 @@ class PanelCompany(BaseModel):
     domain: str | None = None
     review_status: str = "pending"
     icp_status: str | None = None       # qualified | needs_review | disqualified | error
+    entered_review_at: str | None = None  # when it entered needs_review (review-TTL clock)
+    review_origin: str | None = None     # 'ingest' (AI unsure) | 'decayed' (aged from Watch)
     first_seen_at: str | None = None
     qualified_at: str | None = None     # when the AI verdict landed (absolute timestamp)
     qualify_cost_usd: float | None = None  # from cost_events (measured tokens)
     signal_count: int = 0
     signals: list[PanelSignal] = []
     abm_match: AbmMatch | None = None    # set when this company is on the ABM target list
+    # buying-intent (priority.py) — set by the panel API, drives ranking + the gate
+    intent_score: int = 0                # 0-100
+    intent_tier: str | None = None       # "hot" | "watch"
+    intent_reason: str | None = None     # short human "why" ("3 RCM roles open · ABM target")
+    # lifecycle TTL countdown for the panel badge (lifecycle.next_transition)
+    ttl_action: str | None = None        # "review" (Watch→needs_review) | "reject" (auto-reject) | None
+    ttl_days: int | None = None          # whole days until that move; 0 = next sweep acts
+    is_watchlist: bool = False           # lone standard-hire → belongs on the Watch list, not Discovery
 
 
 class DiscoveryStats(BaseModel):
@@ -206,6 +217,7 @@ def _to_panel_company(row: dict) -> PanelCompany:
             strength=s.get("signal_strength"),
             role=(p := s.get("payload") or {}).get("role"),
             title=p.get("job_title"),
+            tier=p.get("tier"),
             # The signal's evidence link: a job posting for hiring signals, the
             # post for social engagement — so the panel + the scored "Why
             # discovered" proof link work for every signal type, not just jobs.
@@ -233,6 +245,8 @@ def _to_panel_company(row: dict) -> PanelCompany:
         domain=row.get("domain"),
         review_status=row.get("review_status", "pending"),
         icp_status=row.get("icp_status"),
+        entered_review_at=row.get("entered_review_at"),
+        review_origin=row.get("review_origin"),
         first_seen_at=row.get("first_seen_at"),
         qualified_at=row.get("qualified_at"),
         signal_count=len(signals),

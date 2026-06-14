@@ -5,8 +5,6 @@
 // expect (the design was built to the ReviewService DTOs), so there's no
 // mapping layer — the JSON flows straight into the UI.
 
-window.NOW = Date.now(); // for relativeTime() in ui.jsx
-
 const BASE = ''; // same origin as the served page
 
 async function http(path, opts) {
@@ -64,6 +62,18 @@ window.API = {
   abmSummary: () => http('/api/abm/summary'),
   abmMatches: () => http('/api/abm/matches'),
 
+  // ── market-intelligence news ────────────────────────────────────────────────
+  news: ({ topic, days = 30, limit = 200 } = {}) => {
+    const q = new URLSearchParams({ days: String(days), limit: String(limit) });
+    if (topic) q.set('topic', topic);
+    return http(`/api/news?${q.toString()}`);
+  },
+  refreshNews: () => http('/api/news/refresh', { method: 'POST' }),
+
+  // ── watch list: lone-standard-hire leads kept out of Discovery ──────────────
+  parked: () => http('/api/discovery/parked'),                       // not yet qualified
+  watchlistLeads: () => http('/api/panel?status=qualified&watchlist=only'),  // qualified, low intent
+
   // ── social: monitored LinkedIn accounts (Apify post-engagement) ─────────────
   socialTargets: () => http('/api/social/targets'),
   addSocialTarget: (body) => http('/api/social/targets', {
@@ -93,6 +103,11 @@ window.API = {
   scoreAccount: (id) => http(`/api/account/${encodeURIComponent(id)}/score`, { method: 'POST' }),
   // Kick the on-demand deep-research dossier; poll account(id) until ready.
   generateDossier: (id) => http(`/api/account/${encodeURIComponent(id)}/dossier`, { method: 'POST' }),
+  // Find ICP decision-makers + founder warm paths; poll account(id) until ready.
+  findWarmIntros: (id) => http(`/api/account/${encodeURIComponent(id)}/warm-intros`, { method: 'POST' }),
+  // Backfill warm intros across every scored account (Apollo free; green/yellow
+  // also get paid school enrichment). Returns {scheduled, enrich_green_yellow, estimated_usd}.
+  runAllWarmIntros: (force = false) => http(`/api/scoring/warm-intros/run-all${force ? '?force=true' : ''}`, { method: 'POST' }),
   scoringActivity: () => http('/api/scoring/activity'),
   // Spend summary for the cost meter (month-to-date vs budget, total, avg).
   scoringStats: () => http('/api/scoring/stats'),

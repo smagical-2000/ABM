@@ -44,7 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dotenv import load_dotenv
 
-from auto_search import job_qualifier, pipeline
+from auto_search import job_qualifier, job_stacking, lifecycle, pipeline
 from auto_search.connectors.acquisitions import AcquisitionsConnector
 from auto_search.connectors.funding import FundingConnector
 from auto_search.connectors.job_postings import JobPostingsConnector
@@ -73,7 +73,10 @@ def _sb_kwargs(limit):
 
 
 def _jobs_rows(limit):
-    return limit if limit is not None else int(os.getenv("DISCOVERY_JOBS_MAX_ROWS", "200"))
+    # PER title-query, per board (24 titles -> ~35 searches). Must match the
+    # runner's default (12): the old 200 here meant a cron redeploy quietly
+    # scraped ~16x the rows the panel Run does. Override via env for a deep sweep.
+    return limit if limit is not None else int(os.getenv("DISCOVERY_JOBS_MAX_ROWS", "12"))
 
 
 CONNECTORS = {
@@ -124,7 +127,7 @@ async def run_connector(
     grouping. It costs Claude, so it's only applied on real (qualifying) runs.
     """
     banner(f"{name.upper()}  ({connector.source_name})")
-    counts = {"qualified": 0, "needs_review": 0, "disqualified": 0, "error": 0}
+    counts = {"qualified": 0, "needs_review": 0, "disqualified": 0, "error": 0, "parked": 0}
 
     if not qualify:
         # Dry run: pull + dedup only, no Claude. Show what we'd evaluate.
@@ -142,11 +145,27 @@ async def run_connector(
     run_id = _start_run(repo, connector.source_name)
     evaluated = 0
     err: str | None = None
+
+    # Jobs cost gate — the SAME gate the on-demand panel run uses, now on the cron
+    # too: park a company whose only signal is a single STANDARD posting (store it
+    # on the watch ledger, skip the paid qualify, re-evaluate next run once it
+    # stacks). CORE roles, stacked roles, and any non-job signal still qualify.
+    # The wide jobs pull window lands co-open reqs together, so stacking decides
+    # within one run. This is what stops us paying to qualify lone low-intent hires.
+    defer = on_defer = None
+    if name == "jobs":
+        def defer(_key, sigs):
+            return job_stacking.should_park(sigs)
+
+        def on_defer(key, sigs):
+            counts["parked"] += 1
+            job_stacking.persist_parked(repo, key, sigs)
+
     try:
         async for cand in pipeline.run(
             connector, since, limit=limit,
             skip_already_qualified=repo.already_qualified,
-            prefilter=prefilter,
+            prefilter=prefilter, defer=defer, on_defer=on_defer,
             on_plan=lambda n: _update_run(repo, run_id, planned=n),
         ):
             repo.save_candidate(cand)
@@ -254,6 +273,7 @@ async def main(args: argparse.Namespace) -> int:
     totals: dict[str, int] = {}
     ran = failed = 0
     spend_op = None
+    scoring_repo = None
     if not args.no_qualify:
         try:
             from auto_search.db.scoring_repository import get_scoring_repository
@@ -306,11 +326,34 @@ async def main(args: argparse.Namespace) -> int:
         print(f"  {GREEN}qualified:     {totals.get('qualified', 0)}{RESET}")
         print(f"  {YELLOW}needs review:  {totals.get('needs_review', 0)}{RESET}")
         print(f"  {RED}disqualified:  {totals.get('disqualified', 0)}{RESET}")
+        print(f"  {DIM}parked (watch): {totals.get('parked', 0)} — single low-tier hires, not qualified{RESET}")
         print(f"  {RED}errors:        {totals.get('error', 0)}{RESET}")
         print(f"\n  store totals: {repo.stats()}")
         print(f"  {DIM}panel (qualified) → python scripts/run_discovery.py --panel{RESET}")
         if spend_op is not None:
             spend_op.finish(status="completed")
+        # Self-cleaning pass: cold Watch -> Needs review, re-heated -> promoted
+        # back to Discovery, in-review-too-long -> auto-rejected. ABM-aware so the
+        # sweep's Hot bar matches the panel's.
+        try:
+            from auto_search.abm import AbmIndex, TargetAccount
+            abm_rows = repo.abm_targets() if hasattr(repo, "abm_targets") else []
+            abm_index = AbmIndex([TargetAccount(**r) for r in abm_rows])
+        except Exception:  # noqa: BLE001 — abm match is a bonus; never break the sweep
+            abm_index = None
+        sweep = lifecycle.sweep(repo, abm_index=abm_index)
+        print(f"  {DIM}lifecycle: {sweep.demoted} → needs-review, "
+              f"{sweep.promoted} → promoted, {sweep.rejected} auto-rejected{RESET}")
+        # Auto-score the re-heated (promoted) leads, budget-permitting.
+        if sweep.promoted_keys and scoring_repo is not None:
+            from auto_search import autoscore
+            from auto_search.scoring.service import ScoringService
+            from auto_search.services.review import ReviewService
+            res = await autoscore.autoscore_promoted(
+                sweep.promoted_keys, review=ReviewService(repo),
+                scoring=ScoringService(scoring_repo), scoring_repo=scoring_repo)
+            if res["scored"]:
+                print(f"  {DIM}auto-scored {len(res['scored'])} promoted lead(s){RESET}")
 
     # Production exit code: a single source failing keeps exit 0 (resilient), but
     # a TOTAL failure (every selected source errored) exits non-zero so the

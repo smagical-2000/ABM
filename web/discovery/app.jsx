@@ -57,6 +57,8 @@ function NavSwitch({ view, onChange, scoredCount, pulse }) {
     <div className="flex items-center gap-0.5 rounded-lg bg-zinc-100/80 p-0.5">
       {item('discovery', 'Discovery')}
       {item('scored', 'Scored')}
+      {item('news', 'News')}
+      {item('watch', 'Watch list')}
     </div>
   );
 }
@@ -157,46 +159,53 @@ function ActivityBanner({ runs, paused, cancelling, phase }) {
   );
 }
 
-// ── DiscoverySpendMeter — month-to-date qualify spend vs the discovery budget ─
-function DiscoverySpendMeter({ spend, lastRun }) {
+// ── SpendMeter — ALL spend this month in one place: discovery (qualify + Apify
+// scrape) + scored, against the combined monthly budget. One cost area, not three.
+function SpendMeter({ spend, lastRun }) {
   if (!spend) return null;
-  const spent = spend.month_discovery_cost || 0;
-  const budget = spend.discovery_budget || 0;
-  const est = spend.discovery_est_qual_cost || 0.12;
-  const pct = budget ? Math.min(100, Math.round((spent / budget) * 100)) : 0;
-  const over = budget && spent >= budget;
-  const near = !over && budget && spent >= budget * 0.8;
+  const disc = spend.month_discovery_cost || 0;            // qualify + Apify scrape
+  const scored = spend.month_cost ?? spend.month_scoring_cost ?? 0;  // the scoring-budget basis
+  const total = disc + scored;                             // matches both budget gauges
+  const discBudget = spend.discovery_budget || 0;
+  const scoreBudget = spend.monthly_budget || 0;
+  const budget = discBudget + scoreBudget;                 // combined monthly cap
+  const pct = budget ? Math.min(100, Math.round((total / budget) * 100)) : 0;
+  // "over" if EITHER line hit its own guardrail (each is enforced separately).
+  const over = (discBudget && disc >= discBudget) || (scoreBudget && scored >= scoreBudget);
+  const near = !over && budget && total >= budget * 0.8;
   const bar = over ? 'bg-rose-500' : near ? 'bg-amber-500' : 'bg-indigo-500';
-  const tone = over ? 'text-rose-600' : near ? 'text-amber-600' : 'text-zinc-500';
+  const tone = over ? 'text-rose-600' : near ? 'text-amber-600' : 'text-zinc-700';
   const runCost = lastRun && lastRun.cost_usd;
   const runEval = lastRun && (lastRun.evaluated ?? (
     (lastRun.qualified || 0) + (lastRun.needs_review || 0) + (lastRun.disqualified || 0)
   ));
   return (
-    <div className="mt-3 flex flex-wrap items-center gap-3 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 shadow-sm shadow-zinc-900/[0.02]">
-      <Icons.zap className="h-4 w-4 shrink-0 text-zinc-400" />
-      <span className="text-[12.5px] font-medium text-zinc-600">Discovery spend</span>
-      <span className={`text-[12.5px] font-semibold tabular-nums ${tone}`}>
-        ${spent.toFixed(2)}{budget ? ` / $${budget.toFixed(0)}` : ''}
+    <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 shadow-sm shadow-zinc-900/[0.02]">
+      <Icons.dollar className="h-4 w-4 shrink-0 text-zinc-400" />
+      <span className="text-[12.5px] font-medium text-zinc-600">Spend this month</span>
+      <span className={`text-[13px] font-semibold tabular-nums ${tone}`}>
+        ${total.toFixed(2)}{budget ? ` / $${budget.toFixed(0)}` : ''}
       </span>
       {budget > 0 && (
         <div className="hidden h-1.5 w-32 overflow-hidden rounded-full bg-zinc-100 sm:block">
           <div className={`h-full rounded-full transition-all duration-500 ${bar}`} style={{ width: `${pct}%` }} />
         </div>
       )}
+      <span className="text-[11.5px] tabular-nums text-zinc-400">
+        Discovery ${disc.toFixed(2)} <span className="text-zinc-300">incl. Apify</span> · Scored ${scored.toFixed(2)}
+      </span>
       {runEval > 0 && (
         <span className="text-[11.5px] tabular-nums text-indigo-600">
           Last run: {runEval} evaluated{runCost != null ? ` · $${Number(runCost).toFixed(2)}` : ''}
         </span>
       )}
-      <span className="ml-auto text-[11.5px] tabular-nums text-zinc-400">
-        ~${est.toFixed(2)}/company · month to date
-      </span>
       {over ? (
-        <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-600 ring-1 ring-inset ring-rose-100">Budget reached</span>
+        <span className="ml-auto rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-600 ring-1 ring-inset ring-rose-100">Budget reached</span>
       ) : near ? (
-        <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-600 ring-1 ring-inset ring-amber-100">Near budget</span>
-      ) : null}
+        <span className="ml-auto rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-600 ring-1 ring-inset ring-amber-100">Near budget</span>
+      ) : (
+        <span className="ml-auto text-[11px] tabular-nums text-zinc-400">resets monthly</span>
+      )}
     </div>
   );
 }
@@ -298,25 +307,30 @@ function RunActivityLog({ items }) {
   );
 }
 
-// ── RunConfigPopover — cost-controlled run setup (scope + per-source cap) ─────
-// The qualifier costs ~$0.12/company, so a run's spend is (sources × limit).
-// This little form makes that explicit before you spend: pick "Jobs only" or
-// "All sources", set the per-source company cap, see the worst-case estimate.
-function RunConfigPopover({ scope, onScope, limit, onLimit, onRun, onClose }) {
+// ── RunConfigPopover — the "Scan signals" control: scope, cost cap, and the
+// social-listening setup in one surface. One Run, one popover. The qualifier
+// costs ~$0.12/company, so worst-case spend is (sources × cap), shown before
+// you commit. "All signals" also mines the monitored LinkedIn accounts + event
+// keywords; "Jobs only" is the cheap focused pull.
+function RunConfigPopover({ scope, onScope, limit, onLimit, social, onManageSocial, onRun, onClose }) {
   const n = Number(limit) > 0 ? Number(limit) : 0;
   const sources = scope === 'jobs' ? 1 : 4;
   const effective = n || DEFAULT_RUN_LIMIT;     // blank → safe default, never "no cap"
   const estCompanies = effective * sources;
   const estCost = (estCompanies * 0.12).toFixed(2);
+  const includesSocial = scope === 'all';
+  const acc = (social && social.accounts) || 0;
+  const kw = (social && social.keywords) || 0;
   return (
-    <div className="absolute right-0 top-full z-40 mt-2 w-72 rounded-xl border border-zinc-200 bg-white p-3.5 shadow-xl shadow-zinc-900/10">
-      <div className="text-[13px] font-semibold text-zinc-800">Run discovery</div>
+    <div className="absolute right-0 top-full z-40 mt-2 w-80 rounded-xl border border-zinc-200 bg-white p-4 shadow-xl shadow-zinc-900/10">
+      <div className="text-[13px] font-semibold text-zinc-800">Scan signals</div>
       <p className="mt-0.5 text-[11.5px] leading-relaxed text-zinc-500">
-        Pulls the last 24h. Layoffs (WARN) runs only on the scheduled cron.
+        Pulls the last 24h of buying signals: hiring, leadership, M&A and funding
+        {includesSocial ? ', plus LinkedIn engagement and event attendees' : ''}. Layoffs run on the nightly cron.
       </p>
       <label className="mt-3 block text-[12px] font-medium text-zinc-600">Sources</label>
       <div className="mt-1 grid grid-cols-2 gap-1.5">
-        {[['jobs', 'Jobs only'], ['all', 'All sources']].map(([v, lbl]) => (
+        {[['jobs', 'Jobs only'], ['all', 'All signals']].map(([v, lbl]) => (
           <button key={v} onClick={() => onScope(v)}
             className={`rounded-lg px-2.5 py-1.5 text-[12.5px] font-medium ring-1 ring-inset transition-colors ${scope === v ? 'bg-indigo-600 text-white ring-indigo-600' : 'bg-white text-zinc-600 ring-zinc-200 hover:bg-zinc-50'}`}>
             {lbl}
@@ -329,14 +343,30 @@ function RunConfigPopover({ scope, onScope, limit, onLimit, onRun, onClose }) {
       <input type="number" min="1" max="500" value={limit}
         onChange={(e) => onLimit(e.target.value)}
         className="mt-1 w-full rounded-lg border border-zinc-200 px-3 py-1.5 text-[13px] text-zinc-800 focus:border-zinc-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200" />
-      <div className="mt-2.5 rounded-lg bg-zinc-50 px-3 py-2 text-[11.5px] text-zinc-500">
+      <div className="mt-2 rounded-lg bg-zinc-50 px-3 py-2 text-[11.5px] text-zinc-500">
         Up to <span className="font-semibold text-zinc-700">{estCompanies}</span> companies · est <span className="font-semibold text-zinc-700">${estCost}</span>
-        {n === 0 && <span className="text-zinc-400"> · blank uses default cap {DEFAULT_RUN_LIMIT}/source</span>}
+        {n === 0 && <span className="text-zinc-400"> · blank uses {DEFAULT_RUN_LIMIT}/source</span>}
+      </div>
+      {/* Social listening — the setup the "All signals" scan mines. */}
+      <div className="mt-3 overflow-hidden rounded-lg border border-zinc-200">
+        <div className="flex items-center justify-between gap-2 px-3 py-2">
+          <span className="inline-flex items-center gap-1.5 text-[12px] font-medium text-zinc-700">
+            <Icons.leadership className="h-3.5 w-3.5 text-indigo-500" />Social listening
+          </span>
+          <button onClick={onManageSocial}
+            className="text-[12px] font-medium text-indigo-600 transition-colors hover:text-indigo-700">Manage</button>
+        </div>
+        <div className="border-t border-zinc-100 bg-zinc-50/50 px-3 py-1.5 text-[11.5px] text-zinc-400">
+          {acc + kw === 0
+            ? 'No accounts or event keywords yet'
+            : `${acc} ${acc === 1 ? 'account' : 'accounts'} · ${kw} ${kw === 1 ? 'keyword' : 'keywords'}`}
+          {!includesSocial && acc + kw > 0 && <span> · included with All signals</span>}
+        </div>
       </div>
       <div className="mt-3 flex items-center justify-end gap-2">
         <button onClick={onClose} className="rounded-lg px-3 py-1.5 text-[12.5px] font-medium text-zinc-500 transition-colors hover:bg-zinc-100">Cancel</button>
         <button onClick={onRun} className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-[12.5px] font-medium text-white transition-colors hover:bg-indigo-700">
-          <Icons.zap className="h-3.5 w-3.5" />Run
+          <Icons.zap className="h-3.5 w-3.5" />Scan
         </button>
       </div>
     </div>
@@ -402,7 +432,7 @@ function WatchStrip({ parked }) {
                   {c.role && <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[11px] font-medium text-zinc-500">{c.role}</span>}
                   {c.state && <span>{c.state}</span>}
                   {c.sample_url && (
-                    <a href={c.sample_url} target="_blank" rel="noreferrer"
+                    <a href={safeHref(c.sample_url)} target="_blank" rel="noreferrer"
                       className="text-zinc-400 transition-colors hover:text-indigo-600" title="View the open role">
                       <Icons.ext className="h-3.5 w-3.5" />
                     </a>
@@ -470,6 +500,7 @@ function App() {
   const [socialOpen, setSocialOpen] = useState(false);     // Monitored Accounts modal
   const [abmInfo, setAbmInfo] = useState(null);            // { total, uploaded_at, indexed }
   const [parked, setParked] = useState(null);             // jobs stacking watch list
+  const [socialInfo, setSocialInfo] = useState(null);     // { accounts, keywords } for the Scan popover
   const abmInputRef = useRef(null);
   const [tab, setTab] = useState('qualified');
   const [openKey, setOpenKey] = useState(null);
@@ -484,8 +515,14 @@ function App() {
   const [selected, setSelected] = useState(() => new Set());
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  const [autoEnabled, setAutoEnabled] = useState(false);
-  const [scoreHour, setScoreHour] = useState(15);
+  // Persisted so the toggle + run-hour survive a reload (it was resetting to off).
+  const [autoEnabled, setAutoEnabled] = useState(() => localStorage.getItem('autoScoreEnabled') === '1');
+  const [scoreHour, setScoreHour] = useState(() => {
+    const h = parseInt(localStorage.getItem('autoScoreHour') || '', 10);
+    return Number.isFinite(h) ? h : 15;
+  });
+  useEffect(() => { try { localStorage.setItem('autoScoreEnabled', autoEnabled ? '1' : '0'); } catch (_e) { /* ignore */ } }, [autoEnabled]);
+  useEffect(() => { try { localStorage.setItem('autoScoreHour', String(scoreHour)); } catch (_e) { /* ignore */ } }, [scoreHour]);
   const [deadline, setDeadline] = useState(() => window.nextDeadline(15, Date.now()));
   const [now, setNow] = useState(Date.now());
   const [autoOpen, setAutoOpen] = useState(false);
@@ -503,7 +540,9 @@ function App() {
       const tagged = [
         ...qualified.map((c) => ({ ...c, bucket: 'qualified' })),
         ...needsReview.map((c) => ({ ...c, bucket: 'needs_review' })),
-      ].sort((a, b) => new Date(b.qualified_at || b.first_seen_at) - new Date(a.qualified_at || a.first_seen_at));
+        // Rank by buying intent (hottest first); newest qualified breaks ties.
+      ].sort((a, b) => (b.intent_score || 0) - (a.intent_score || 0)
+        || new Date(b.qualified_at || b.first_seen_at) - new Date(a.qualified_at || a.first_seen_at));
       setCompanies(tagged);
       setStats(s);
       // Best-effort: the stacking watch list (parked single-standard companies).
@@ -516,6 +555,19 @@ function App() {
   }
   useEffect(() => { loadAll(); }, []);
   useEffect(() => { window.API.abmSummary().then(setAbmInfo).catch(() => {}); }, []);
+  useEffect(() => { loadSocialInfo(); }, []);
+
+  // Counts for the Scan popover's social-listening summary; refreshed whenever
+  // the setup modal closes so an added account/keyword reflects immediately.
+  function loadSocialInfo() {
+    Promise.all([
+      window.API.socialTargets().catch(() => ({ targets: [] })),
+      window.API.eventKeywords().catch(() => ({ keywords: [] })),
+    ]).then(([t, k]) => setSocialInfo({
+      accounts: (t.targets || []).filter((x) => x.active !== false).length,
+      keywords: (k.keywords || []).filter((x) => x.active !== false).length,
+    })).catch(() => {});
+  }
 
   async function handleAbmUpload(file) {
     if (!file) return;
@@ -594,7 +646,10 @@ function App() {
     // run. Fall back to the default cap so a manual run is always bounded.
     const lim = Number(runLimit) > 0 ? Math.floor(Number(runLimit)) : DEFAULT_RUN_LIMIT;
     const body = { limit: lim };
-    if (runScope === 'jobs') body.sources = ['jobs'];
+    // Jobs-only is the cheap focused pull (no social); All signals scans the
+    // connectors + LinkedIn engagement + event attendees in one run.
+    if (runScope === 'jobs') { body.sources = ['jobs']; body.include_social = false; }
+    else body.include_social = true;
     try {
       const res = await window.API.runDiscovery(body);
       if (res && res.busy) { setDiscoRunning(false); pushToast('A discovery run is already in progress.', 'muted'); return; }
@@ -603,7 +658,7 @@ function App() {
         pushToast(`Discovery budget reached ($${res.month_discovery_cost} of $${res.discovery_budget}). Raise DISCOVERY_MONTHLY_BUDGET or wait.`, 'danger');
         return;
       }
-      const scopeLabel = body.sources ? 'jobs only' : 'all sources';
+      const scopeLabel = body.sources ? 'jobs only' : 'all signals';
       const capLabel = body.limit ? `, ${body.limit}/source` : '';
       pushToast(`Discovery running — ${scopeLabel}${capLabel}…`, 'success');
     } catch (e) { setDiscoRunning(false); pushToast(`Couldn't start: ${e.message}`, 'danger'); }
@@ -664,8 +719,8 @@ function App() {
       await window.API.promote(key);
       removeCompany(key);
       bumpScored();
-      pushToast(`Promoted ${c ? c.name : 'company'} → Scoring`, 'success');
-    } catch (e) { pushToast(`Promote failed: ${e.message}`, 'danger'); }
+      pushToast(`Scoring ${c ? c.name : 'company'}…`, 'success');
+    } catch (e) { pushToast(`Couldn't score ${c ? c.name : 'company'}: ${e.message}`, 'danger'); }
   }
   async function handleDefer(key) {
     const c = companies.find((x) => x.company_key === key);
@@ -693,14 +748,15 @@ function App() {
 
   async function doAutoScore() {
     const { companies: cs, leaving: lv } = stateRef.current;
-    const remaining = cs.filter((c) => c.bucket === 'qualified' && !lv[c.company_key]);
+    // Only HOT leads auto-score — Watch leads stay in Discovery (and self-clean).
+    const remaining = cs.filter((c) => c.bucket === 'qualified' && c.intent_tier === 'hot' && !lv[c.company_key]);
     if (remaining.length === 0) return;
     setOpenKey(null); setRejectFor(null);
     for (const c of remaining) {
       try { await window.API.promote(c.company_key); removeCompany(c.company_key); } catch (e) { /* leave it */ }
     }
     bumpScored();
-    pushToast(`${remaining.length} ${remaining.length === 1 ? 'company' : 'companies'} promoted to Scoring`, 'success');
+    pushToast(`Scoring ${remaining.length} ${remaining.length === 1 ? 'company' : 'companies'}…`, 'success');
   }
   useEffect(() => {
     if (!autoEnabled) return;
@@ -739,7 +795,8 @@ function App() {
   const needsCount = companies.filter((c) => c.bucket === 'needs_review' && !leaving[c.company_key]).length;
   const abmMatchCount = companies.filter((c) => c.bucket === tab && c.abm_match && !leaving[c.company_key]).length;
   const remainingMs = deadline - now;
-  const queuedCount = qualifiedCount;
+  // Auto-score touches only HOT leads, so the countdown counts those — not all qualified.
+  const queuedCount = companies.filter((c) => c.bucket === 'qualified' && c.intent_tier === 'hot' && !leaving[c.company_key]).length;
   const urgent = autoEnabled && remainingMs <= 10 * 60 * 1000 && queuedCount > 0;
   function changeHour(h) { setScoreHour(h); setDeadline(window.nextDeadline(h, Date.now())); }
   function previewCountdown() { setAutoEnabled(true); setDeadline(Date.now() + 12000); setAutoOpen(false); }
@@ -793,14 +850,15 @@ function App() {
                 ) : (
                   <div className="relative">
                     <button onClick={() => setConfirmRun((o) => !o)}
-                      title="Configure and run a discovery pull now (browserless sources)"
+                      title="Scan all signal sources for the last 24h"
                       className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-1.5 text-[13px] font-medium text-white shadow-sm transition-colors hover:bg-indigo-700">
-                      <Icons.zap className="h-4 w-4" />Run
+                      <Icons.zap className="h-4 w-4" />Scan signals
                     </button>
                     {confirmRun && (
                       <RunConfigPopover
                         scope={runScope} onScope={setRunScope}
                         limit={runLimit} onLimit={setRunLimit}
+                        social={socialInfo} onManageSocial={() => { setConfirmRun(false); setSocialOpen(true); }}
                         onRun={handleRunDiscovery} onClose={() => setConfirmRun(false)} />
                     )}
                   </div>
@@ -825,7 +883,7 @@ function App() {
         <main className="mx-auto max-w-6xl px-8 py-8">
           <div className="mb-6">
             <h1 className="text-[24px] font-semibold tracking-tight text-zinc-900">Discovery Panel</h1>
-            <p className="mt-1 text-[14px] text-zinc-500">Review AI-qualified companies and route each one. Promote or reject.</p>
+            <p className="mt-1 text-[14px] text-zinc-500">Review AI-qualified companies and route each one. Score or reject.</p>
           </div>
 
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -835,7 +893,7 @@ function App() {
             <StatTile value={stats.disqualified} label="Disqualified (hidden)" />
           </div>
 
-          <DiscoverySpendMeter spend={spend} lastRun={lastRun} />
+          <SpendMeter spend={spend} lastRun={lastRun} />
           <LastRunSummary lastRun={lastRun} />
 
           <div className="mt-8 overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm shadow-zinc-900/[0.02]">
@@ -854,6 +912,7 @@ function App() {
                   options={[{ value: 'all', label: 'All' }, { value: 'match', label: `On ABM list${abmMatchCount ? ` (${abmMatchCount})` : ''}` }, { value: 'confirmed', label: 'ABM confirmed' }]} />
               </div>
               <div className="flex items-center gap-3">
+                {tab === 'qualified' && <IntentInfo />}
                 <input ref={abmInputRef} type="file" accept=".xlsx" className="hidden"
                   onChange={(e) => { const f = e.target.files[0]; e.target.value = ''; handleAbmUpload(f); }} />
                 <button onClick={() => abmInputRef.current && abmInputRef.current.click()}
@@ -861,12 +920,6 @@ function App() {
                   className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[12.5px] font-medium text-zinc-600 transition-colors hover:bg-zinc-50">
                   <Icons.sparkle className="h-3.5 w-3.5 text-amber-500" />
                   {abmInfo && abmInfo.total ? `ABM list · ${abmInfo.total.toLocaleString()}` : 'Upload ABM list'}
-                </button>
-                <button onClick={() => setSocialOpen(true)}
-                  title="Social listening — manage the LinkedIn accounts + event keywords the Run scans"
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[12.5px] font-medium text-zinc-600 transition-colors hover:bg-zinc-50">
-                  <Icons.leadership className="h-3.5 w-3.5 text-indigo-500" />
-                  Social listening
                 </button>
                 {!loading && visibleCount > 0 && (
                   <label className="inline-flex cursor-pointer items-center gap-1.5 text-[13px] text-zinc-500 select-none">
@@ -918,14 +971,24 @@ function App() {
             ) : visibleCount === 0 ? (
               <EmptyState variant={tab} onRun={() => pushToast('Discovery runs on a schedule', 'muted')} />
             ) : (
-              filtered.map((c) => (
-                <CompanyRow key={c.company_key} company={c} leaving={!!leaving[c.company_key]}
-                  selected={selected.has(c.company_key)}
-                  onToggleSelect={() => toggleSelect(c.company_key)}
-                  onOpen={() => setOpenKey(c.company_key)}
-                  onPromote={() => handlePromote(c.company_key)}
-                  onReject={() => setRejectFor(c)} />
-              ))
+              filtered.map((c, i) => {
+                // The auto-score line: drawn once, before the first Watch lead that
+                // follows a Hot one (qualified tab only) — Hot above, Watch below.
+                const showLine = tab === 'qualified' && c.bucket === 'qualified'
+                  && c.intent_tier === 'watch' && i > 0
+                  && filtered[i - 1].bucket === 'qualified' && filtered[i - 1].intent_tier === 'hot';
+                return (
+                  <React.Fragment key={c.company_key}>
+                    {showLine && <AutoScoreLine />}
+                    <CompanyRow company={c} leaving={!!leaving[c.company_key]}
+                      selected={selected.has(c.company_key)}
+                      onToggleSelect={() => toggleSelect(c.company_key)}
+                      onOpen={() => setOpenKey(c.company_key)}
+                      onPromote={() => handlePromote(c.company_key)}
+                      onReject={() => setRejectFor(c)} />
+                  </React.Fragment>
+                );
+              })
             )}
           </div>
 
@@ -935,6 +998,10 @@ function App() {
             Sorted by most recently evaluated · Disqualified rows appear in Recent evaluations below
           </p>
         </main>
+      ) : view === 'news' ? (
+        <NewsView pushToast={pushToast} />
+      ) : view === 'watch' ? (
+        <WatchView pushToast={pushToast} />
       ) : (
         <ScoredView refreshKey={scoredRefreshKey} pushToast={pushToast} onCount={setScoredCount} />
       )}
@@ -951,7 +1018,7 @@ function App() {
         <ConfirmDeleteModal count={selected.size}
           onCancel={() => setConfirmDelete(false)} onConfirm={handleDeleteSelected} />
       )}
-      {socialOpen && <SocialMonitor onClose={() => setSocialOpen(false)} pushToast={pushToast} />}
+      {socialOpen && <SocialMonitor onClose={() => { setSocialOpen(false); loadSocialInfo(); }} pushToast={pushToast} />}
       <ToastStack toasts={toasts} />
     </div>
   );
@@ -964,18 +1031,29 @@ function App() {
 
 // ── CSV export (client-side, from the already-loaded accounts) ───────────────
 function csvCell(v) {
-  const s = v == null ? '' : String(v);
+  let s = v == null ? '' : String(v);
+  // Excel formula-injection guard: a cell starting =, +, -, @ (or a sneaky
+  // tab/CR) executes as a formula when the export is opened in Excel/Sheets.
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 function segLabel(seg) {
   const m = window.SEGMENT_META && window.SEGMENT_META[seg];
   return (m && m.label) || seg || '';
 }
+// The buying signals that brought an account in (snapshot carried from discovery),
+// flattened for one CSV cell: "job_posting: 3 Coder jobs; leadership_change: new CFO".
+function fmtSignals(signals) {
+  if (!signals || !signals.length) return '';
+  return signals
+    .map((s) => (s.summary ? `${s.signal_type}: ${s.summary}` : s.signal_type))
+    .join('; ');
+}
 function buildAccountsCsv(accounts) {
   const head = ['Account', 'Domain', 'Segment', 'Sub-segment', 'Source', 'Import',
     'Fit', 'Analyst Total', 'Official Total', 'Max', 'Firmographic', 'Technographic',
     'Business Intent', 'Recommendation', 'QA Status', 'QA Notes', 'Scored',
-    'Cost (USD)', 'Key facts'];
+    'Cost (USD)', 'Key facts', 'Signals'];
   const lines = accounts.map((a) => {
     const tier = a.tier || window.tierFor(a.framework, a.total);
     const pillars = window.pillarsFor(a);
@@ -992,6 +1070,7 @@ function buildAccountsCsv(accounts) {
       a.recommendation || '', qa.status || '', qa.notes || '',
       a.scored_at ? window.shortDate(a.scored_at) : '',
       a.cost_usd != null ? a.cost_usd : '', facts,
+      fmtSignals(a.discovery_signals),
     ].map(csvCell).join(',');
   });
   return [head.join(','), ...lines].join('\n');
@@ -1033,6 +1112,7 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
   const [importF, setImportF] = useState('all');
   const [imports, setImports] = useState([]);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [confirmIntros, setConfirmIntros] = useState(false);
   const [selected, setSelected] = useState(() => new Set());   // row-selection for export
   const [openAcc, setOpenAcc] = useState(null);
   const [openLanding, setOpenLanding] = useState(null);
@@ -1136,6 +1216,16 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
     } catch (e) { pushToast(`Couldn't reset: ${e.message}`, 'danger'); }
   }
 
+  async function handleRunAllIntros() {
+    setConfirmIntros(false);
+    try {
+      const res = await window.API.runAllWarmIntros();
+      if (!res || !res.scheduled) { pushToast('All scored accounts already have intros.', 'success'); return; }
+      pushToast(`Finding intros for ${res.scheduled} ${res.scheduled === 1 ? 'account' : 'accounts'}…`, 'success');
+      load(true);
+    } catch (e) { pushToast(`Couldn't start: ${e.message}`, 'danger'); }
+  }
+
   const bandOf = (a) => (a.total != null ? window.tierFor(a.framework, a.total).band : null);
   const withinDate = (iso, key) => {
     if (key === 'all') return true;
@@ -1187,6 +1277,20 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
   const batchRunning = batchKick || !!(stats && stats.batch_running);
   const fitCounts = { high: 0, medium: 0, low: 0, out: 0 };
   scoredOnly.forEach((a) => { const b = bandOf(a); if (b in fitCounts) fitCounts[b] += 1; });
+  // Warm-intros backfill (mirrors the server's _needs): an account needs a run
+  // if it has no intros yet, or it's green/yellow with intros that predate the
+  // school net (schools_enriched falsy). Green/yellow also pay for school
+  // enrichment (~$9/1k profiles, ≤8/account — display estimate; the budget guard
+  // is server-side). Red/low keep their free Apollo list, so they never re-run.
+  const introNeeds = (a) => {
+    const wi = a.warm_intros || {};
+    if (wi.state === 'generating') return false;
+    if (wi.state !== 'ready') return true;
+    return ['high', 'medium'].includes(bandOf(a)) && !wi.schools_enriched;
+  };
+  const introTodo = scoredOnly.filter(introNeeds);
+  const introGY = introTodo.filter((a) => ['high', 'medium'].includes(bandOf(a))).length;
+  const introCost = introGY * 8 * 0.009;
 
   const filteredScoredIds = scoredList.filter((a) => a.state === 'scored').map((a) => a.account_id);
   const allFilteredSelected = filteredScoredIds.length > 0 && filteredScoredIds.every((id) => selected.has(id));
@@ -1217,6 +1321,18 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
                 <Icons.download className="h-4 w-4" />Export{selected.size > 0 ? ` ${selected.size}` : ''}
               </button>
             )}
+            {scoredOnly.length > 0 && introTodo.length > 0 && (confirmIntros ? (
+              <span className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2 py-1.5 text-[12.5px]">
+                <span className="px-1 text-zinc-500">Find intros for {introTodo.length}? {introGY > 0 ? `~$${introCost.toFixed(2)}` : 'free'}</span>
+                <button onClick={() => setConfirmIntros(false)} className="rounded-md px-2 py-1 font-medium text-zinc-500 transition-colors hover:bg-zinc-100">Cancel</button>
+                <button onClick={handleRunAllIntros} className="rounded-md bg-zinc-900 px-2.5 py-1 font-medium text-white transition-colors hover:bg-zinc-800">Run</button>
+              </span>
+            ) : (
+              <button onClick={() => setConfirmIntros(true)} title="Find ICP decision-makers for every scored account (Apollo, free); green/yellow also get school enrichment for warm paths"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[13px] font-medium text-zinc-500 transition-colors hover:bg-zinc-50 hover:text-zinc-700">
+                <Icons.leadership className="h-4 w-4" />Find intros
+              </button>
+            ))}
             {scoredOnly.length > 0 && (confirmReset ? (
               <span className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2 py-1.5 text-[12.5px]">
                 <span className="px-1 text-zinc-500">Clear all scores?</span>
@@ -1280,7 +1396,7 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
             <div className="flex flex-col items-center justify-center py-24 text-center">
               <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-zinc-100 text-zinc-400"><Icons.layers className="h-7 w-7" /></div>
               <h3 className="mt-5 text-[15px] font-semibold text-zinc-900">No scored accounts yet</h3>
-              <p className="mt-1.5 max-w-xs text-[13px] text-zinc-500">Promote a company from Discovery, or import a CSV to start scoring.</p>
+              <p className="mt-1.5 max-w-xs text-[13px] text-zinc-500">Score a company from Discovery, or import a CSV to start scoring.</p>
               <button onClick={() => setImporting(true)} className="mt-5 inline-flex items-center gap-2 rounded-lg bg-zinc-900 px-3.5 py-2 text-[13px] font-medium text-white transition-colors hover:bg-zinc-800">
                 <Icons.upload className="h-4 w-4" />Import accounts
               </button>
@@ -1294,7 +1410,7 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
             ))
           )}
         </div>
-        <p className="mt-4 text-center text-[12px] text-zinc-400">Promoted accounts and CSV imports converge here · QA runs independently on every score</p>
+        <p className="mt-4 text-center text-[12px] text-zinc-400">Scored accounts and CSV imports converge here · QA runs independently on every score</p>
       </main>
 
       <ScoreDrawer account={openAccount} onClose={() => setOpenAcc(null)}

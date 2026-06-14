@@ -167,3 +167,37 @@ async def test_batch_continues_when_one_account_overheats(monkeypatch, tmp_path)
     assert b["state"] == "scored"                           # the other still completes
     # both scorer steps recorded as cost_events
     assert sum(1 for e in repo._events if e["step"] == "score") == 2
+
+
+def test_fail_orphaned_operations_sweeps_running_rows(tmp_path):
+    """A 'running' op at boot has no live task behind it (ops finish in a
+    finally) — the startup sweep must fail it so the feed shows no phantom."""
+    repo = _repo(tmp_path)
+    spend_guard.Operation(repo, "discovery_manual", estimated_usd=1.0)  # row: running
+
+    swept = repo.fail_orphaned_operations()
+
+    assert swept == 1
+    row = repo.recent_operations(limit=1)[0]
+    assert row["status"] == "failed"
+    assert row["finished_at"] is not None
+
+    # A finished op is left alone on subsequent sweeps.
+    op2 = spend_guard.Operation(repo, "news_refresh", estimated_usd=0.1)
+    op2.finish()
+    assert repo.fail_orphaned_operations() == 0
+
+
+def test_zero_estimate_means_no_envelope_not_overheat(tmp_path):
+    """An op with no estimate (news refresh, uncapped pull) must not be branded
+    'overheated' by any nonzero spend — only the absolute hard cap applies."""
+    repo = _repo(tmp_path)
+    op = spend_guard.Operation(repo, "news_refresh", estimated_usd=0.0)
+    op.record(step="news_enrich", actual_usd=0.07, model="news")
+    op.finish()
+    assert op.status == "completed"
+
+    over = spend_guard.Operation(repo, "news_refresh", estimated_usd=0.0)
+    over.record(step="news_enrich", actual_usd=spend_guard.op_hard_cap() + 1, model="news")
+    over.finish()
+    assert over.status == "overheated"     # the hard cap still guards

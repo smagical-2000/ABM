@@ -109,6 +109,24 @@ class DiscoveryRepository(Protocol):
         """
         ...
 
+    def enter_needs_review(self, company_key: str) -> dict | None:
+        """Demote a stale qualified lead into the needs-review queue (the
+        lifecycle sweep). Flips icp_status qualified -> needs_review only when it
+        is currently qualified (idempotent); review_status stays pending. Starts
+        the review clock (entered_review_at) with origin 'decayed'. Returns the
+        updated row, or None if not stored / not currently qualified.
+        """
+        ...
+
+    def promote_from_review(self, company_key: str) -> dict | None:
+        """Lift a re-heated lead back out of needs-review into qualified (the
+        lifecycle sweep, when intent reaches Hot). Flips icp_status
+        needs_review -> qualified only when currently needs_review (idempotent);
+        clears the review clock; review_status untouched so a pending lead simply
+        rejoins Discovery. Returns the updated row, or None if not applicable.
+        """
+        ...
+
     def delete(self, keys: list[str] | None) -> int:
         """Delete companies (and their signals) by normalized key.
 
@@ -167,6 +185,27 @@ class DiscoveryRepository(Protocol):
 
     def abm_targets_summary(self) -> dict:
         """Counts for the UI: total, by segment, last upload time."""
+        ...
+
+    def founder_profiles(self) -> list[dict]:
+        """Cached founder LinkedIn profiles for warm-intro matching."""
+        ...
+
+    def replace_founder_profiles(self, profiles: list[dict]) -> int:
+        """Replace the cached founder profiles wholesale; return rows stored."""
+        ...
+
+    def news_urls(self) -> list[str]:
+        """URLs already stored — lets the news runner enrich only NEW articles."""
+        ...
+
+    def save_news_items(self, items: list[dict]) -> int:
+        """Upsert news items (keyed by url); return how many were new."""
+        ...
+
+    def news_items(self, *, topics: tuple[str, ...] | None = None,
+                   days: int | None = None, limit: int = 200) -> list[dict]:
+        """Recent relevant news, newest first; optional topic / day-window filter."""
         ...
 
     def social_targets(self) -> list[dict]:
@@ -257,6 +296,7 @@ class JsonFileRepository:
 
         # Upsert the verdict (newest qualification wins). to_status() keeps
         # operational errors out of the genuine review/disqualified queues.
+        prior_status = existing.get("icp_status")
         existing.update({
             "display_name": candidate.company_name,
             "domain": q.domain,                 # for domain-first promotion match
@@ -271,6 +311,16 @@ class JsonFileRepository:
             "decided_by": q.decided_by,
             "qualified_at": now,
         })
+
+        # Review-TTL clock, mirroring the SQL upsert: entering review starts it
+        # (origin 'ingest'), staying keeps it, leaving (any other verdict) clears it.
+        if existing["icp_status"] == "needs_review":
+            if prior_status != "needs_review" or not existing.get("entered_review_at"):
+                existing["entered_review_at"] = now
+            existing["review_origin"] = existing.get("review_origin") or "ingest"
+        else:
+            existing["entered_review_at"] = None
+            existing["review_origin"] = None
 
         # Lean firmo from the representative signal.
         rep_payload = candidate.primary_signal.payload
@@ -362,6 +412,26 @@ class JsonFileRepository:
             row["promoted_at"] = now
         if review_status == "rejected":
             row["rejection_reason"] = reason
+        self._flush()
+        return row
+
+    def enter_needs_review(self, company_key: str) -> dict | None:
+        row = self._store.get(company_key)
+        if row is None or row.get("icp_status") != "qualified":
+            return None
+        row["icp_status"] = "needs_review"
+        row["entered_review_at"] = datetime.now(UTC).isoformat()
+        row["review_origin"] = "decayed"
+        self._flush()
+        return row
+
+    def promote_from_review(self, company_key: str) -> dict | None:
+        row = self._store.get(company_key)
+        if row is None or row.get("icp_status") != "needs_review":
+            return None
+        row["icp_status"] = "qualified"
+        row["entered_review_at"] = None
+        row["review_origin"] = None
         self._flush()
         return row
 
@@ -532,6 +602,59 @@ class JsonFileRepository:
             "uploaded_at": doc.get("uploaded_at"),
         }
 
+    # ── market-intelligence news (sidecar file) ──────────────────────
+
+    def _news_path(self) -> Path:
+        return self._path.with_name("news_items.json")
+
+    def _news_store(self) -> dict[str, dict]:
+        p = self._news_path()
+        if not p.exists():
+            return {}
+        try:
+            return json.loads(p.read_text())
+        except json.JSONDecodeError:
+            return {}
+
+    def news_urls(self) -> list[str]:
+        return list(self._news_store().keys())
+
+    def save_news_items(self, items: list[dict]) -> int:
+        store = self._news_store()
+        new = 0
+        for it in items:
+            url = it.get("url")
+            if not url:
+                continue
+            if url not in store:
+                new += 1
+            store[url] = it
+        # Cap at the 500 most recent so the sidecar can't grow without bound.
+        if len(store) > 500:
+            kept = sorted(store.values(),
+                          key=lambda r: r.get("published_at") or r.get("fetched_at") or "",
+                          reverse=True)[:500]
+            store = {r["url"]: r for r in kept}
+        p = self._news_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(json.dumps(store, default=str))
+        tmp.replace(p)
+        return new
+
+    def news_items(self, *, topics=None, days=None, limit=200) -> list[dict]:
+        rows = [r for r in self._news_store().values() if r.get("relevant", True)]
+        if topics:
+            tset = set(topics)
+            rows = [r for r in rows if r.get("topic") in tset]
+        if days:
+            cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+            rows = [r for r in rows
+                    if (r.get("published_at") or r.get("fetched_at") or "") >= cutoff]
+        rows.sort(key=lambda r: (r.get("get_behind") or 0,
+                                 r.get("published_at") or r.get("fetched_at") or ""), reverse=True)
+        return rows[:limit]
+
     # ── monitored social accounts (sidecar file) ─────────────────────
 
     def _social_path(self) -> Path:
@@ -555,6 +678,28 @@ class JsonFileRepository:
 
     def social_targets(self) -> list[dict]:
         return self._social_targets()
+
+    # ── founder profiles (warm intros, sidecar file) ─────────────────
+
+    def _founders_path(self) -> Path:
+        return self._path.with_name("founder_profiles.json")
+
+    def founder_profiles(self) -> list[dict]:
+        p = self._founders_path()
+        if not p.exists():
+            return []
+        try:
+            return json.loads(p.read_text()).get("profiles", [])
+        except json.JSONDecodeError:
+            return []
+
+    def replace_founder_profiles(self, profiles: list[dict]) -> int:
+        p = self._founders_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(json.dumps({"profiles": profiles}, default=str))
+        tmp.replace(p)
+        return len(profiles)
 
     def upsert_social_target(self, target: dict) -> dict:
         targets = self._social_targets()

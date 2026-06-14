@@ -39,6 +39,138 @@ function QAVerdict({ qa }) {
   );
 }
 
+// ── WarmIntrosSection — ICP decision-makers + founder warm paths ─────────────
+// On demand (a small Apify spend per run, no LLM). Self-polls while generating
+// so the drawer resolves live; results persist on the account (warm_intros).
+// Paths are deterministic profile overlaps with evidence — never inferred.
+const PATH_BADGE = {
+  engaged: { label: 'Engaged with Magical', cls: 'bg-violet-50 text-violet-700 ring-violet-100' },
+  shared_employer: { label: 'Shared employer', cls: 'bg-indigo-50 text-indigo-700 ring-indigo-100' },
+  shared_school: { label: 'Shared school', cls: 'bg-teal-50 text-teal-700 ring-teal-100' },
+};
+
+function WarmIntrosSection({ account }) {
+  const [wi, setWi] = React.useState(account.warm_intros || null);
+  const [kicking, setKicking] = React.useState(false);
+  React.useEffect(() => {
+    setWi(account.warm_intros || null);
+    setKicking(false);
+  }, [account.account_id]);
+  const generating = kicking || (wi && wi.state === 'generating');
+
+  React.useEffect(() => {
+    if (!generating) return;
+    const id = setInterval(() => {
+      window.API.account(account.account_id).then((fresh) => {
+        const w = fresh && fresh.warm_intros;
+        if (w && w.state !== 'generating') { setWi(w); setKicking(false); }
+      }).catch(() => {});
+    }, 3000);
+    return () => clearInterval(id);
+  }, [generating, account.account_id]);
+
+  async function kick() {
+    setKicking(true);
+    try { await window.API.findWarmIntros(account.account_id); }
+    catch (e) { setKicking(false); setWi({ state: 'error', error: e.message }); }
+  }
+
+  const contacts = (wi && wi.contacts) || [];
+  const warmCount = (wi && wi.warm_count) || 0;
+  // With no warm path on anyone, this is just a decision-maker list — drop the
+  // warm framing (heading, per-row "no path", "0 warm of N" footer) so it reads clean.
+  const heading = wi && wi.state === 'ready' && contacts.length > 0 && warmCount === 0
+    ? 'Decision-makers' : 'Warm intros';
+  return (
+    <div className="mt-7">
+      <div className="mb-3 flex items-center gap-2">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">{heading}</span>
+        <span className="h-px flex-1 bg-zinc-100" />
+        {wi && wi.state === 'ready' && (
+          <button onClick={kick} title="Re-run the search"
+            className="text-zinc-300 transition-colors hover:text-indigo-600">
+            <Icons.refresh className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+
+      {generating ? (
+        <div className="flex items-center gap-2.5 rounded-xl border border-zinc-200 bg-zinc-50/60 px-4 py-3.5 text-[13px] text-zinc-500">
+          <Icons.refresh className="h-4 w-4 animate-spin text-indigo-500" />
+          Finding decision-makers and matching the founders' networks…
+        </div>
+      ) : wi && wi.state === 'ready' ? (
+        contacts.length === 0 ? (
+          <p className="text-[13px] text-zinc-400">No Director-and-above contacts surfaced — re-run later or check the account name.</p>
+        ) : (
+          <div className="rounded-xl border border-zinc-200">
+            {contacts.map((c, i) => {
+              const best = (c.paths || [])[0];
+              const m = best && (PATH_BADGE[best.kind] || PATH_BADGE.shared_employer);
+              const loc = c.location ? ` · ${c.location.split(',')[0]}` : '';
+              return (
+                <div key={i} className={`border-b border-zinc-100 px-4 py-3 last:border-0 ${best ? 'bg-amber-50/20' : ''}`}>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      {c.linkedin_url ? (
+                        <a href={safeHref(c.linkedin_url)} target="_blank" rel="noreferrer"
+                          className="truncate text-[13.5px] font-semibold text-zinc-800 underline-offset-2 hover:text-indigo-600 hover:underline">
+                          {c.name}
+                        </a>
+                      ) : <span className="truncate text-[13.5px] font-semibold text-zinc-800">{c.name}</span>}
+                      {c.linkedin_url && <Icons.ext className="h-3 w-3 shrink-0 text-zinc-300" />}
+                    </div>
+                    {m && (
+                      <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10.5px] font-semibold ring-1 ring-inset ${m.cls}`}>
+                        {m.label}
+                      </span>
+                    )}
+                  </div>
+                  {c.title && <div className="mt-0.5 truncate text-[12.5px] text-zinc-500">{c.title}{loc}</div>}
+                  {c.schools && c.schools.length > 0 && (
+                    <div className="mt-0.5 truncate text-[11.5px] text-zinc-400">
+                      <span className="text-zinc-300">Alma mater · </span>{c.schools.join(' · ')}
+                    </div>
+                  )}
+                  {/* The linkage — shown only when there IS a warm path (the whole
+                      point). Direct contacts stay clean; the name links to LinkedIn. */}
+                  {best && (
+                    <div className="mt-1 flex items-start gap-1.5 text-[12px] text-amber-700">
+                      <Icons.arrowRight className="mt-0.5 h-3 w-3 shrink-0" />
+                      <span>{best.kind === 'engaged' ? '' : `Ask ${best.founder} — `}{best.evidence}</span>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            <div className="flex items-center justify-between bg-zinc-50/60 px-4 py-2 text-[11.5px] text-zinc-400">
+              <span>{warmCount > 0
+                ? `${warmCount} warm of ${contacts.length} · ${wi.source === 'apollo' ? 'Apollo' : 'LinkedIn'} · vs ${(wi.founders_used || []).length || 3} founders`
+                : `${contacts.length} decision-maker${contacts.length === 1 ? '' : 's'} · no warm paths · ${wi.source === 'apollo' ? 'Apollo' : 'LinkedIn'}`}</span>
+              {wi.generated_at && <span title={wi.generated_at}>{relativeTime(wi.generated_at)}</span>}
+            </div>
+          </div>
+        )
+      ) : (
+        <div className="rounded-xl border border-zinc-200 bg-zinc-50/40 px-4 py-3.5">
+          <p className="text-[13px] leading-relaxed text-zinc-500">
+            Find the ICP decision-makers at {account.name} and rank them by warmth
+            against the founders' networks — engagement with Magical's posts, shared
+            employers, shared schools. Evidence on every path.
+          </p>
+          {wi && wi.state === 'error' && (
+            <p className="mt-2 text-[12.5px] text-rose-600">Last run failed: {wi.error || 'unknown error'}</p>
+          )}
+          <button onClick={kick}
+            className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 px-3.5 py-2 text-[12.5px] font-medium text-white transition-colors hover:bg-zinc-800">
+            <Icons.leadership className="h-4 w-4" />Find warm intros
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ScoreDrawer({ account, onClose, onRescore, onOpenLanding }) {
   const open = !!account;
   const animate = typeof document === 'undefined' || document.visibilityState !== 'hidden';
@@ -178,6 +310,9 @@ function ScoreDrawer({ account, onClose, onRescore, onOpenLanding }) {
                 </div>
               </div>
 
+              {/* Warm intros — decision-makers + founder paths (scored only) */}
+              {a.state === 'scored' && <WarmIntrosSection account={a} />}
+
               {/* Known facts — carried into the scorer so it does not re-research */}
               {a.firmographics && Object.keys(a.firmographics).length > 0 && (
                 <div className="mt-7">
@@ -203,7 +338,7 @@ function ScoreDrawer({ account, onClose, onRescore, onOpenLanding }) {
                     className="flex items-center justify-between gap-3 rounded-xl border border-zinc-200 px-4 py-3 transition-colors hover:bg-zinc-50 hover:border-zinc-300">
                     <div className="flex items-center gap-2.5 text-[13px] text-zinc-600">
                       <window.Icons.compass className="h-4 w-4 text-zinc-400" />
-                      Promoted from Discovery
+                      From Discovery
                     </div>
                     <span className="inline-flex items-center gap-1 text-[12px] text-zinc-400">View discovery signals<Icons.arrowRight className="h-3.5 w-3.5" /></span>
                   </a>

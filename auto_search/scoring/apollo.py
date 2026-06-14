@@ -107,3 +107,86 @@ def _shape(found: list[dict], enriched: list) -> list[dict]:
             "linkedin": (person.get("linkedin_url") or "").strip(),
         })
     return out
+
+
+# ── decision-maker contacts for warm intros ───────────────────────────
+# Seniority-filtered so we get actual decision-makers (CFO / CIO / VP RevCycle /
+# Director), not the "Revenue Cycle Specialist" the title keyword alone matches.
+# We also carry employment_history (with years) for founder-overlap matching.
+_INTRO_SENIORITIES = ["c_suite", "vp", "director", "owner", "founder", "partner", "head"]
+_INTRO_TITLES = [
+    "revenue cycle", "patient access", "patient financial", "finance",
+    "information", "digital", "transformation", "innovation", "operations",
+    "analytics", "utilization management", "managed care",
+]
+
+
+def _intro_max() -> int:
+    return max(1, int(os.getenv("INTROS_MAX_CONTACTS", "8")))
+
+
+async def contacts_for_intros(domain: str | None) -> list[dict]:
+    """Senior decision-makers at `domain` with employment history, for warm
+    intros: [{name, title, linkedin, city, state, employment_history:[...]}].
+
+    [] when Apollo is unconfigured, the domain is missing, or anything fails -
+    the caller then falls back to the Apify people search. Apollo is free, so
+    this carries no recorded cost.
+    """
+    key = _key()
+    if not key or not domain:
+        return []
+    headers = {"X-Api-Key": key, "Content-Type": "application/json"}
+    cap = _intro_max()
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT, headers=headers) as client:
+            r = await client.post(f"{_BASE}/mixed_people/api_search", json={
+                "q_organization_domains_list": [domain],
+                "person_seniorities": _INTRO_SENIORITIES,
+                "person_titles": _INTRO_TITLES,
+                "per_page": cap + 4, "page": 1,
+            })
+            if r.status_code != 200:
+                logger.warning("Apollo intro search %s -> HTTP %s", domain, r.status_code)
+                return []
+            found = (r.json() or {}).get("people") or []
+            enriched = await asyncio.gather(
+                *(_enrich(client, p.get("id")) for p in found[:cap]),
+                return_exceptions=True,
+            )
+            return _shape_rich(found, enriched)
+    except Exception as e:  # noqa: BLE001 — never break warm intros
+        logger.warning("Apollo intro contacts failed for %s: %s", domain, e)
+        return []
+
+
+def _shape_rich(found: list[dict], enriched: list) -> list[dict]:
+    out: list[dict] = []
+    seen: set[str] = set()
+    for base, full in zip(found, enriched, strict=False):
+        person = full if isinstance(full, dict) else {}
+        name = (person.get("name")
+                or " ".join(x for x in (base.get("first_name"), base.get("last_name")) if x)
+                or "").strip()
+        title = (person.get("title") or base.get("title") or "").strip()
+        if not name or not title:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "name": name,
+            "title": title,
+            "linkedin": (person.get("linkedin_url") or "").strip(),
+            "city": person.get("city"),
+            "state": person.get("state"),
+            "employment_history": [
+                {"org": e.get("organization_name"), "title": e.get("title"),
+                 "start": e.get("start_date"), "end": e.get("end_date"),
+                 "current": bool(e.get("current"))}
+                for e in (person.get("employment_history") or [])
+                if e.get("organization_name")
+            ],
+        })
+    return out

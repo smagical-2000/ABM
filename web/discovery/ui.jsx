@@ -1,7 +1,9 @@
 // ── Helpers ───────────────────────────────────────────────────────────────
 function relativeTime(iso) {
   const then = new Date(iso).getTime();
-  const diff = Math.max(0, window.NOW - then);
+  // Date.now() per call — a frozen page-load timestamp makes every "2h ago"
+  // drift stale the longer the tab stays open.
+  const diff = Math.max(0, Date.now() - then);
   const min = Math.round(diff / 60000);
   if (min < 60) return min <= 1 ? 'just now' : `${min}m ago`;
   const hr = Math.round(min / 60);
@@ -10,6 +12,14 @@ function relativeTime(iso) {
   if (d < 30) return `${d}d ago`;
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
+// Only ever link out to a real web URL. Signal/news/LLM data supplies these
+// hrefs, so an off-scheme value (javascript:, data:) must render an inert link.
+function safeHref(url) {
+  const s = (url || '').trim();
+  return /^https?:\/\//i.test(s) ? s : undefined;
+}
+window.safeHref = safeHref;
+
 function shortDate(iso) {
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
@@ -196,9 +206,11 @@ function StackedHiringPill({ count }) {
 }
 window.StackedHiringPill = StackedHiringPill;
 
-// ── SignalChips — render a company's signals, grouping job postings by role ──
-// Non-job signals stay one-chip-each; job postings collapse to per-role counts
-// so a company hiring eight coders reads "8 Coder jobs", not eight rows.
+// ── SignalChips — one hiring headline per row, never two for the same jobs ───
+// Non-job signals stay one chip each. Job postings collapse to a SINGLE row
+// element: a stacked build-out (2+ open reqs) reads as the amber "N RCM roles
+// open" pill; a lone posting shows its role chip. The full per-role breakdown
+// ("Revenue Cycle · 3 openings") lives in the drawer, so the row stays clean.
 function SignalChips({ signals }) {
   const jobs = signals.filter((s) => s.signal_type === 'job_posting');
   const others = signals.filter((s) => s.signal_type !== 'job_posting');
@@ -207,8 +219,9 @@ function SignalChips({ signals }) {
   return (
     <>
       {others.map((s, i) => <SignalChip key={`o${i}`} signal={s} />)}
-      {stacked && <StackedHiringPill count={jobs.length} />}
-      {roles.map((r, i) => <JobRoleChip key={`j${i}`} role={r.role} count={r.items.length} />)}
+      {stacked
+        ? <StackedHiringPill count={jobs.length} />
+        : roles.map((r, i) => <JobRoleChip key={`j${i}`} role={r.role} count={r.items.length} />)}
     </>
   );
 }

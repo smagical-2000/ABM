@@ -134,6 +134,26 @@ SELECT dc.id, 'signalbase', 'leadership_change', 'uihot-cfo', 'New CFO appointed
 FROM discovery_companies dc WHERE dc.normalized_name='uihothealth'
 ON CONFLICT (source, source_external_id) DO NOTHING;
 
+-- A QUALIFIED lone-standard hire (1 standard role, nothing stronger) → is_watchlist:
+-- HIDDEN from Discovery, shown in the Watch list "Qualified · low intent" section.
+INSERT INTO discovery_companies
+  (normalized_name, display_name, domain, icp_status, segment, confidence,
+   reasoning, hq_state, qualified_at, first_seen_at)
+VALUES
+  ('uiwatchclinic','UI Watch Clinic','uiwatch.example','qualified','specialty',0.80,
+   'Single standard role — low intent.','OH', now()-interval '2 hours', now()-interval '2 hours')
+ON CONFLICT (normalized_name) DO UPDATE SET
+  icp_status=EXCLUDED.icp_status, qualified_at=EXCLUDED.qualified_at;
+
+INSERT INTO discovery_signals
+  (company_id, source, signal_type, source_external_id, summary,
+   signal_strength, observed_at, payload)
+SELECT dc.id, 'indeed', 'job_posting', 'uiwatch-biller', 'Hiring: Medical Biller', 0.66,
+       now()-interval '1 day',
+       '{"role":"Biller","tier":"standard","job_title":"Medical Biller","job_url":"https://example.com/wb"}'::jsonb
+FROM discovery_companies dc WHERE dc.normalized_name='uiwatchclinic'
+ON CONFLICT (source, source_external_id) DO NOTHING;
+
 -- News-to-plays: ranked by get_behind, with a "Get behind" pill + "The play".
 INSERT INTO news_items
   (url, title, source, published_at, topic, why_it_matters, get_behind, play, relevant, fetched_at)
@@ -354,3 +374,57 @@ def test_social_listening_panel_opens(page):
     page.wait_for_selector("text=Event keywords", timeout=10_000)   # the panel's section
     assert page.locator("text=Monitored accounts").count() > 0       # accounts section header
     assert page.locator("text=Back-fill").count() > 0                # the reframed scan
+
+
+# ── this session's features: watch list, Discovery filter, cost, auto-score ──
+
+
+def test_every_tab_mounts_without_console_errors(page):
+    """Each nav tab renders cleanly — catches a white-screen on any tab, including
+    the new Watch list (a fresh babel-compiled file)."""
+    for tab in ("Discovery", "Scored", "News", "Watch list"):
+        page.click(f"text={tab}")
+        page.wait_for_timeout(700)
+        real = [e for e in page.console_errors
+                if not any(x in e.lower() for x in ("favicon", "tailwind", "cdn", "font"))]
+        assert not real, f"console errors on {tab}: {real[:5]}"
+
+
+def test_watch_list_tab_shows_qualified_and_parked(page):
+    """The Watch list tab surfaces both kinds: a qualified-but-low-intent lead and a
+    parked (not-yet-qualified) lead."""
+    page.click("text=Watch list")
+    page.wait_for_selector("text=UI Watch Clinic", timeout=10_000)   # qualified low-intent
+    assert page.locator("text=UI Solo Clinic").count() > 0           # parked, not qualified
+
+
+def test_discovery_hides_lone_standard_hire(page):
+    """The Discovery filter: a qualified single-standard-role company is NOT in the
+    live Discovery list (it lives on the Watch list); a stacked company still is.
+
+    Scope to the live panel only — the 'Recent evaluations' audit feed at the
+    bottom intentionally shows EVERY recent decision (incl. watch-listed +
+    disqualified), so the whole-body text would (correctly) contain it there."""
+    page.click("text=Discovery")
+    page.wait_for_selector("text=UI Stack Health System", timeout=10_000)
+    panel = page.inner_text("body").split("Recent evaluations")[0]
+    assert "UI Stack Health System" in panel         # stacked → stays in Discovery
+    assert "UI Watch Clinic" not in panel            # lone standard → on the Watch list
+
+
+def test_unified_spend_meter_renders(page):
+    """One spend area (discovery incl. Apify + scored) against the combined budget."""
+    page.click("text=Discovery")
+    page.wait_for_selector("text=Spend this month", timeout=10_000)
+    assert page.get_by_text("resets monthly", exact=False).count() > 0
+
+
+def test_autoscore_toggle_persists_across_reload(page):
+    """The fix: auto-score on/off survives a reload (localStorage), instead of
+    silently resetting to off."""
+    page.click("text=Discovery")
+    page.wait_for_selector("text=Auto-score off", timeout=10_000)    # starts off
+    page.evaluate("localStorage.setItem('autoScoreEnabled', '1')")
+    page.reload(wait_until="networkidle")
+    page.wait_for_selector("text=Scored", timeout=20_000)            # app remounted
+    assert page.get_by_text("Auto-score off", exact=False).count() == 0  # read back as ON

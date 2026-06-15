@@ -18,6 +18,7 @@ const KIND = {
   click:          { label: 'Click',   dot: 'bg-sky-400' },
   reply:          { label: 'Reply',   dot: 'bg-emerald-400' },
   meeting_booked: { label: 'Meeting', dot: 'bg-indigo-500' },
+  podcast_lead:   { label: 'Podcast', dot: 'bg-violet-500' },
 };
 const kindOf = (k) => KIND[k] || { label: k || 'Touch', dot: 'bg-zinc-300' };
 
@@ -309,7 +310,7 @@ function EngagementView({ pushToast }) {
         <div>
           <h1 className="text-[24px] font-semibold tracking-tight text-zinc-900">Engagement</h1>
           <p className="mt-1 text-[14px] text-zinc-500">
-            Reply.io engagement matched to your scored + ABM accounts, scored into heat.
+            Reply.io + podcast engagement matched to your scored + ABM accounts, scored into heat.
             {lastSync && lastSync.last_synced_at && <span> Last synced {relativeTime(lastSync.last_synced_at)}.</span>}
           </p>
         </div>

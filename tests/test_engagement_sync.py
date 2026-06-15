@@ -107,3 +107,67 @@ async def test_run_sync_records_failure(tmp_path):
         await sync_mod.run_sync(engagement_repo=repo, scoring_repo=_FakeScoring(),
                                 discovery_repo=_FakeDiscovery(), client=_BoomClient())
     assert repo.get_sync_state()["status"] == "failed"
+
+
+# ── podcast sync (same source-agnostic cross + store path) ──────────────
+
+
+def _podcast_rows():
+    return [
+        {"Submit Date": "2026-02-01 00:00:00", "Work Email": "a@christushealth.org",
+         "ICP": "Yes", "Account Name": "CHRISTUS Health", "Lead Form": "Podcast Vanessa"},
+        {"Submit Date": "2026-02-02 00:00:00", "Work Email": "d@christushealth.org",
+         "ICP": "Yes", "Account Name": ""},
+        {"Submit Date": "2026-02-03 00:00:00", "Work Email": "b@newporthealthcare.com",
+         "ICP": "Maybe", "Account Name": ""},
+        {"Submit Date": "2026-02-04 00:00:00", "Work Email": "c@randomco.com",
+         "ICP": "Yes", "Account Name": ""},
+        {"Submit Date": "2026-02-05 00:00:00", "Work Email": "skip@x.com", "ICP": "No"},
+    ]
+
+
+def test_run_podcast_sync_crosses_and_scores(tmp_path):
+    repo = EngagementJsonRepository(path=str(tmp_path / "pod.json"))
+    stats = sync_mod.run_podcast_sync(
+        engagement_repo=repo, scoring_repo=_FakeScoring(), discovery_repo=_FakeDiscovery(),
+        rows=_podcast_rows(), now="2026-06-14T00:00:00Z")
+
+    assert stats["contacts"] == 4                      # Yes/Maybe with email (No dropped)
+    assert stats["matched_contacts"] == 3 and stats["unresolved_contacts"] == 1
+
+    accts = {a["account_id"]: a for a in repo.engaged_accounts()}
+    assert accts["acc_christus"]["score"] == 8         # two podcast leads x 4 (scored)
+    assert accts["abm_newporthealthcare"]["score"] == 4  # one lead (ABM-only)
+    assert not any(a.startswith("Random") for a in accts)  # unmatched -> Resolve, not engaged
+    assert repo.get_sync_state("podcast")["status"] == "success"
+
+
+def test_run_podcast_sync_is_idempotent(tmp_path):
+    repo = EngagementJsonRepository(path=str(tmp_path / "pod2.json"))
+    first = sync_mod.run_podcast_sync(
+        engagement_repo=repo, scoring_repo=_FakeScoring(), discovery_repo=_FakeDiscovery(),
+        rows=_podcast_rows(), now="2026-06-14T00:00:00Z")
+    second = sync_mod.run_podcast_sync(
+        engagement_repo=repo, scoring_repo=_FakeScoring(), discovery_repo=_FakeDiscovery(),
+        rows=_podcast_rows(), now="2026-06-14T00:00:00Z")
+    assert first["new_events"] == 4 and second["new_events"] == 0   # re-sync adds nothing
+    # podcast + replyio keep independent sync cursors
+    assert repo.get_sync_state("podcast")["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_podcast_and_replyio_coexist_on_same_account(tmp_path):
+    repo = EngagementJsonRepository(path=str(tmp_path / "pod3.json"))
+    # email reply (6) on CHRISTUS via Reply.io...
+    activity = [{"contactId": 1, "company": "CHRISTUS Health", "email": "g@christushealth.org",
+                 "deliveryDate": "2026-06-05T00:00:00Z", "isDelivered": True, "isReplied": True}]
+    await sync_mod.run_sync(
+        engagement_repo=repo, scoring_repo=_FakeScoring(), discovery_repo=_FakeDiscovery(),
+        client=_FakeClient([], activity), max_contacts=0, now="2026-06-14T00:00:00Z")
+    # ...plus a podcast lead (4) on the same account
+    sync_mod.run_podcast_sync(
+        engagement_repo=repo, scoring_repo=_FakeScoring(), discovery_repo=_FakeDiscovery(),
+        rows=[{"Submit Date": "2026-02-01 00:00:00", "Work Email": "p@christushealth.org",
+               "ICP": "Yes"}], now="2026-06-14T00:00:00Z")
+    accts = {a["account_id"]: a for a in repo.engaged_accounts()}
+    assert accts["acc_christus"]["score"] == 10        # reply 6 + podcast 4, combined

@@ -13,11 +13,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# kind -> points. Reply.io email subset of the canonical rules.
+# kind -> points. A subset of the canonical cross-channel scoring matrix, grown
+# one row at a time as each source comes online (see docs/engagement/PRD.md).
 POINTS: dict[str, int] = {
     "click": 1,             # email click
-    "reply": 6,             # email reply
+    "reply": 6,             # email reply  (≈ TOFU lead)
     "meeting_booked": 10,   # meeting agreed / booked
+    "podcast_lead": 4,      # podcast listen/download lead (ICP Yes/Maybe)
 }
 
 # Touches we record for rates + the timeline but that score zero — kept explicit

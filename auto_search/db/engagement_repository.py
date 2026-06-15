@@ -110,6 +110,12 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _norm(row: dict) -> dict:
+    """ISO-stringify datetime values so Postgres reads match the JSON repo's shape
+    — the dual-repo parity rule (the sibling repos normalize the same way)."""
+    return {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in row.items()}
+
+
 _COUNT_FIELDS = ("sent", "delivered", "opened", "clicked", "replied", "bounced")
 
 
@@ -274,7 +280,10 @@ class EngagementJsonRepository:
         if window_to is not None:
             row["window_to"] = window_to
         row["error"] = error                       # always set: a success clears it
-        row["last_synced_at"] = _iso(last_synced_at) or _now()
+        if last_synced_at is not None:
+            row["last_synced_at"] = _iso(last_synced_at)
+        elif status in ("success", "failed"):      # stamp on completion, not on 'running'
+            row["last_synced_at"] = _now()
         self._store["sync"][source] = row
         self._flush()
 
@@ -414,7 +423,7 @@ class EngagementPostgresRepository:
                 "SELECT * FROM engaged_accounts "
                 "ORDER BY score DESC, last_touch DESC NULLS LAST"
             ).fetchall()
-        return [dict(r) for r in rows]
+        return [_norm(dict(r)) for r in rows]
 
     def events_for_account(self, account_id) -> list[dict]:
         with self._pool.connection() as conn:
@@ -423,7 +432,7 @@ class EngagementPostgresRepository:
                 "ORDER BY occurred_at DESC",
                 (account_id,),
             ).fetchall()
-        return [dict(r) for r in rows]
+        return [_norm(dict(r)) for r in rows]
 
     def contacts(self, *, account_id=None, unresolved_only=False) -> list[dict]:
         with self._pool.connection() as conn:
@@ -442,7 +451,7 @@ class EngagementPostgresRepository:
                 rows = conn.execute(
                     "SELECT * FROM engagement_contacts ORDER BY updated_at DESC"
                 ).fetchall()
-        return [dict(r) for r in rows]
+        return [_norm(dict(r)) for r in rows]
 
     def recent_events(self, *, limit=200) -> list[dict]:
         with self._pool.connection() as conn:
@@ -450,19 +459,20 @@ class EngagementPostgresRepository:
                 "SELECT * FROM engagement_events ORDER BY occurred_at DESC LIMIT %s",
                 (limit,),
             ).fetchall()
-        return [dict(r) for r in rows]
+        return [_norm(dict(r)) for r in rows]
 
     def get_sync_state(self, source=SOURCE_REPLYIO) -> dict | None:
         with self._pool.connection() as conn:
             row = conn.execute(
                 "SELECT * FROM engagement_sync_state WHERE source = %s", (source,)
             ).fetchone()
-        return dict(row) if row else None
+        return _norm(dict(row)) if row else None
 
     def set_sync_state(self, source=SOURCE_REPLYIO, *, status=None, stats=None, error=None,
                        window_from=None, window_to=None, last_synced_at=None) -> None:
         from psycopg.types.json import Json
-        last = last_synced_at or datetime.now(UTC)
+        # stamp last_synced_at on completion (success/failed), not on 'running'
+        last = last_synced_at or (datetime.now(UTC) if status in ("success", "failed") else None)
         with self._pool.connection() as conn:
             conn.execute(
                 """
@@ -471,7 +481,7 @@ class EngagementPostgresRepository:
                 VALUES (%(source)s, %(last)s, %(window_from)s, %(window_to)s,
                         %(status)s, %(stats)s, %(error)s)
                 ON CONFLICT (source) DO UPDATE SET
-                    last_synced_at = EXCLUDED.last_synced_at,
+                    last_synced_at = COALESCE(EXCLUDED.last_synced_at, engagement_sync_state.last_synced_at),
                     window_from = COALESCE(EXCLUDED.window_from, engagement_sync_state.window_from),
                     window_to = COALESCE(EXCLUDED.window_to, engagement_sync_state.window_to),
                     status = COALESCE(EXCLUDED.status, engagement_sync_state.status),

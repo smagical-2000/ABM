@@ -118,7 +118,7 @@ function InboxView({ inbox }) {
         const k = kindOf(e.kind);
         const m = MATCH[e.match_tier];
         return (
-          <div key={i} className="grid grid-cols-[80px_1fr_180px_80px_44px_56px] items-center gap-3 border-b border-zinc-100 px-6 py-2.5 text-[13px] last:border-0 hover:bg-zinc-50/60">
+          <div key={`${e.account_id || 'u'}:${e.kind}:${e.occurred_at}:${i}`} className="grid grid-cols-[80px_1fr_180px_80px_44px_56px] items-center gap-3 border-b border-zinc-100 px-6 py-2.5 text-[13px] last:border-0 hover:bg-zinc-50/60">
             <div className="flex items-center gap-1.5"><span className={`h-1.5 w-1.5 rounded-full ${k.dot}`} /><span className="text-[12px] font-medium text-zinc-600">{k.label}</span></div>
             <div className="truncate text-zinc-700">{e.company || '—'}</div>
             <div className="truncate text-[12px] text-zinc-500">{e.account_name || (e.account_id ? e.account_id : <span className="italic text-amber-600">unresolved</span>)}</div>
@@ -188,7 +188,7 @@ function EngagementDrawer({ account, onClose, pushToast }) {
           <div className="flex flex-col gap-1.5">
             {contacts.length === 0 && <div className="text-[13px] text-zinc-400">No contact detail.</div>}
             {contacts.map((c, i) => (
-              <div key={i} className="flex items-center gap-2.5 rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2">
+              <div key={c.external_id || i} className="flex items-center gap-2.5 rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2">
                 <div className="flex h-6 w-6 items-center justify-center rounded-full bg-zinc-200 text-[11px] font-semibold text-zinc-600">
                   {(c.email || '?').slice(0, 1).toUpperCase()}
                 </div>
@@ -203,7 +203,7 @@ function EngagementDrawer({ account, onClose, pushToast }) {
             {[...events].sort((a, b) => (b.occurred_at || '').localeCompare(a.occurred_at || '')).map((e, i) => {
               const k = kindOf(e.kind);
               return (
-                <div key={i} className="relative pb-3.5 pl-5">
+                <div key={e.external_id || i} className="relative pb-3.5 pl-5">
                   <span className={`absolute -left-1 top-1 h-2 w-2 rounded-full ${k.dot} ring-2 ring-white`} />
                   <div className="text-[13px] text-zinc-700">{k.label}</div>
                   <div className="mt-0.5 flex flex-wrap gap-1.5 text-[12px] text-zinc-400">

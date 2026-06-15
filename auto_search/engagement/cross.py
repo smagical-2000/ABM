@@ -40,7 +40,7 @@ class CrossIndex:
             if not aid:
                 continue
             rec = {"account_id": aid, "name": a.get("name") or aid}
-            dom = clean_domain(a.get("domain"))
+            dom = _usable_domain(a.get("domain"))
             if dom:
                 self._s_domain.setdefault(dom, rec)
             key = normalize_company_name(a.get("name") or "")
@@ -55,7 +55,7 @@ class CrossIndex:
             if not primary:
                 continue
             rec = {"account_id": f"abm_{primary}", "name": name}
-            dom = clean_domain(t.get("domain"))
+            dom = _usable_domain(t.get("domain"))
             if dom:
                 self._a_domain.setdefault(dom, rec)
             # match on the target's normalized name + any expanded aliases
@@ -69,7 +69,7 @@ class CrossIndex:
 
     def match(self, *, company: str | None = None, domain: str | None = None,
               email: str | None = None) -> AccountMatch | None:
-        dom = clean_domain(domain) or _email_domain(email)
+        dom = _usable_domain(domain) or _email_domain(email)
         key = normalize_company_name(company or "")
         scored, s_tier = _lookup(self._s_domain, self._s_key, dom, key)
         abm, a_tier = _lookup(self._a_domain, self._a_key, dom, key)
@@ -99,6 +99,21 @@ def _lookup(by_domain: dict, by_key: dict, dom: str | None, key: str | None):
     return None, None
 
 
+# Free / personal email providers — never a usable account-matching domain. Skip
+# them so a personal-email contact can't domain-match (it falls through to company
+# name), and a stray personal domain on a scored/ABM row never becomes an index key.
+_PERSONAL_DOMAINS = frozenset({
+    "gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "hotmail.com",
+    "outlook.com", "live.com", "msn.com", "aol.com", "icloud.com", "me.com",
+    "mac.com", "proton.me", "protonmail.com", "comcast.net", "att.net", "verizon.net",
+})
+
+
+def _usable_domain(value: str | None) -> str | None:
+    dom = clean_domain(value)
+    return dom if dom and dom not in _PERSONAL_DOMAINS else None
+
+
 def _email_domain(email: str | None) -> str | None:
     e = (email or "").strip().lower()
-    return clean_domain(e.rsplit("@", 1)[-1]) if "@" in e else None
+    return _usable_domain(e.rsplit("@", 1)[-1]) if "@" in e else None

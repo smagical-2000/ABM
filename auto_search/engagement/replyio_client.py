@@ -91,8 +91,10 @@ class ReplyioClient:
             for it in items:
                 yield it
             if not data.get("hasMore") or not items:
-                break
+                return
             skip += len(items)
+        logger.warning("reply.io %s %s hit the %d-page cap — results truncated",
+                       method, path, _PAGE_CAP)
 
     async def _request(self, method: str, path: str, *, params: dict | None = None,
                        json: dict | None = None) -> dict:

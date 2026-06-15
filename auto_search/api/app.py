@@ -678,7 +678,8 @@ def create_app() -> FastAPI:
             return {"events": [], "unresolved": 0}
         scored = {a["account_id"]: a for a in app.state.scoring.list_scored()}
         abm = _abm_display(app.state.repo)
-        tier_by_contact = {c["external_id"]: c.get("match_tier") for c in repo.contacts()}
+        all_contacts = repo.contacts()
+        tier_by_contact = {c["external_id"]: c.get("match_tier") for c in all_contacts}
         events = []
         for e in repo.recent_events(limit=limit):
             aid = e.get("account_id")
@@ -691,7 +692,37 @@ def create_app() -> FastAPI:
                 "match_tier": tier_by_contact.get(e.get("contact_ext")),
             })
         return {"events": events,
-                "unresolved": len(repo.contacts(unresolved_only=True))}
+                "unresolved": sum(1 for c in all_contacts if not c.get("account_id"))}
+
+    def _engaged_one(account_id, events, contacts):
+        """Single-account rollup for the drawer — from the rows already fetched, so
+        opening a drawer doesn't recompute the whole board."""
+        score = sum(e.get("points") or 0 for e in events)
+        delivered = sum(c.get("delivered") or 0 for c in contacts)
+        opened = sum(c.get("opened") or 0 for c in contacts)
+        replied = sum(c.get("replied") or 0 for c in contacts)
+        s = {}
+        if hasattr(app.state.scoring_repo, "get"):
+            s = app.state.scoring_repo.get(account_id) or {}
+        d = (_abm_display(app.state.repo).get(account_id, {})
+             if account_id.startswith("abm_") else {})
+        return {
+            "account_id": account_id,
+            "name": s.get("name") or d.get("name") or account_id,
+            "segment": s.get("segment") or d.get("segment"),
+            "domain": s.get("domain") or d.get("domain"),
+            "score": score, "tier": engagement_scoring.tier_for(score),
+            "clicks": sum(1 for e in events if e.get("kind") == "click"),
+            "replies": sum(1 for e in events if e.get("kind") == "reply"),
+            "meetings": sum(1 for e in events if e.get("kind") == "meeting_booked"),
+            "contacts": len(contacts), "delivered": delivered, "opened": opened,
+            "replied_sends": replied,
+            "last_touch": max((e.get("occurred_at") for e in events if e.get("occurred_at")),
+                              default=None),
+            "lists": sorted({x for c in contacts for x in (c.get("matched_lists") or [])}),
+            "open_rate": round(100 * opened / delivered) if delivered else None,
+            "reply_rate": round(100 * replied / delivered) if delivered else None,
+        }
 
     @app.get("/api/engagement/{account_id}")
     def get_engagement_account(account_id: str):
@@ -700,10 +731,10 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="engagement not available")
         events = repo.events_for_account(account_id)
         contacts = repo.contacts(account_id=account_id)
-        account = next((a for a in _engaged_view() if a["account_id"] == account_id), None)
-        if account is None and not events and not contacts:
+        if not events and not contacts:
             raise HTTPException(status_code=404, detail="account not found")
-        return {"account": account, "events": events, "contacts": contacts}
+        return {"account": _engaged_one(account_id, events, contacts),
+                "events": events, "contacts": contacts}
 
     @app.post("/api/engagement/sync")
     def engagement_sync(days: int = 30, max_contacts: int | None = None):

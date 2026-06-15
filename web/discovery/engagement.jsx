@@ -39,6 +39,22 @@ function HeatCell({ tier, score }) {
 
 function pct(v) { return (v === null || v === undefined) ? '—' : `${v}%`; }
 
+// Group repeated touches by kind + day so the timeline reads "Click ×8 · May 28 ·
+// +8 pts" instead of one identical row per contact.
+function groupTimeline(events) {
+  const m = new Map();
+  events.forEach((e) => {
+    const day = e.occurred_at ? shortDate(e.occurred_at) : '—';
+    const key = `${e.kind}|${day}`;
+    const g = m.get(key) || { kind: e.kind, day, count: 0, points: 0, ts: '' };
+    g.count += 1;
+    g.points += (e.points || 0);
+    if ((e.occurred_at || '') > g.ts) g.ts = e.occurred_at || '';
+    m.set(key, g);
+  });
+  return [...m.values()].sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
+}
+
 // ── Accounts ─────────────────────────────────────────────────────────────────
 function AccountRow({ a, onOpen, pushToast }) {
   const h = heatOf(a.tier);
@@ -184,32 +200,40 @@ function EngagementDrawer({ account, onClose, pushToast }) {
             </div>
           </div>
 
-          <div className="mb-2 mt-6 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Contacts engaging</div>
-          <div className="flex flex-col gap-1.5">
-            {contacts.length === 0 && <div className="text-[13px] text-zinc-400">No contact detail.</div>}
-            {contacts.map((c, i) => (
-              <div key={c.external_id || i} className="flex items-center gap-2.5 rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2">
-                <div className="flex h-6 w-6 items-center justify-center rounded-full bg-zinc-200 text-[11px] font-semibold text-zinc-600">
-                  {(c.email || '?').slice(0, 1).toUpperCase()}
-                </div>
-                <span className="truncate text-[13px] text-zinc-600">{c.email || c.external_id}{c.title ? ` · ${c.title}` : ''}</span>
-              </div>
-            ))}
+          <div className="mb-2 mt-6 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+            Contacts engaging<span className="ml-1.5 text-zinc-400">{contacts.length}</span>
           </div>
+          {contacts.length === 0 ? (
+            <div className="text-[13px] text-zinc-400">No contact detail.</div>
+          ) : (
+            <div className="flex flex-wrap items-center gap-1">
+              {contacts.slice(0, 12).map((c, i) => (
+                <span key={c.external_id || i} title={c.email || c.external_id}
+                  className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-100 text-[11px] font-semibold text-zinc-500 ring-1 ring-inset ring-zinc-200">
+                  {(c.email || '?').slice(0, 1).toUpperCase()}
+                </span>
+              ))}
+              {contacts.length > 12 && (
+                <span className="ml-1 text-[12px] text-zinc-400">+{contacts.length - 12} more</span>
+              )}
+            </div>
+          )}
 
           <div className="mb-2 mt-6 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Engagement timeline</div>
           <div className="ml-1 border-l border-zinc-100">
             {events.length === 0 && <div className="pl-4 text-[13px] text-zinc-400">No touches.</div>}
-            {[...events].sort((a, b) => (b.occurred_at || '').localeCompare(a.occurred_at || '')).map((e, i) => {
-              const k = kindOf(e.kind);
+            {groupTimeline(events).map((g, i) => {
+              const k = kindOf(g.kind);
               return (
-                <div key={e.external_id || i} className="relative pb-3.5 pl-5">
+                <div key={`${g.kind}:${g.day}:${i}`} className="relative pb-3.5 pl-5">
                   <span className={`absolute -left-1 top-1 h-2 w-2 rounded-full ${k.dot} ring-2 ring-white`} />
-                  <div className="text-[13px] text-zinc-700">{k.label}</div>
+                  <div className="text-[13px] text-zinc-700">
+                    {k.label}{g.count > 1 && <span className="ml-1 text-zinc-400">×{g.count}</span>}
+                  </div>
                   <div className="mt-0.5 flex flex-wrap gap-1.5 text-[12px] text-zinc-400">
-                    {e.company && <span>{e.company}</span>}
-                    {e.occurred_at && <><span className="text-zinc-300">·</span><span>{shortDate(e.occurred_at)}</span></>}
-                    <span className="text-zinc-300">·</span><span className="font-medium text-zinc-500">+{e.points} pts</span>
+                    <span>{g.day}</span>
+                    <span className="text-zinc-300">·</span>
+                    <span className="font-medium text-zinc-500">+{g.points} pts</span>
                   </div>
                 </div>
               );

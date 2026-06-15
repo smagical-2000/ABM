@@ -668,6 +668,31 @@ def create_app() -> FastAPI:
         return {"accounts": _engaged_view(), "last_sync": last_sync,
                 "running": bool(getattr(app.state, "engagement_running", False))}
 
+    # NOTE: defined before /{account_id} so "inbox" isn't captured as an account id.
+    @app.get("/api/engagement/inbox")
+    def get_engagement_inbox(limit: int = 200):
+        """Recent meaningful touches across all accounts (the Inbox feed) +
+        the unresolved-contact count."""
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            return {"events": [], "unresolved": 0}
+        scored = {a["account_id"]: a for a in app.state.scoring.list_scored()}
+        abm = _abm_display(app.state.repo)
+        tier_by_contact = {c["external_id"]: c.get("match_tier") for c in repo.contacts()}
+        events = []
+        for e in repo.recent_events(limit=limit):
+            aid = e.get("account_id")
+            disp = scored.get(aid) or abm.get(aid) or {}
+            events.append({
+                "kind": e.get("kind"), "channel": e.get("channel"),
+                "points": e.get("points"), "company": e.get("company"),
+                "account_id": aid, "account_name": disp.get("name"),
+                "campaign": e.get("campaign"), "occurred_at": e.get("occurred_at"),
+                "match_tier": tier_by_contact.get(e.get("contact_ext")),
+            })
+        return {"events": events,
+                "unresolved": len(repo.contacts(unresolved_only=True))}
+
     @app.get("/api/engagement/{account_id}")
     def get_engagement_account(account_id: str):
         repo = getattr(app.state, "engagement_repo", None)

@@ -72,6 +72,7 @@ window.API = {
 
   // ── engagement (Reply.io heat) ───────────────────────────────────────────────
   engagement: () => http('/api/engagement'),
+  engagementInbox: () => http('/api/engagement/inbox'),
   engagementAccount: (id) => http(`/api/engagement/${encodeURIComponent(id)}`),
   syncEngagement: () => http('/api/engagement/sync', { method: 'POST' }),
 

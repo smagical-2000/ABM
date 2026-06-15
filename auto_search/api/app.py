@@ -44,10 +44,13 @@ from auto_search.abm import (
 )
 from auto_search.api.auth import install_basic_auth
 from auto_search.db import get_repository
+from auto_search.db.engagement_repository import get_engagement_repository
 from auto_search.db.scoring_repository import (
     STALE_SCORING_SECONDS,
     get_scoring_repository,
 )
+from auto_search.engagement import scoring as engagement_scoring
+from auto_search.engagement import sync as engagement_sync_mod
 from auto_search.intros import profiles as intros_profiles
 from auto_search.intros import service as intros_service
 from auto_search.normalize import normalize_company_name, normalize_linkedin_url
@@ -332,6 +335,14 @@ async def lifespan(app: FastAPI):
     app.state.scoring = ScoringService(scoring_repo)
     app.state.repo = repo
     app.state.scoring_repo = scoring_repo
+    # Engagement store (Reply.io heat). Additive + isolated — never block startup.
+    try:
+        app.state.engagement_repo = get_engagement_repository()
+        app.state.engagement_repo.ensure_schema()
+    except Exception:  # noqa: BLE001
+        logger.exception("engagement init failed")
+        app.state.engagement_repo = None
+    app.state.engagement_running = False           # one sync at a time
     app.state.abm_index = _load_abm_index(repo)   # ABM target list -> match index
     _seed_social_targets(repo)                    # ensure Magical is always monitored
     app.state.social_running = False              # one social poll at a time
@@ -598,6 +609,95 @@ def create_app() -> FastAPI:
             finally:
                 op.finish()
                 app.state.news_running = False
+
+        _schedule_coro(app, _run())
+        return {"started": True}
+
+    # ── engagement (Reply.io heat) ──────────────────────────────────────────────
+
+    def _abm_display(discovery_repo) -> dict[str, dict]:
+        """account_id -> display info for ABM-only engaged accounts (abm_<key>)."""
+        from auto_search.normalize import normalize_company_name
+        out: dict[str, dict] = {}
+        targets = (discovery_repo.abm_targets()
+                   if hasattr(discovery_repo, "abm_targets") else [])
+        for t in targets:
+            key = normalize_company_name(t.get("name") or "")
+            if key:
+                out[f"abm_{key}"] = {"name": t.get("name"), "segment": t.get("segment"),
+                                     "domain": t.get("domain")}
+        return out
+
+    def _engaged_view() -> list[dict]:
+        """Engaged accounts ranked by heat, enriched with display info, tier + rates."""
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            return []
+        lists_by: dict[str, set] = {}
+        for c in repo.contacts():
+            aid = c.get("account_id")
+            if aid:
+                lists_by.setdefault(aid, set()).update(c.get("matched_lists") or [])
+        scored = {a["account_id"]: a for a in app.state.scoring.list_scored()}
+        abm = _abm_display(app.state.repo)
+        out: list[dict] = []
+        for r in repo.engaged_accounts():
+            aid = r["account_id"]
+            s = scored.get(aid) or {}
+            d = abm.get(aid, {})
+            delivered = r.get("delivered") or 0
+            out.append({
+                **r,
+                "name": s.get("name") or d.get("name") or aid,
+                "segment": s.get("segment") or d.get("segment"),
+                "domain": s.get("domain") or d.get("domain"),
+                "tier": engagement_scoring.tier_for(r.get("score") or 0),
+                "lists": sorted(lists_by.get(aid, [])),
+                "open_rate": (round(100 * (r.get("opened") or 0) / delivered)
+                              if delivered else None),
+                "reply_rate": (round(100 * (r.get("replied_sends") or 0) / delivered)
+                               if delivered else None),
+            })
+        out.sort(key=lambda x: (x.get("score") or 0, x.get("last_touch") or ""), reverse=True)
+        return out
+
+    @app.get("/api/engagement")
+    def get_engagement():
+        repo = getattr(app.state, "engagement_repo", None)
+        last_sync = repo.get_sync_state() if repo else None
+        return {"accounts": _engaged_view(), "last_sync": last_sync,
+                "running": bool(getattr(app.state, "engagement_running", False))}
+
+    @app.get("/api/engagement/{account_id}")
+    def get_engagement_account(account_id: str):
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=404, detail="engagement not available")
+        events = repo.events_for_account(account_id)
+        contacts = repo.contacts(account_id=account_id)
+        account = next((a for a in _engaged_view() if a["account_id"] == account_id), None)
+        if account is None and not events and not contacts:
+            raise HTTPException(status_code=404, detail="account not found")
+        return {"account": account, "events": events, "contacts": contacts}
+
+    @app.post("/api/engagement/sync")
+    def engagement_sync(days: int = 30, max_contacts: int | None = None):
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=503, detail="engagement store not available")
+        if getattr(app.state, "engagement_running", False):
+            return {"started": False, "busy": True}
+        app.state.engagement_running = True
+
+        async def _run() -> None:
+            try:
+                await engagement_sync_mod.run_sync(
+                    engagement_repo=repo, scoring_repo=app.state.scoring_repo,
+                    discovery_repo=app.state.repo, days=days, max_contacts=max_contacts)
+            except Exception:  # noqa: BLE001 — never crash the loop
+                logger.exception("engagement sync failed")
+            finally:
+                app.state.engagement_running = False
 
         _schedule_coro(app, _run())
         return {"started": True}

@@ -13,7 +13,7 @@ This is an entry point the daily Railway cron calls (see railway.cron.json /
 run_daily.py). Needs SFDC_CLIENT_ID/SECRET/LOGIN_URL + DATABASE_URL in the env.
 
 Run:
-    python scripts/run_engagement_sfdc.py --days 365
+    python scripts/run_engagement_sfdc.py --since 2026-01-01
 """
 
 from __future__ import annotations
@@ -38,8 +38,8 @@ logger = logging.getLogger("run_engagement_sfdc")
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Daily SFDC high-intent-lead engagement pull")
-    ap.add_argument("--days", type=int, default=365,
-                    help="lead recency window in days (default 365)")
+    ap.add_argument("--since", default="2026-01-01",
+                    help="only leads created on/after this date, YYYY-MM-DD (default 2026-01-01)")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
@@ -50,7 +50,7 @@ def main() -> int:
             engagement_repo=engagement_repo,
             scoring_repo=get_scoring_repository(),
             discovery_repo=get_repository(),
-            days=args.days)
+            since=args.since)
     except Exception:  # noqa: BLE001 — cron leg: log + signal failure, don't traceback-crash
         logger.exception("[run_engagement_sfdc] SFDC sync failed")
         return 1

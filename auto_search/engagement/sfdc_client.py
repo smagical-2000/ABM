@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from collections.abc import Iterator
 
 import httpx
@@ -25,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 _API_VERSION = "v60.0"
 _PAGE_CAP = 500          # hard stop so a bad nextRecordsUrl can't loop forever
+# Floor for the high-intent lead pull — leads older than this are stale; we only
+# track the 2026-onward cohort (per the user). Open-ended (since -> now).
+SINCE_DEFAULT = "2026-01-01"
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 class SalesforceClient:
@@ -94,10 +99,12 @@ class SalesforceClient:
         "Intercom", "Galyna Brief", "LGF Linkedin", "LGF FB",
     )
 
-    def iter_high_intent_leads(self, *, days: int = 365) -> Iterator[dict]:
-        """High-intent inbound leads created in the last `days`, with the fields we
-        cross + score on. Mirrors the org's High Intent Leads report filter
-        (LeadSource in the high-intent set); recency-bounded so stale leads age out."""
+    def iter_high_intent_leads(self, *, since: str = SINCE_DEFAULT) -> Iterator[dict]:
+        """High-intent inbound leads created on/after `since` (YYYY-MM-DD), with the
+        fields we cross + score on. Mirrors the org's High Intent Leads report filter
+        (LeadSource in the high-intent set)."""
+        if not _DATE_RE.match(since):       # interpolated into SOQL — keep it a bare date
+            raise ValueError(f"since must be YYYY-MM-DD, got {since!r}")
         sources = ", ".join("'" + s.replace("'", r"\'") + "'"
                             for s in self.HIGH_INTENT_SOURCES)
         yield from self.query(
@@ -105,7 +112,7 @@ class SalesforceClient:
             "Website, Title, LeadSource, Status, Rating, MQL__c, Seats_Requested__c, "
             "In_Healthcare__c, Primary_Purpose__c, Employee_Range__c, IsConverted, "
             "CreatedDate FROM Lead "
-            f"WHERE LeadSource IN ({sources}) AND CreatedDate = LAST_N_DAYS:{int(days)} "
+            f"WHERE LeadSource IN ({sources}) AND CreatedDate >= {since}T00:00:00Z "
             "ORDER BY CreatedDate DESC")
 
     def iter_meetings(self, *, days: int = 180) -> Iterator[dict]:

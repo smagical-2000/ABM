@@ -152,16 +152,16 @@ def run_podcast_sync(*, engagement_repo, scoring_repo, discovery_repo,
 
 
 def run_sfdc_sync(*, engagement_repo, scoring_repo, discovery_repo, client=None,
-                  days: int = 365, now: str | None = None) -> dict:
+                  since: str = "2026-01-01", now: str | None = None) -> dict:
     """Pull Salesforce (read-only) HIGH-INTENT INBOUND LEADS -> cross -> store.
     Idempotent; records state. Same source-agnostic cross + store path as the other
     sources, so SFDC heat rolls up into the same accounts.
 
     Scope (per the user, "for now to test"): the org's High Intent Leads definition
-    only — inbound contact/sales-form leads. Booked meetings + opportunities are
-    implemented (sfdc.parse) but not yet wired in here. `client` is a
-    SalesforceClient (injected in tests); created from .env otherwise. `days` bounds
-    the lead window so stale leads age out.
+    only — inbound contact/sales-form leads created on/after `since` (YYYY-MM-DD;
+    default the 2026-onward cohort). Booked meetings + opportunities are implemented
+    (sfdc.parse) but not yet wired in here. `client` is a SalesforceClient (injected
+    in tests); created from .env otherwise.
     """
     if client is None:
         from auto_search.engagement.sfdc_client import SalesforceClient
@@ -169,7 +169,7 @@ def run_sfdc_sync(*, engagement_repo, scoring_repo, discovery_repo, client=None,
     now = now or datetime.now(UTC).isoformat()
     engagement_repo.set_sync_state(SFDC_SOURCE, status="running")
     try:
-        leads = list(client.iter_high_intent_leads(days=days))
+        leads = list(client.iter_high_intent_leads(since=since))
         # ELT raw landing: keep what we transform from, for replay/audit.
         engagement_repo.land_raw("sfdc_high_intent_leads", {"leads": len(leads)},
                                  source=SFDC_SOURCE)

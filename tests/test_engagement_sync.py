@@ -180,7 +180,7 @@ class _FakeSfdcClient:
     def __init__(self, leads):
         self._leads = leads
 
-    def iter_high_intent_leads(self, *, days=365):
+    def iter_high_intent_leads(self, *, since="2026-01-01"):
         yield from self._leads
 
 

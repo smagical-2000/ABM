@@ -30,7 +30,7 @@ def _run(script: str, *args: str) -> int:
 def main() -> int:
     discovery_rc = _run("run_discovery.py", "--days", "1", "--no-limit")
     social_rc = _run("run_social.py", "--since-hours", "24", "--max-enrich", "100")
-    sfdc_rc = _run("run_engagement_sfdc.py", "--days", "365")
+    sfdc_rc = _run("run_engagement_sfdc.py", "--since", "2026-01-01")
     if discovery_rc or social_rc or sfdc_rc:
         print(f"\n[run_daily] FAILED — discovery={discovery_rc} social={social_rc} "
               f"sfdc={sfdc_rc}", flush=True)

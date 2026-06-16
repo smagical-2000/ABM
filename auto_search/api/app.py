@@ -759,10 +759,10 @@ def create_app() -> FastAPI:
         return {"started": True}
 
     @app.post("/api/engagement/sfdc/sync")
-    def engagement_sfdc_sync(days: int = 365):
-        """Pull Salesforce (read-only): high-intent inbound leads from the last
-        `days`, cross to scored/ABM accounts, score into heat. Only matched leads
-        are stored. Shares the one-at-a-time lock."""
+    def engagement_sfdc_sync(since: str = "2026-01-01"):
+        """Pull Salesforce (read-only): high-intent inbound leads created on/after
+        `since` (YYYY-MM-DD), cross to scored/ABM accounts, score into heat. Only
+        matched leads are stored. Shares the one-at-a-time lock."""
         repo = getattr(app.state, "engagement_repo", None)
         if not repo:
             raise HTTPException(status_code=503, detail="engagement store not available")
@@ -777,7 +777,7 @@ def create_app() -> FastAPI:
                 await asyncio.to_thread(
                     engagement_sync_mod.run_sfdc_sync,
                     engagement_repo=repo, scoring_repo=app.state.scoring_repo,
-                    discovery_repo=app.state.repo, days=days)
+                    discovery_repo=app.state.repo, since=since)
             except Exception:  # noqa: BLE001 — never crash the loop
                 logger.exception("sfdc engagement sync failed")
             finally:

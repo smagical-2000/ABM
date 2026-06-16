@@ -44,10 +44,19 @@ function pct(v) { return (v === null || v === undefined) ? '—' : `${v}%`; }
 
 // Group repeated touches by kind + day so the timeline reads "Click ×8 · May 28 ·
 // +8 pts" instead of one identical row per contact.
+// Timeline dates include the year — touches can span years (e.g. an SFDC lead from
+// last summer next to a recent click), so a year-less "Jul 2 / Mar 18" reads as out
+// of order even when it's correctly sorted oldest-first.
+function timelineDate(iso) {
+  return iso
+    ? new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+    : '—';
+}
+
 function groupTimeline(events) {
   const m = new Map();
   events.forEach((e) => {
-    const day = e.occurred_at ? shortDate(e.occurred_at) : '—';
+    const day = timelineDate(e.occurred_at);
     const key = `${e.kind}|${day}`;
     const g = m.get(key) || { kind: e.kind, day, count: 0, points: 0, ts: '' };
     g.count += 1;

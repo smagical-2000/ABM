@@ -26,19 +26,22 @@ from auto_search.normalize import clean_domain, normalize_company_name
 SOURCE = "sfdc"
 
 
-def parse_leads(leads: list[dict], *, now: str | None = None
-                ) -> tuple[list[dict], list[dict]]:
-    """Map SFDC high-intent leads to (contact_rows, event_rows). PURE.
+def parse_leads(leads: list[dict], *, kind: str = "high_intent_lead",
+                channel: str = "form", campaign_field: str = "LeadSource",
+                now: str | None = None) -> tuple[list[dict], list[dict]]:
+    """Map SFDC leads to (contact_rows, event_rows). PURE.
 
-    These are contact-level (each lead is a person), unlike meetings/opps which are
-    account-level: one contact + one 'high_intent_lead' event per Lead, keyed by the
-    Lead id, so a re-sync is idempotent and two people from one company both count
-    (two BOFU signals = legitimately hotter). Crossing by email domain / company is
-    applied later by cross.py.
+    Contact-level (each lead is a person): one contact + one event per Lead, keyed by
+    the Lead id, so a re-sync is idempotent and two people from one company both count.
+    Reused for both lead signals — `kind`/`channel`/`campaign_field` distinguish them:
+    high-intent inbound (`form`/`high_intent_lead`, campaign = LeadSource) and
+    tradeshow-qualified meetings (`event`/`tradeshow`, campaign = Tradeshow__c).
+    Crossing by email domain / company is applied later by cross.py.
     """
     now = now or datetime.now(UTC).isoformat()
     contact_rows: list[dict] = []
     event_rows: list[dict] = []
+    points = scoring.points_for(kind)
     seen: set[str] = set()
     for ld in leads:
         lid = _sid(ld.get("Id"))
@@ -54,17 +57,17 @@ def parse_leads(leads: list[dict], *, now: str | None = None
             "source": SOURCE, "external_id": lid, "email": email,
             "email_domain": domain, "company": company,
             "company_key": normalize_company_name(company or ""),
-            "title": ld.get("Title"), "meeting_booked": False,
+            "title": ld.get("Title"), "meeting_booked": kind == "tradeshow",
             "opted_out": False,
         })
         event_rows.append({
-            "source": SOURCE, "external_id": f"form:high_intent_lead:{lid}",
-            "channel": "form", "kind": "high_intent_lead",
-            "points": scoring.points_for("high_intent_lead"), "contact_ext": lid,
-            "company": company, "campaign": ld.get("LeadSource"),
+            "source": SOURCE, "external_id": f"{channel}:{kind}:{lid}",
+            "channel": channel, "kind": kind, "points": points, "contact_ext": lid,
+            "company": company, "campaign": ld.get(campaign_field),
             "occurred_at": occurred,
             "raw": {"lead_source": ld.get("LeadSource"), "status": ld.get("Status"),
-                    "rating": ld.get("Rating"), "mql": bool(ld.get("MQL__c")),
+                    "tradeshow": ld.get("Tradeshow__c"), "rating": ld.get("Rating"),
+                    "mql": bool(ld.get("MQL__c")),
                     "seats_requested": ld.get("Seats_Requested__c"),
                     "in_healthcare": ld.get("In_Healthcare__c"),
                     "primary_purpose": ld.get("Primary_Purpose__c"),

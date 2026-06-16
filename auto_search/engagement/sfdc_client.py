@@ -115,6 +115,18 @@ class SalesforceClient:
             f"WHERE LeadSource IN ({sources}) AND CreatedDate >= {since}T00:00:00Z "
             "ORDER BY CreatedDate DESC")
 
+    def iter_tradeshow_leads(self, *, since: str = SINCE_DEFAULT) -> Iterator[dict]:
+        """Tradeshow leads that booked a meeting — LeadSource='Trade Show' AND
+        Status='Qualified' (the org's "Tradeshow tracking" Qualified stage), created
+        on/after `since`. Tradeshow__c carries the show name for display."""
+        if not _DATE_RE.match(since):
+            raise ValueError(f"since must be YYYY-MM-DD, got {since!r}")
+        yield from self.query(
+            "SELECT Id, FirstName, LastName, Company, Email, BN_Email_Domain__c, "
+            "Website, Title, LeadSource, Status, Tradeshow__c, CreatedDate FROM Lead "
+            "WHERE LeadSource = 'Trade Show' AND Status = 'Qualified' "
+            f"AND CreatedDate >= {since}T00:00:00Z ORDER BY CreatedDate DESC")
+
     def iter_meetings(self, *, days: int = 180) -> Iterator[dict]:
         """Booked meetings (Event Type='Meeting') created in the last `days`, with
         the related Account's name + website for crossing."""

@@ -153,15 +153,15 @@ def run_podcast_sync(*, engagement_repo, scoring_repo, discovery_repo,
 
 def run_sfdc_sync(*, engagement_repo, scoring_repo, discovery_repo, client=None,
                   since: str = "2026-01-01", now: str | None = None) -> dict:
-    """Pull Salesforce (read-only) HIGH-INTENT INBOUND LEADS -> cross -> store.
-    Idempotent; records state. Same source-agnostic cross + store path as the other
-    sources, so SFDC heat rolls up into the same accounts.
+    """Pull Salesforce (read-only) LEAD engagement -> cross -> store. Idempotent;
+    records state. Same source-agnostic cross + store path as the other sources, so
+    SFDC heat rolls up into the same accounts.
 
-    Scope (per the user, "for now to test"): the org's High Intent Leads definition
-    only — inbound contact/sales-form leads created on/after `since` (YYYY-MM-DD;
-    default the 2026-onward cohort). Booked meetings + opportunities are implemented
-    (sfdc.parse) but not yet wired in here. `client` is a SalesforceClient (injected
-    in tests); created from .env otherwise.
+    Two lead signals, both created on/after `since` (YYYY-MM-DD; default the 2026
+    cohort): the org's **High Intent Leads** (inbound contact/sales forms ≈ BOFU) and
+    **tradeshow-Qualified** leads (a meeting booked at a tradeshow). Booked meetings +
+    opportunities are implemented (sfdc.parse) but not yet wired in here. `client` is
+    a SalesforceClient (injected in tests); created from .env otherwise.
     """
     if client is None:
         from auto_search.engagement.sfdc_client import SalesforceClient
@@ -169,20 +169,28 @@ def run_sfdc_sync(*, engagement_repo, scoring_repo, discovery_repo, client=None,
     now = now or datetime.now(UTC).isoformat()
     engagement_repo.set_sync_state(SFDC_SOURCE, status="running")
     try:
-        leads = list(client.iter_high_intent_leads(since=since))
+        hi_leads = list(client.iter_high_intent_leads(since=since))
+        ts_leads = list(client.iter_tradeshow_leads(since=since))
         # ELT raw landing: keep what we transform from, for replay/audit.
-        engagement_repo.land_raw("sfdc_high_intent_leads", {"leads": len(leads)},
-                                 source=SFDC_SOURCE)
+        engagement_repo.land_raw(
+            "sfdc_leads", {"high_intent": len(hi_leads), "tradeshow": len(ts_leads)},
+            source=SFDC_SOURCE)
 
-        contact_rows, event_rows = sfdc_mod.parse_leads(leads, now=now)
+        c1, e1 = sfdc_mod.parse_leads(hi_leads, kind="high_intent_lead",
+                                      channel="form", campaign_field="LeadSource", now=now)
+        c2, e2 = sfdc_mod.parse_leads(ts_leads, kind="tradeshow", channel="event",
+                                      campaign_field="Tradeshow__c", now=now)
+        # one contact per Lead id (a lead in both sets dedups); events keep both kinds
+        contacts_by_id = {c["external_id"]: c for c in (c1 + c2)}
+        contact_rows, event_rows = list(contacts_by_id.values()), e1 + e2
         matched, new_events = cross_and_persist(
             engagement_repo=engagement_repo, scoring_repo=scoring_repo,
             discovery_repo=discovery_repo, contact_rows=contact_rows,
             event_rows=event_rows, persist_unmatched=False)
         stats = {
-            "leads": len(leads), "contacts": len(contact_rows),
-            "events": len(event_rows), "new_events": new_events,
-            "matched_contacts": matched,
+            "high_intent_leads": len(hi_leads), "tradeshow_leads": len(ts_leads),
+            "contacts": len(contact_rows), "events": len(event_rows),
+            "new_events": new_events, "matched_contacts": matched,
             "unresolved_contacts": len(contact_rows) - matched,
         }
         engagement_repo.set_sync_state(SFDC_SOURCE, status="success", stats=stats)

@@ -162,6 +162,21 @@ def test_lead_missing_id_skipped():
     assert [c["external_id"] for c in contacts] == ["00Q2"]
 
 
+def test_tradeshow_kind_shape_and_points():
+    ld = _lead(Id="00T1", LeadSource="Trade Show", Status="Qualified",
+               **{"Tradeshow__c": "HIMSS 2026"})
+    contacts, events = sfdc.parse_leads([ld], kind="tradeshow", channel="event",
+                                        campaign_field="Tradeshow__c")
+    e = events[0]
+    assert e["kind"] == "tradeshow"
+    assert e["channel"] == "event"
+    assert e["points"] == 10
+    assert e["external_id"] == "event:tradeshow:00T1"
+    assert e["campaign"] == "HIMSS 2026"               # show name from Tradeshow__c
+    assert e["raw"]["tradeshow"] == "HIMSS 2026"
+    assert contacts[0]["meeting_booked"] is True       # a tradeshow Qualified = meeting
+
+
 def test_two_leads_same_company_both_count():
     # two people from one company -> two BOFU signals (per-contact, not deduped)
     leads = [_lead(Id="00Q1", Email="a@acme.com"), _lead(Id="00Q2", Email="b@acme.com")]

@@ -27,6 +27,7 @@ _KIND = {
     "reply": ("✉️", "Reply"),
     "click": ("👆", "Click"),
     "podcast_lead": ("🎙️", "Podcast"),
+    "tradeshow": ("🎪", "Tradeshow"),
 }
 _TIER_EMOJI = {"Hot": "🔥", "Warm": "🌤️", "Some": "🌥️", "Lower": "☁️"}
 

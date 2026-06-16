@@ -22,6 +22,7 @@ POINTS: dict[str, int] = {
     "podcast_lead": 4,      # podcast listen/download lead (ICP Yes/Maybe)
     "opportunity": 10,      # SFDC open/won opportunity (≈ BOFU — active deal)
     "high_intent_lead": 10, # SFDC high-intent inbound lead (contact/sales form ≈ BOFU)
+    "tradeshow": 10,        # SFDC tradeshow lead that booked a meeting (Status=Qualified)
 }
 
 # Touches we record for rates + the timeline but that score zero — kept explicit

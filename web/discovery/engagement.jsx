@@ -21,6 +21,7 @@ const KIND = {
   podcast_lead:   { label: 'Podcast', dot: 'bg-violet-500' },
   opportunity:    { label: 'Opportunity', dot: 'bg-rose-500' },
   high_intent_lead: { label: 'High-intent lead', dot: 'bg-rose-500' },
+  tradeshow:      { label: 'Tradeshow', dot: 'bg-orange-500' },
 };
 const kindOf = (k) => KIND[k] || { label: k || 'Touch', dot: 'bg-zinc-300' };
 

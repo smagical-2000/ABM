@@ -55,7 +55,8 @@ function groupTimeline(events) {
     if ((e.occurred_at || '') > g.ts) g.ts = e.occurred_at || '';
     m.set(key, g);
   });
-  return [...m.values()].sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
+  // chronological, earliest first (oldest touch at the top of the timeline)
+  return [...m.values()].sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
 }
 
 // ── Accounts ─────────────────────────────────────────────────────────────────

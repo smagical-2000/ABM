@@ -49,6 +49,7 @@ from auto_search.db.scoring_repository import (
     STALE_SCORING_SECONDS,
     get_scoring_repository,
 )
+from auto_search.engagement import notify as engagement_notify
 from auto_search.engagement import scoring as engagement_scoring
 from auto_search.engagement import sync as engagement_sync_mod
 from auto_search.intros import profiles as intros_profiles
@@ -735,6 +736,28 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="account not found")
         return {"account": _engaged_one(account_id, events, contacts),
                 "events": events, "contacts": contacts}
+
+    @app.post("/api/engagement/{account_id}/activate")
+    async def engagement_activate(account_id: str, request: Request):
+        """Post an account's heat card to the Slack engagement channel (manual
+        activation). Read-only on our data; the only side effect is the Slack post.
+        Body may pass {"test": true} to mark the message as a wiring test."""
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=503, detail="engagement store not available")
+        events = repo.events_for_account(account_id)
+        contacts = repo.contacts(account_id=account_id)
+        if not events and not contacts:
+            raise HTTPException(status_code=404, detail="account not found")
+        body = await _json_body(request)
+        account = _engaged_one(account_id, events, contacts)
+        app_url = os.getenv("ENGAGEMENT_APP_URL")
+        ok = await asyncio.to_thread(
+            engagement_notify.activate_account, account, events,
+            app_url=app_url, test=bool(body.get("test")))
+        if not ok:
+            raise HTTPException(status_code=502, detail="Slack post failed (check webhook)")
+        return {"posted": True, "account_id": account_id}
 
     @app.post("/api/engagement/sync")
     def engagement_sync(days: int = 30, max_contacts: int | None = None):

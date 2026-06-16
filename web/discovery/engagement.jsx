@@ -29,6 +29,18 @@ const MATCH = {
   name:   { label: 'Name',   cls: 'text-sky-600' },
 };
 
+// Post the account's heat card to the Slack engagement channel. (No @-mentions yet
+// — the card renders the SDR as plain text, so nobody is pinged.)
+async function activateAccount(accountId, pushToast) {
+  pushToast('Posting to Slack…', 'muted');
+  try {
+    await window.API.activateEngagement(accountId);
+    pushToast('Activated — posted to Slack', 'success');
+  } catch (e) {
+    pushToast(`Activate failed: ${e.message}`, 'danger');
+  }
+}
+
 function HeatCell({ tier, score }) {
   const h = heatOf(tier);
   return (
@@ -97,7 +109,7 @@ function AccountRow({ a, onOpen, pushToast }) {
       <div className="text-right text-[12px] text-zinc-400">{a.last_touch ? relativeTime(a.last_touch) : '—'}</div>
       <div className="flex items-center justify-end gap-1.5">
         {a.tier === 'Hot' && (
-          <button onClick={(e) => { e.stopPropagation(); pushToast('Activate to SDR — coming soon', 'muted'); }}
+          <button onClick={(e) => { e.stopPropagation(); activateAccount(a.account_id, pushToast); }}
             className="rounded-md bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-700 ring-1 ring-inset ring-amber-200 hover:bg-amber-100">Activate</button>
         )}
         <Icons.arrowRight className="h-3.5 w-3.5 text-zinc-300" />
@@ -255,7 +267,7 @@ function EngagementDrawer({ account, onClose, pushToast }) {
         </div>
         <div className="flex gap-2 border-t border-zinc-100 px-6 py-3.5">
           {account.tier === 'Hot' && (
-            <button onClick={() => pushToast('Activate to SDR — coming soon', 'muted')}
+            <button onClick={() => activateAccount(account.account_id, pushToast)}
               className="inline-flex flex-1 items-center justify-center gap-2 rounded-lg bg-amber-600 px-4 py-2.5 text-[13px] font-semibold text-white hover:bg-amber-700">
               <Icons.zap className="h-4 w-4" />Activate to SDR</button>
           )}

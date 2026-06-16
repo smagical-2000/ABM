@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 
 from auto_search.engagement import ingest as ingest_mod
 from auto_search.engagement import podcast as podcast_mod
+from auto_search.engagement import sfdc as sfdc_mod
 from auto_search.engagement.cross import build_index
 from auto_search.engagement.replyio_client import ReplyioClient, default_window
 
@@ -23,15 +24,21 @@ logger = logging.getLogger(__name__)
 
 SOURCE = "replyio"
 PODCAST_SOURCE = "podcast"
+SFDC_SOURCE = "sfdc"
 _MIN_ACTIVITY_ROWS = 20      # below this over `days`, widen the window to 60d
 
 
 def cross_and_persist(*, engagement_repo, scoring_repo, discovery_repo,
-                      contact_rows: list[dict], event_rows: list[dict]
-                      ) -> tuple[int, int]:
+                      contact_rows: list[dict], event_rows: list[dict],
+                      persist_unmatched: bool = True) -> tuple[int, int]:
     """Cross each contact to a scored/ABM account, stamp the result onto the
     contact's events, then upsert contacts + add events. Returns
-    (matched_contacts, new_events). Shared by every source's sync."""
+    (matched_contacts, new_events). Shared by every source's sync.
+
+    `persist_unmatched=False` stores only contacts/events that matched an account —
+    used by high-volume inbound sources (SFDC leads) where the unmatched rows are
+    not-our-target noise that would flood the resolve queue. The matched count is
+    still returned in full either way."""
     index = build_index(scoring_repo, discovery_repo)
     matched = 0
     for c in contact_rows:
@@ -44,6 +51,9 @@ def cross_and_persist(*, engagement_repo, scoring_repo, discovery_repo,
     account_by_contact = {c["external_id"]: c.get("account_id") for c in contact_rows}
     for e in event_rows:
         e["account_id"] = account_by_contact.get(e["contact_ext"])
+    if not persist_unmatched:
+        contact_rows = [c for c in contact_rows if c.get("account_id")]
+        event_rows = [e for e in event_rows if e.get("account_id")]
     for c in contact_rows:
         engagement_repo.upsert_contact(c)
     new_events = sum(1 for e in event_rows if engagement_repo.add_event(e))
@@ -138,4 +148,47 @@ def run_podcast_sync(*, engagement_repo, scoring_repo, discovery_repo,
     except Exception as exc:  # noqa: BLE001 — record failure; never crash the caller loop
         logger.exception("podcast sync failed")
         engagement_repo.set_sync_state(PODCAST_SOURCE, status="failed", error=str(exc)[:300])
+        raise
+
+
+def run_sfdc_sync(*, engagement_repo, scoring_repo, discovery_repo, client=None,
+                  days: int = 365, now: str | None = None) -> dict:
+    """Pull Salesforce (read-only) HIGH-INTENT INBOUND LEADS -> cross -> store.
+    Idempotent; records state. Same source-agnostic cross + store path as the other
+    sources, so SFDC heat rolls up into the same accounts.
+
+    Scope (per the user, "for now to test"): the org's High Intent Leads definition
+    only — inbound contact/sales-form leads. Booked meetings + opportunities are
+    implemented (sfdc.parse) but not yet wired in here. `client` is a
+    SalesforceClient (injected in tests); created from .env otherwise. `days` bounds
+    the lead window so stale leads age out.
+    """
+    if client is None:
+        from auto_search.engagement.sfdc_client import SalesforceClient
+        client = SalesforceClient()
+    now = now or datetime.now(UTC).isoformat()
+    engagement_repo.set_sync_state(SFDC_SOURCE, status="running")
+    try:
+        leads = list(client.iter_high_intent_leads(days=days))
+        # ELT raw landing: keep what we transform from, for replay/audit.
+        engagement_repo.land_raw("sfdc_high_intent_leads", {"leads": len(leads)},
+                                 source=SFDC_SOURCE)
+
+        contact_rows, event_rows = sfdc_mod.parse_leads(leads, now=now)
+        matched, new_events = cross_and_persist(
+            engagement_repo=engagement_repo, scoring_repo=scoring_repo,
+            discovery_repo=discovery_repo, contact_rows=contact_rows,
+            event_rows=event_rows, persist_unmatched=False)
+        stats = {
+            "leads": len(leads), "contacts": len(contact_rows),
+            "events": len(event_rows), "new_events": new_events,
+            "matched_contacts": matched,
+            "unresolved_contacts": len(contact_rows) - matched,
+        }
+        engagement_repo.set_sync_state(SFDC_SOURCE, status="success", stats=stats)
+        logger.info("sfdc sync ok: %s", stats)
+        return stats
+    except Exception as exc:  # noqa: BLE001 — record failure; never crash the caller loop
+        logger.exception("sfdc sync failed")
+        engagement_repo.set_sync_state(SFDC_SOURCE, status="failed", error=str(exc)[:300])
         raise

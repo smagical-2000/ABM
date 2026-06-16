@@ -758,6 +758,34 @@ def create_app() -> FastAPI:
         _schedule_coro(app, _run())
         return {"started": True}
 
+    @app.post("/api/engagement/sfdc/sync")
+    def engagement_sfdc_sync(days: int = 365):
+        """Pull Salesforce (read-only): high-intent inbound leads from the last
+        `days`, cross to scored/ABM accounts, score into heat. Only matched leads
+        are stored. Shares the one-at-a-time lock."""
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=503, detail="engagement store not available")
+        if getattr(app.state, "engagement_running", False):
+            return {"started": False, "busy": True}
+        app.state.engagement_running = True
+
+        async def _run() -> None:
+            import asyncio
+            try:
+                # run_sfdc_sync is blocking (httpx.Client) — off the event loop.
+                await asyncio.to_thread(
+                    engagement_sync_mod.run_sfdc_sync,
+                    engagement_repo=repo, scoring_repo=app.state.scoring_repo,
+                    discovery_repo=app.state.repo, days=days)
+            except Exception:  # noqa: BLE001 — never crash the loop
+                logger.exception("sfdc engagement sync failed")
+            finally:
+                app.state.engagement_running = False
+
+        _schedule_coro(app, _run())
+        return {"started": True}
+
     @app.get("/api/abm/summary")
     def abm_summary():
         """Target-list size + breakdown, and how many rows are indexed live."""

@@ -20,6 +20,8 @@ POINTS: dict[str, int] = {
     "reply": 6,             # email reply  (≈ TOFU lead)
     "meeting_booked": 10,   # meeting agreed / booked
     "podcast_lead": 4,      # podcast listen/download lead (ICP Yes/Maybe)
+    "opportunity": 10,      # SFDC open/won opportunity (≈ BOFU — active deal)
+    "high_intent_lead": 10, # SFDC high-intent inbound lead (contact/sales form ≈ BOFU)
 }
 
 # Touches we record for rates + the timeline but that score zero — kept explicit

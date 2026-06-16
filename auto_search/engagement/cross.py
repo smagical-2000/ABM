@@ -43,7 +43,7 @@ class CrossIndex:
             dom = _usable_domain(a.get("domain"))
             if dom:
                 self._s_domain.setdefault(dom, rec)
-            key = normalize_company_name(a.get("name") or "")
+            key = _usable_name_key(normalize_company_name(a.get("name") or ""))
             if key:
                 self._s_key.setdefault(key, rec)
 
@@ -60,7 +60,7 @@ class CrossIndex:
                 self._a_domain.setdefault(dom, rec)
             # match on the target's normalized name + any expanded aliases
             for key in (t.get("keys") or [primary]):
-                if key:
+                if _usable_name_key(key):
                     self._a_key.setdefault(key, rec)
 
     @property
@@ -70,7 +70,7 @@ class CrossIndex:
     def match(self, *, company: str | None = None, domain: str | None = None,
               email: str | None = None) -> AccountMatch | None:
         dom = _usable_domain(domain) or _email_domain(email)
-        key = normalize_company_name(company or "")
+        key = _usable_name_key(normalize_company_name(company or ""))
         scored, s_tier = _lookup(self._s_domain, self._s_key, dom, key)
         abm, a_tier = _lookup(self._a_domain, self._a_key, dom, key)
         if scored:
@@ -112,6 +112,24 @@ _PERSONAL_DOMAINS = frozenset({
 def _usable_domain(value: str | None) -> str | None:
     dom = clean_domain(value)
     return dom if dom and dom not in _PERSONAL_DOMAINS else None
+
+
+# Normalized names that collapse to a single generic industry word are too broad to
+# be a reliable NAME-match key — e.g. the ABM target "Medical Associates" normalizes
+# to "medical", which then catches any junk lead whose company is just "Medical".
+# Such accounts can still match on domain (more reliable); they just don't seed a
+# name key. Keep this list tight so it only blocks genuinely degenerate keys.
+_GENERIC_NAME_KEYS = frozenset({
+    "medical", "health", "healthcare", "clinic", "clinics", "care", "group",
+    "hospital", "hospitals", "center", "centers", "dental", "wellness", "family",
+    "medicine", "physicians", "associates", "partners", "services",
+})
+
+
+def _usable_name_key(key: str | None) -> str | None:
+    """A normalized company name usable for name-matching: non-empty, not a single
+    generic industry word. (Domain matching is unaffected.)"""
+    return key if key and key not in _GENERIC_NAME_KEYS else None
 
 
 def _email_domain(email: str | None) -> str | None:

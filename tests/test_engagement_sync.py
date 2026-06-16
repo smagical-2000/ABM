@@ -171,3 +171,81 @@ async def test_podcast_and_replyio_coexist_on_same_account(tmp_path):
                "ICP": "Yes"}], now="2026-06-14T00:00:00Z")
     accts = {a["account_id"]: a for a in repo.engaged_accounts()}
     assert accts["acc_christus"]["score"] == 10        # reply 6 + podcast 4, combined
+
+
+# ── sfdc sync (same source-agnostic cross + store path) ─────────────────
+
+
+class _FakeSfdcClient:
+    def __init__(self, leads):
+        self._leads = leads
+
+    def iter_high_intent_leads(self, *, days=365):
+        yield from self._leads
+
+
+def _sfdc_leads():
+    return [
+        {"Id": "00Q1", "Company": "CHRISTUS Health", "Email": "a@christushealth.org",
+         "BN_Email_Domain__c": "christushealth.org", "LeadSource": "Sales Contact Form",
+         "Status": "New", "CreatedDate": "2026-06-10T00:00:00.000+0000"},
+        {"Id": "00Q2", "Company": "Newport Healthcare", "Email": "b@newporthealthcare.com",
+         "BN_Email_Domain__c": "newporthealthcare.com", "LeadSource": "S+G Contact Form",
+         "Status": "New", "CreatedDate": "2026-06-11T00:00:00.000+0000"},
+        {"Id": "00Q3", "Company": "Random Co", "Email": "c@randomco.com",
+         "BN_Email_Domain__c": "randomco.com", "LeadSource": "Sales Contact Form",
+         "Status": "New", "CreatedDate": "2026-06-12T00:00:00.000+0000"},
+    ]
+
+
+def test_run_sfdc_sync_crosses_and_scores(tmp_path):
+    repo = EngagementJsonRepository(path=str(tmp_path / "sf.json"))
+    stats = sync_mod.run_sfdc_sync(
+        engagement_repo=repo, scoring_repo=_FakeScoring(), discovery_repo=_FakeDiscovery(),
+        client=_FakeSfdcClient(_sfdc_leads()), now="2026-06-14T00:00:00Z")
+
+    assert stats["leads"] == 3 and stats["contacts"] == 3
+    assert stats["matched_contacts"] == 2 and stats["unresolved_contacts"] == 1
+
+    accts = {a["account_id"]: a for a in repo.engaged_accounts()}
+    assert accts["acc_christus"]["score"] == 10           # one high-intent lead x 10 (scored)
+    assert accts["abm_newporthealthcare"]["score"] == 10  # one lead x 10 (ABM-only)
+    assert not any(a.startswith("Random") for a in accts)  # unmatched -> not engaged
+    assert repo.get_sync_state("sfdc")["status"] == "success"
+
+
+def test_run_sfdc_sync_is_idempotent(tmp_path):
+    repo = EngagementJsonRepository(path=str(tmp_path / "sf2.json"))
+    first = sync_mod.run_sfdc_sync(
+        engagement_repo=repo, scoring_repo=_FakeScoring(), discovery_repo=_FakeDiscovery(),
+        client=_FakeSfdcClient(_sfdc_leads()), now="2026-06-14T00:00:00Z")
+    second = sync_mod.run_sfdc_sync(
+        engagement_repo=repo, scoring_repo=_FakeScoring(), discovery_repo=_FakeDiscovery(),
+        client=_FakeSfdcClient(_sfdc_leads()), now="2026-06-14T00:00:00Z")
+    # only the 2 matched leads persist (unmatched aren't stored); re-sync adds nothing
+    assert first["new_events"] == 2 and second["new_events"] == 0
+
+
+@pytest.mark.asyncio
+async def test_sfdc_replyio_podcast_coexist_on_same_account(tmp_path):
+    repo = EngagementJsonRepository(path=str(tmp_path / "sf3.json"))
+    # email reply (6) ...
+    activity = [{"contactId": 1, "company": "CHRISTUS Health", "email": "g@christushealth.org",
+                 "deliveryDate": "2026-06-05T00:00:00Z", "isDelivered": True, "isReplied": True}]
+    await sync_mod.run_sync(
+        engagement_repo=repo, scoring_repo=_FakeScoring(), discovery_repo=_FakeDiscovery(),
+        client=_FakeClient([], activity), max_contacts=0, now="2026-06-14T00:00:00Z")
+    # ... podcast lead (4) ...
+    sync_mod.run_podcast_sync(
+        engagement_repo=repo, scoring_repo=_FakeScoring(), discovery_repo=_FakeDiscovery(),
+        rows=[{"Submit Date": "2026-02-01 00:00:00", "Work Email": "p@christushealth.org",
+               "ICP": "Yes"}], now="2026-06-14T00:00:00Z")
+    # ... plus an SFDC high-intent lead (10), all on CHRISTUS
+    lead = [{"Id": "00Q9", "Company": "CHRISTUS Health", "Email": "h@christushealth.org",
+             "BN_Email_Domain__c": "christushealth.org", "LeadSource": "Sales Contact Form",
+             "Status": "New", "CreatedDate": "2026-06-10T00:00:00.000+0000"}]
+    sync_mod.run_sfdc_sync(
+        engagement_repo=repo, scoring_repo=_FakeScoring(), discovery_repo=_FakeDiscovery(),
+        client=_FakeSfdcClient(lead), now="2026-06-14T00:00:00Z")
+    accts = {a["account_id"]: a for a in repo.engaged_accounts()}
+    assert accts["acc_christus"]["score"] == 20        # reply 6 + podcast 4 + lead 10, combined

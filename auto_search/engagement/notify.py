@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections import Counter
 
 import httpx
 
@@ -45,6 +46,9 @@ def build_card(account: dict, events: list[dict], *, app_url: str | None = None,
               else f"{emoji} {name} is {tier}")
 
     bits = [f"*Heat:* {score} pts ({tier})"]
+    breakdown = _breakdown(events)
+    if breakdown:
+        bits.append(f"*Engagement:* {breakdown}")
     cls = _classification(account)
     if cls:
         bits.append(f"*Classification:* {cls}")
@@ -125,6 +129,20 @@ def _classification(account: dict) -> str | None:
 # ABM-import artifacts that aren't real classifications (sheet/tab names, truncated
 # headers) — never show these as a segment.
 _JUNK_SEGMENTS = frozenset({"Matches", "Sheet30", "Specialties (Definitive, 20,000"})
+
+
+def _breakdown(events: list[dict]) -> str:
+    """'5 touches — 2 high-intent leads · 1 podcast · 1 click · 1 reply' from the
+    per-kind event counts (events are one-per-contact×kind, so this is meaningful)."""
+    if not events:
+        return ""
+    counts = Counter(e.get("kind") for e in events)
+    total = sum(counts.values())
+    parts = []
+    for kind, n in counts.most_common():
+        label = _KIND.get(kind, ("", kind or "touch"))[1].lower()
+        parts.append(f"{n} {label}{'s' if n != 1 else ''}")
+    return f"{total} touch{'es' if total != 1 else ''} — " + " · ".join(parts)
 
 
 def _timeline_lines(events: list[dict], *, limit: int = 6) -> str:

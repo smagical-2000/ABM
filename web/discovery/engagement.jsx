@@ -97,6 +97,7 @@ function AccountRow({ a, onOpen, pushToast }) {
         </div>
         <div className="mt-0.5 truncate text-[12px] text-zinc-400">
           {a.contacts} contact{a.contacts === 1 ? '' : 's'}{a.domain ? ` · ${a.domain}` : ''}
+          {a.framework ? ` · ${a.framework}` : ''}{a.fit_tier ? ` · ${a.fit_tier}` : ''}
         </div>
       </div>
       <HeatCell tier={a.tier} score={a.score} />
@@ -203,6 +204,8 @@ function EngagementDrawer({ account, onClose, pushToast }) {
             <button onClick={onClose} className="rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-100"><Icons.x className="h-5 w-5" /></button>
           </div>
           <div className="mt-2 text-[12px] text-zinc-400">
+            {[account.framework, account.fit_tier].filter(Boolean).join(' · ')}
+            {(account.framework || account.fit_tier) ? ' · ' : ''}
             {pct(account.open_rate)} open rate · {pct(account.reply_rate)} reply rate · {account.contacts} contacts
           </div>
         </div>

@@ -616,6 +616,28 @@ def create_app() -> FastAPI:
 
     # ── engagement (Reply.io heat) ──────────────────────────────────────────────
 
+    # ABM-import artifacts that aren't real classifications (sheet/tab names, a
+    # truncated header) — treated as Unclassified, never shown as a segment.
+    _JUNK_SEGMENTS = frozenset({"Matches", "Sheet30", "Specialties (Definitive, 20,000"})
+    _FRAMEWORK_LABEL = {"specialty": "Specialty", "health_system": "Health System",
+                        "payer": "Payer"}
+
+    def _clean_segment(seg):
+        seg = (seg or "").strip()
+        return seg or None if seg not in _JUNK_SEGMENTS else None
+
+    def _classify(scored: dict, abm: dict) -> dict:
+        """Classification shown on an engaged account: the scored system's framework +
+        fit tier (authoritative) AND the segment (scored's, else cleaned ABM's). The
+        junk ABM segments collapse to None (the 'Unclassified' fix)."""
+        fw = (scored or {}).get("framework")
+        return {
+            "framework": _FRAMEWORK_LABEL.get(fw, fw) if fw else None,
+            "fit_tier": (scored or {}).get("tier_label"),
+            "segment": _clean_segment((scored or {}).get("segment")
+                                      or (abm or {}).get("segment")),
+        }
+
     def _abm_display(discovery_repo) -> dict[str, dict]:
         """account_id -> display info for ABM-only engaged accounts (abm_<key>)."""
         from auto_search.normalize import normalize_company_name
@@ -650,7 +672,7 @@ def create_app() -> FastAPI:
             out.append({
                 **r,
                 "name": s.get("name") or d.get("name") or aid,
-                "segment": s.get("segment") or d.get("segment"),
+                **_classify(s, d),
                 "domain": s.get("domain") or d.get("domain"),
                 "tier": engagement_scoring.tier_for(r.get("score") or 0),
                 "lists": sorted(lists_by.get(aid, [])),
@@ -710,7 +732,7 @@ def create_app() -> FastAPI:
         return {
             "account_id": account_id,
             "name": s.get("name") or d.get("name") or account_id,
-            "segment": s.get("segment") or d.get("segment"),
+            **_classify(s, d),
             "domain": s.get("domain") or d.get("domain"),
             "score": score, "tier": engagement_scoring.tier_for(score),
             "clicks": sum(1 for e in events if e.get("kind") == "click"),

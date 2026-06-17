@@ -863,6 +863,16 @@ def create_app() -> FastAPI:
         body = await _json_body(request)
         is_test = bool(body.get("test"))
         account = _engaged_one(account_id, events, contacts)
+        # SDR intel brief — reuse the scored account's already-stored research
+        # (discovery triggers + Claude dossier). Free, instant, no live call. It's
+        # a non-critical garnish, so a DB hiccup here must never block activation.
+        research: dict = {}
+        try:
+            scored = (app.state.scoring_repo.get(account_id)
+                      if hasattr(app.state.scoring_repo, "get") else None)
+            research = engagement_notify.summarize_research(scored)
+        except Exception:  # noqa: BLE001 — intel is optional; activation must not 500
+            logger.exception("intel brief failed for %s", account_id)
         # enrich (paid) — only on a real activation; a {"test": true} wiring post
         # never spends credits. Degrades to [] on any failure.
         dms: list[dict] = []
@@ -876,7 +886,7 @@ def create_app() -> FastAPI:
         app_url = os.getenv("ENGAGEMENT_APP_URL")
         ok = await asyncio.to_thread(
             engagement_notify.activate_account, account, events,
-            dms=dms, app_url=app_url, test=is_test)
+            dms=dms, research=research, app_url=app_url, test=is_test)
         if not ok:
             raise HTTPException(status_code=502, detail="Slack post failed (check webhook)")
         return {"posted": True, "account_id": account_id, "contacts": dms}

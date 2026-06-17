@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from collections import Counter
 
 import httpx
@@ -33,12 +34,14 @@ _KIND = {
 
 
 def build_card(account: dict, events: list[dict], *, dms: list[dict] | None = None,
-               app_url: str | None = None, sdr: str | None = None,
-               test: bool = False) -> dict:
+               research: dict | None = None, app_url: str | None = None,
+               sdr: str | None = None, test: bool = False) -> dict:
     """Build the Slack message (Block Kit) for an activated account. PURE.
 
     `dms` are the enriched decision-makers (name/title/email/phone) — the sales
-    packet rendered into the card. `sdr` is rendered as PLAIN TEXT (no @-mention →
+    packet rendered into the card. `research` is the SDR intel brief (why-now /
+    triggers / news / opening angle) from `summarize_research` — reuses data we
+    already have, no extra cost. `sdr` is rendered as PLAIN TEXT (no @-mention →
     no notification). `test` marks the message as a wiring test.
     """
     name = account.get("name") or account.get("account_id") or "Unknown account"
@@ -65,6 +68,12 @@ def build_card(account: dict, events: list[dict], *, dms: list[dict] | None = No
         {"type": "header", "text": {"type": "plain_text", "text": header[:150]}},
         {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(bits)}},
     ]
+
+    intel = _research_lines(research)
+    if intel:
+        blocks.append({"type": "divider"})
+        blocks.append({"type": "section",
+                       "text": {"type": "mrkdwn", "text": "*Account intel*\n" + intel}})
 
     dm_lines = _dm_lines(dms)
     if dm_lines:
@@ -100,11 +109,13 @@ def post_card(payload: dict, *, webhook: str | None = None,
 
 
 def activate_account(account: dict, events: list[dict], *, dms: list[dict] | None = None,
-                     app_url: str | None = None, sdr: str | None = None, test: bool = False,
+                     research: dict | None = None, app_url: str | None = None,
+                     sdr: str | None = None, test: bool = False,
                      webhook: str | None = None, http: httpx.Client | None = None) -> bool:
-    """Build + post the activation card (with enriched decision-makers). Returns
-    True if Slack accepted it."""
-    return post_card(build_card(account, events, dms=dms, app_url=app_url, sdr=sdr, test=test),
+    """Build + post the activation card (with enriched decision-makers + intel brief).
+    Returns True if Slack accepted it."""
+    return post_card(build_card(account, events, dms=dms, research=research,
+                                app_url=app_url, sdr=sdr, test=test),
                      webhook=webhook, http=http)
 
 
@@ -151,3 +162,103 @@ def _breakdown(events: list[dict]) -> str:
         return ""
     counts = Counter(e.get("kind") for e in events)
     return " · ".join(f"{_KIND.get(k, k or 'Touch')} {n}" for k, n in counts.most_common())
+
+
+# ── SDR intel brief (deep-research, reuses already-stored data) ───────────────
+
+
+def summarize_research(scored: dict | None, *, max_signals: int = 3,
+                       max_news: int = 2) -> dict:
+    """SDR-ready intel from an account's EXISTING research — no live calls, no cost.
+
+    Pulls the scored account's discovery signals (the triggers that put it in the
+    funnel: hiring, funding, layoffs, leadership) and the Claude dossier (entry
+    timing = 'why now', recent news, recommended opening angle). PURE. Returns {}
+    when the account has no stored research (e.g. ABM-only, never scored)."""
+    # isinstance (not truthiness): legacy/migrated JSONB could be a non-dict and
+    # must never crash an activation post.
+    s = scored if isinstance(scored, dict) else {}
+    dossier = s.get("dossier") if isinstance(s.get("dossier"), dict) else {}
+    entry = (dossier.get("entry_strategy")
+             if isinstance(dossier.get("entry_strategy"), dict) else {})
+    out: dict = {}
+
+    why = _clean(entry.get("timing"))
+    if why:
+        out["why_now"] = _trim(why, 240)
+
+    signals: list[str] = []
+    seen: set[str] = set()
+    for sig in _as_list(s.get("discovery_signals")):
+        txt = _clean(sig.get("summary") if isinstance(sig, dict) else sig)
+        if not txt:
+            continue
+        # discovery often repeats one role across many locations ("Hiring: X — City");
+        # dedupe on the head so the brief shows distinct triggers, not the same one.
+        key = re.split(r"\s[—–-]\s", txt, maxsplit=1)[0].strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        signals.append(_trim(txt, 120))
+        if len(signals) >= max_signals:
+            break
+    if signals:
+        out["triggers"] = signals
+
+    news: list[dict] = []
+    for n in _as_list(dossier.get("recent_news")):
+        if not isinstance(n, dict):
+            continue
+        head = _clean(n.get("headline"))
+        # dossiers record negative findings ("No significant expansion identified…") —
+        # those aren't news a rep can use on a call, so skip them.
+        if not head or head.lower().startswith("no "):
+            continue
+        news.append({"headline": _trim(head, 140), "date": _clean(n.get("date"))})
+        if len(news) >= max_news:
+            break
+    if news:
+        out["news"] = news
+
+    angles = _as_list(entry.get("primary_angles"))
+    angle = _clean(angles[0]) if angles else ""
+    if angle:
+        out["angle"] = _trim(angle, 240)
+
+    return out
+
+
+def _as_list(v) -> list:
+    """v if it's a list, else [] — JSONB fields can be the wrong shape."""
+    return v if isinstance(v, list) else []
+
+
+def _research_lines(research: dict | None) -> str:
+    """Render the intel brief as mrkdwn (no emoji). Empty string when nothing."""
+    if not research:
+        return ""
+    out: list[str] = []
+    if research.get("why_now"):
+        out.append(f"*Why now:* {research['why_now']}")
+    triggers = research.get("triggers") or []
+    if triggers:
+        out.append("*Triggers:*\n" + "\n".join(f"• {x}" for x in triggers))
+    news = research.get("news") or []
+    if news:
+        lines = [f"• {n['headline']}" + (f" ({n['date']})" if n.get("date") else "")
+                 for n in news]
+        out.append("*Recent news:*\n" + "\n".join(lines))
+    if research.get("angle"):
+        out.append(f"*Opening angle:* {research['angle']}")
+    return "\n".join(out)
+
+
+def _clean(v) -> str:
+    """str | None -> stripped str (empty for None/blank)."""
+    return str(v).strip() if v is not None else ""
+
+
+def _trim(s: str, n: int) -> str:
+    """Truncate to n chars with an ellipsis (Slack sections cap at 3000)."""
+    s = s.strip()
+    return s if len(s) <= n else s[: n - 1].rstrip() + "…"

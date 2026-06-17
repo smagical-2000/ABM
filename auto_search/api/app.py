@@ -616,15 +616,23 @@ def create_app() -> FastAPI:
 
     # ── engagement (Reply.io heat) ──────────────────────────────────────────────
 
-    # ABM-import artifacts that aren't real classifications (sheet/tab names, a
-    # truncated header) — treated as Unclassified, never shown as a segment.
-    _JUNK_SEGMENTS = frozenset({"Matches", "Sheet30", "Specialties (Definitive, 20,000"})
+    # ABM-import artifacts that are sheet/tab names, not classifications — Unclassified.
+    _JUNK_SEGMENTS = frozenset({"Matches", "Sheet30"})
     _FRAMEWORK_LABEL = {"specialty": "Specialty", "health_system": "Health System",
                         "payer": "Payer"}
 
     def _clean_segment(seg):
-        seg = (seg or "").strip()
-        return seg or None if seg not in _JUNK_SEGMENTS else None
+        """Normalize an ABM segment to a clean label; junk (sheet names) -> None.
+        The workbook truncated 'Specialties (Definitive, 20,000...' and abbreviates
+        physician groups as 'PGs - X' — fix both so they read as real classes."""
+        s = (seg or "").strip()
+        if not s or s in _JUNK_SEGMENTS:
+            return None
+        if s.startswith("Specialties (Definitive"):
+            return "Specialties"
+        if s.startswith("PGs - "):
+            return "Physician Group - " + s[len("PGs - "):]
+        return s
 
     def _classify(scored: dict, abm: dict) -> dict:
         """Classification shown on an engaged account: the scored system's framework +
@@ -646,9 +654,18 @@ def create_app() -> FastAPI:
                    if hasattr(discovery_repo, "abm_targets") else [])
         for t in targets:
             key = normalize_company_name(t.get("name") or "")
-            if key:
-                out[f"abm_{key}"] = {"name": t.get("name"), "segment": t.get("segment"),
-                                     "domain": t.get("domain")}
+            if not key:
+                continue
+            aid = f"abm_{key}"
+            rec = out.get(aid)
+            if rec is None:
+                rec = out[aid] = {"name": t.get("name"), "segment": None, "domain": None}
+            # duplicate rows per company are common (one carries the real class, one
+            # the junk 'Matches' tab) — keep the first NON-junk segment + a domain.
+            if rec["segment"] is None:
+                rec["segment"] = _clean_segment(t.get("segment"))
+            rec["domain"] = rec["domain"] or t.get("domain")
+            rec["name"] = rec["name"] or t.get("name")
         return out
 
     def _engaged_view() -> list[dict]:

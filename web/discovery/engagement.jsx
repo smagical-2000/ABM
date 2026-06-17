@@ -338,9 +338,14 @@ function EngagementView({ pushToast }) {
         <div>
           <h1 className="text-[24px] font-semibold tracking-tight text-zinc-900">Engagement</h1>
           <p className="mt-1 text-[14px] text-zinc-500">
-            Reply.io + podcast + Salesforce engagement matched to your scored + ABM accounts, scored into heat.
-            {lastSync && lastSync.last_synced_at && <span> Last synced {relativeTime(lastSync.last_synced_at)}.</span>}
+            Buyer intent across email, podcast &amp; Salesforce — matched to your accounts, ranked by heat.
           </p>
+          {lastSync && lastSync.last_synced_at && (
+            <p className="mt-1 inline-flex items-center gap-1.5 text-[12px] text-zinc-400">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+              Synced {relativeTime(lastSync.last_synced_at)}
+            </p>
+          )}
         </div>
         <button onClick={sync} disabled={syncing}
           className="inline-flex shrink-0 items-center gap-2 rounded-lg bg-indigo-600 px-3.5 py-2 text-[13px] font-medium text-white shadow-sm transition-colors hover:bg-indigo-700 disabled:opacity-50">

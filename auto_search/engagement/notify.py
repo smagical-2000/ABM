@@ -127,9 +127,9 @@ def _classification(account: dict) -> str | None:
     return " · ".join(parts) if parts else None
 
 
-# ABM-import artifacts that aren't real classifications (sheet/tab names, truncated
-# headers) — never show these as a segment.
-_JUNK_SEGMENTS = frozenset({"Matches", "Sheet30", "Specialties (Definitive, 20,000"})
+# ABM-import artifacts (sheet/tab names) — never show these as a segment. The API
+# already cleans segments before the card is built; this is a defensive backstop.
+_JUNK_SEGMENTS = frozenset({"Matches", "Sheet30"})
 
 
 def _breakdown(events: list[dict]) -> str:

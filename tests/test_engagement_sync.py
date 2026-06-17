@@ -51,7 +51,7 @@ async def test_run_sync_pulls_normalizes_crosses_stores(tmp_path):
     ]
     stats = await sync_mod.run_sync(
         engagement_repo=repo, scoring_repo=_FakeScoring(), discovery_repo=_FakeDiscovery(),
-        client=_FakeClient(contacts, activity), days=30, max_contacts=None,
+        client=_FakeClient(contacts, activity), max_contacts=None,
         now="2026-06-14T00:00:00Z")
 
     assert stats["activity_rows"] == 3
@@ -66,28 +66,26 @@ async def test_run_sync_pulls_normalizes_crosses_stores(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_run_sync_widens_to_60_days_when_sparse(tmp_path):
+async def test_run_sync_pulls_from_since_floor(tmp_path):
     repo = EngagementJsonRepository(path=str(tmp_path / "e2.json"))
     calls = []
 
-    class _SparseClient:
+    class _Client:
         async def iter_contacts(self, *, top=1000):
             return
-            yield  # pragma: no cover (never reached — max_contacts=0 skips the roster)
+            yield  # pragma: no cover (max_contacts=0 skips the roster)
 
         async def iter_email_activity(self, *, date_from, date_to, top=200):
             calls.append(date_from)
-            if len(calls) == 1:                         # first (30d) window: sparse
-                yield {"contactId": 1, "isDelivered": True, "deliveryDate": "2026-06-10T00:00:00Z"}
-            else:                                       # widened (60d) window: enough rows
-                for i in range(25):
-                    yield {"contactId": i, "company": f"Co{i}", "isDelivered": True,
-                           "isClicked": True, "deliveryDate": "2026-05-10T00:00:00Z"}
+            yield {"contactId": 1, "company": "CHRISTUS Health", "email": "g@christushealth.org",
+                   "isDelivered": True, "isReplied": True, "deliveryDate": "2026-03-10T00:00:00Z"}
 
     stats = await sync_mod.run_sync(
         engagement_repo=repo, scoring_repo=_FakeScoring(), discovery_repo=_FakeDiscovery(),
-        client=_SparseClient(), max_contacts=0, now="2026-06-14T00:00:00Z")
-    assert len(calls) == 2 and stats["window_days"] == 60
+        client=_Client(), since="2026-01-01", max_contacts=0, now="2026-06-14T00:00:00Z")
+    # one pull from the Jan-2026 floor (no rolling-window widening)
+    assert len(calls) == 1 and calls[0].date().isoformat() == "2026-01-01"
+    assert stats["window_from"] == "2026-01-01"
 
 
 @pytest.mark.asyncio

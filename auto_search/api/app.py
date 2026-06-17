@@ -54,7 +54,7 @@ from auto_search.engagement import scoring as engagement_scoring
 from auto_search.engagement import sync as engagement_sync_mod
 from auto_search.intros import profiles as intros_profiles
 from auto_search.intros import service as intros_service
-from auto_search.normalize import normalize_company_name, normalize_linkedin_url
+from auto_search.normalize import clean_domain, normalize_company_name, normalize_linkedin_url
 from auto_search.run_control import RunControl
 from auto_search.runtime import is_production
 from auto_search.scoring import budget as budget_guard
@@ -441,6 +441,29 @@ def create_app() -> FastAPI:
     def _abm_index() -> AbmIndex | None:
         return getattr(app.state, "abm_index", None)
 
+    def _engagement_tiers() -> tuple[dict, dict]:
+        """(by_domain, by_company_key) -> engagement heat tier, for the AGT-1390
+        Discovery score lift (an engaged account ranks higher). Best-effort."""
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            return {}, {}
+        try:
+            tier_by_acct = {a["account_id"]: engagement_scoring.tier_for(a.get("score") or 0)
+                            for a in repo.engaged_accounts()}
+            by_dom, by_key = {}, {}
+            for c in repo.contacts():
+                t = tier_by_acct.get(c.get("account_id"))
+                if not t:
+                    continue
+                if c.get("email_domain"):
+                    by_dom.setdefault(c["email_domain"], t)
+                if c.get("company_key"):
+                    by_key.setdefault(c["company_key"], t)
+            return by_dom, by_key
+        except Exception:  # noqa: BLE001 — never break the panel read
+            logger.exception("engagement tier lookup failed")
+            return {}, {}
+
     def _abm_social_lookup(name, domain=None):
         """Is this company on the ABM target list? The social flow uses it to
         treat a tracked account as authoritative — surfaced + highlighted without
@@ -459,6 +482,7 @@ def create_app() -> FastAPI:
             logger.exception("panel qualify cost lookup failed")
             costs, est = {}, None
         index = _abm_index()
+        eng_dom, eng_key = _engagement_tiers()   # AGT-1390: engaged accounts rank higher
         out: list[PanelCompany] = []
         for c in companies:
             cost = costs.get(c.company_key)
@@ -466,8 +490,10 @@ def create_app() -> FastAPI:
             abm_match = match_one(index, name=c.name, domain=c.domain, states=states)
             sigs = [{"signal_type": s.signal_type, "title": s.title, "role": s.role,
                      "tier": s.tier, "observed_at": s.observed_at} for s in (c.signals or [])]
+            eng_tier = eng_dom.get(clean_domain(c.domain)) or eng_key.get(c.company_key)
             it = priority.intent(
-                sigs, abm_confirmed=bool(abm_match and abm_match.tier == "confirmed"))
+                sigs, abm_confirmed=bool(abm_match and abm_match.tier == "confirmed"),
+                outcomes={"engagement_tier": eng_tier} if eng_tier else None)
             # Lone standard hire (single biller/coder, nothing stronger) → Watch list,
             # not Discovery. Same gate the cron parks on, so the views agree.
             is_watchlist = job_stacking.should_park_flat(sigs)
@@ -856,7 +882,7 @@ def create_app() -> FastAPI:
         return {"posted": True, "account_id": account_id, "contacts": dms}
 
     @app.post("/api/engagement/sync")
-    def engagement_sync(days: int = 30, max_contacts: int | None = None):
+    def engagement_sync(since: str = "2026-01-01", max_contacts: int | None = None):
         repo = getattr(app.state, "engagement_repo", None)
         if not repo:
             raise HTTPException(status_code=503, detail="engagement store not available")
@@ -868,7 +894,7 @@ def create_app() -> FastAPI:
             try:
                 await engagement_sync_mod.run_sync(
                     engagement_repo=repo, scoring_repo=app.state.scoring_repo,
-                    discovery_repo=app.state.repo, days=days, max_contacts=max_contacts)
+                    discovery_repo=app.state.repo, since=since, max_contacts=max_contacts)
             except Exception:  # noqa: BLE001 — never crash the loop
                 logger.exception("engagement sync failed")
             finally:

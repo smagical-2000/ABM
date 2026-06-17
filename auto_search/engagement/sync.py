@@ -18,14 +18,13 @@ from auto_search.engagement import ingest as ingest_mod
 from auto_search.engagement import podcast as podcast_mod
 from auto_search.engagement import sfdc as sfdc_mod
 from auto_search.engagement.cross import build_index
-from auto_search.engagement.replyio_client import ReplyioClient, default_window
+from auto_search.engagement.replyio_client import ReplyioClient
 
 logger = logging.getLogger(__name__)
 
 SOURCE = "replyio"
 PODCAST_SOURCE = "podcast"
 SFDC_SOURCE = "sfdc"
-_MIN_ACTIVITY_ROWS = 20      # below this over `days`, widen the window to 60d
 
 
 def cross_and_persist(*, engagement_repo, scoring_repo, discovery_repo,
@@ -62,23 +61,22 @@ def cross_and_persist(*, engagement_repo, scoring_repo, discovery_repo,
 
 
 async def run_sync(*, engagement_repo, scoring_repo, discovery_repo,
-                   client: ReplyioClient | None = None, days: int = 30,
+                   client: ReplyioClient | None = None, since: str = "2026-01-01",
                    max_contacts: int | None = None, now: str | None = None) -> dict:
     """Pull Reply.io (read-only), normalize, cross to accounts, store. Returns stats.
 
-    `max_contacts` caps the roster pull (None = all; 0 = skip the roster and derive
-    identity from the activity rows alone — fast). Crossing + storage are always run.
+    Pulls ALL email activity created on/after `since` (default the 2026-onward
+    cohort), so the engagement board reflects every touch since Jan 2026 — not just a
+    rolling window. `max_contacts` caps the roster pull (None = all; 0 = skip the
+    roster and derive identity from the activity rows alone). Crossing + storage always run.
     """
     client = client or ReplyioClient()
     now = now or datetime.now(UTC).isoformat()
     engagement_repo.set_sync_state(SOURCE, status="running")
     try:
-        frm, to = default_window(days)
+        frm = datetime.fromisoformat(since).replace(tzinfo=UTC)
+        to = datetime.now(UTC)
         activity = [r async for r in client.iter_email_activity(date_from=frm, date_to=to)]
-        if len(activity) < _MIN_ACTIVITY_ROWS and days < 60:
-            days = 60
-            frm, to = default_window(days)
-            activity = [r async for r in client.iter_email_activity(date_from=frm, date_to=to)]
 
         contacts: list[dict] = []
         if max_contacts != 0:
@@ -102,7 +100,7 @@ async def run_sync(*, engagement_repo, scoring_repo, discovery_repo,
             event_rows=event_rows)
 
         stats = {
-            "window_days": days, "activity_rows": len(activity),
+            "window_from": wf, "window_to": wt, "activity_rows": len(activity),
             "contacts": len(contact_rows), "events": len(event_rows),
             "new_events": new_events, "matched_contacts": matched,
             "unresolved_contacts": len(contact_rows) - matched,

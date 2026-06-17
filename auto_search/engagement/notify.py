@@ -33,12 +33,14 @@ _KIND = {
 _TIER_EMOJI = {"Hot": "🔥", "Warm": "🌤️", "Some": "🌥️", "Lower": "☁️"}
 
 
-def build_card(account: dict, events: list[dict], *, app_url: str | None = None,
-               sdr: str | None = None, test: bool = False) -> dict:
+def build_card(account: dict, events: list[dict], *, dms: list[dict] | None = None,
+               app_url: str | None = None, sdr: str | None = None,
+               test: bool = False) -> dict:
     """Build the Slack message (Block Kit) for an activated account. PURE.
 
-    `sdr` is rendered as PLAIN TEXT (no @-mention → no notification). `test` marks
-    the message as a wiring test so it's obviously ignorable in-channel.
+    `dms` are the enriched decision-makers (name/title/email/phone) — the sales
+    packet rendered into the card. `sdr` is rendered as PLAIN TEXT (no @-mention →
+    no notification). `test` marks the message as a wiring test.
     """
     name = account.get("name") or account.get("account_id") or "Unknown account"
     tier = account.get("tier") or "—"
@@ -71,6 +73,10 @@ def build_card(account: dict, events: list[dict], *, app_url: str | None = None,
     if timeline:
         blocks.append({"type": "section",
                        "text": {"type": "mrkdwn", "text": "*Recent touches*\n" + timeline}})
+    dm_lines = _dm_lines(dms)
+    if dm_lines:
+        blocks.append({"type": "section",
+                       "text": {"type": "mrkdwn", "text": "*Decision-makers*\n" + dm_lines}})
     if app_url and app_url.startswith(("http://", "https://")):   # Slack rejects scheme-less URLs
         blocks.append({"type": "actions", "elements": [
             {"type": "button", "text": {"type": "plain_text", "text": "Open in console"},
@@ -100,12 +106,24 @@ def post_card(payload: dict, *, webhook: str | None = None,
         return False
 
 
-def activate_account(account: dict, events: list[dict], *, app_url: str | None = None,
-                     sdr: str | None = None, test: bool = False,
+def activate_account(account: dict, events: list[dict], *, dms: list[dict] | None = None,
+                     app_url: str | None = None, sdr: str | None = None, test: bool = False,
                      webhook: str | None = None, http: httpx.Client | None = None) -> bool:
-    """Build + post the activation card. Returns True if Slack accepted it."""
-    return post_card(build_card(account, events, app_url=app_url, sdr=sdr, test=test),
+    """Build + post the activation card (with enriched decision-makers). Returns
+    True if Slack accepted it."""
+    return post_card(build_card(account, events, dms=dms, app_url=app_url, sdr=sdr, test=test),
                      webhook=webhook, http=http)
+
+
+def _dm_lines(dms: list[dict] | None, *, limit: int = 5) -> str:
+    """Up to `limit` decision-makers: '• *Jane Doe* — VP Revenue Cycle\\n   jane@x.com · +1…'."""
+    out = []
+    for p in (dms or [])[:limit]:
+        who = p.get("name") or "—"
+        title = f" — {p['title']}" if p.get("title") else ""
+        ci = " · ".join(x for x in (p.get("email"), p.get("phone")) if x) or "no contact info found"
+        out.append(f"• *{who}*{title}\n   {ci}")
+    return "\n".join(out)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────

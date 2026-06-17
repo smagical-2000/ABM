@@ -84,6 +84,22 @@ def test_app_url_adds_button():
     assert "Open in console" in blob and "https://x.example/eng" in blob
 
 
+def test_card_includes_decision_makers():
+    dms = [{"name": "Jane Doe", "title": "VP Revenue Cycle", "email": "jane@acme.com", "phone": "+1 555 1"},
+           {"name": "John Roe", "title": "CFO", "email": None, "phone": None}]
+    card = notify.build_card(_acct(), _events(), dms=dms)
+    blob = json.dumps(card, ensure_ascii=False)
+    assert "Decision-makers" in blob
+    assert "Jane Doe" in blob and "VP Revenue Cycle" in blob and "jane@acme.com" in blob
+    assert "no contact info found" in blob          # John has neither
+    assert "<@" not in blob                          # still never pings anyone
+
+
+def test_card_no_dms_section_when_none():
+    card = notify.build_card(_acct(), _events())
+    assert "Decision-makers" not in json.dumps(card, ensure_ascii=False)
+
+
 def test_scheme_less_app_url_adds_no_button():
     # Slack rejects scheme-less button URLs (invalid_blocks) — guard against it
     card = notify.build_card(_acct(), _events(), app_url="example.com/eng")

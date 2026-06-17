@@ -822,8 +822,10 @@ def create_app() -> FastAPI:
 
     @app.post("/api/engagement/{account_id}/activate")
     async def engagement_activate(account_id: str, request: Request):
-        """Post an account's heat card to the Slack engagement channel (manual
-        activation). Read-only on our data; the only side effect is the Slack post.
+        """Activate an account → enrich it (decision-makers + verified email/mobile
+        via Apollo + FullEnrich) and post a full sales packet (intent story + heat +
+        contacts) to the Slack engagement channel. Enrichment runs ONLY here (on
+        activation), so credits are spent only on accounts a rep chose to action.
         Body may pass {"test": true} to mark the message as a wiring test."""
         repo = getattr(app.state, "engagement_repo", None)
         if not repo:
@@ -834,13 +836,22 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="account not found")
         body = await _json_body(request)
         account = _engaged_one(account_id, events, contacts)
+        # enrich (paid) — gated to activation; degrades to [] on any failure
+        dms: list[dict] = []
+        if account.get("domain"):
+            from auto_search.engagement import enrichment
+            try:
+                dms = await enrichment.enrich_account(account["domain"],
+                                                      company=account.get("name"))
+            except Exception:  # noqa: BLE001 — never block the activation post
+                logger.exception("activation enrichment failed for %s", account_id)
         app_url = os.getenv("ENGAGEMENT_APP_URL")
         ok = await asyncio.to_thread(
             engagement_notify.activate_account, account, events,
-            app_url=app_url, test=bool(body.get("test")))
+            dms=dms, app_url=app_url, test=bool(body.get("test")))
         if not ok:
             raise HTTPException(status_code=502, detail="Slack post failed (check webhook)")
-        return {"posted": True, "account_id": account_id}
+        return {"posted": True, "account_id": account_id, "contacts": dms}
 
     @app.post("/api/engagement/sync")
     def engagement_sync(days: int = 30, max_contacts: int | None = None):

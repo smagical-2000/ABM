@@ -478,8 +478,11 @@ function EngagementView({ pushToast }){
     window.API.syncEngagement().then(()=>setTimeout(()=>load().finally(()=>{ setSyncing(false); pushToast&&pushToast('Engagement synced','success'); }),4000))
       .catch(e=>{ setSyncing(false); pushToast&&pushToast(`Sync failed: ${e.message}`,'danger'); }); }
   function handleActivate(a){ setActivating(null); setOpen(null);
-    window.API.activateEngagement(a.id).then(()=>pushToast&&pushToast(`Activated ${a.name} — posted to Slack`,'success'))
-      .catch(e=>pushToast&&pushToast(`Activate failed: ${e.message}`,'danger')); }
+    pushToast&&pushToast(`Enriching ${a.name} + posting to Slack…`,'muted');
+    window.API.activateEngagement(a.id).then(r=>{
+      const n=(r&&r.contacts||[]).filter(p=>p.email||p.phone).length;
+      pushToast&&pushToast(`Activated ${a.name} — posted to Slack${n?` with ${n} contact${n===1?'':'s'}`:''}`,'success');
+    }).catch(e=>pushToast&&pushToast(`Activate failed: ${e.message}`,'danger')); }
 
   const movers=useMemo(()=>{
     const changed=accounts.filter(a=>a.trend==='up'&&tierOf(a.score)!==tierOf(a.score-a.deltaWeek));

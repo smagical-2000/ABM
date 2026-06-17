@@ -27,7 +27,7 @@ def test_card_header_and_heat():
     card = notify.build_card(_acct(), _events())
     blob = json.dumps(card, ensure_ascii=False)
     assert card["blocks"][0]["type"] == "header"
-    assert "Acme Health is Hot" in card["blocks"][0]["text"]["text"]
+    assert card["blocks"][0]["text"]["text"] == "Acme Health — Hot"   # no emoji
     assert "24 pts (Hot)" in blob
     assert card["text"] == "Acme Health is Hot (24 pts)"
 
@@ -50,32 +50,20 @@ def test_junk_segment_suppressed():
     assert "Matches" not in json.dumps(card, ensure_ascii=False)        # never show the import artifact
 
 
-def test_timeline_is_newest_first_with_points():
+def test_card_signals_are_counts_no_emoji_no_timeline():
+    # signals = per-kind counts only; no per-touch rows, no emoji
     card = notify.build_card(_acct(), _events())
     blob = json.dumps(card, ensure_ascii=False)
-    assert "High-intent lead · 2026-06-08 · +10" in blob
-    # newest (Jun 8) appears before oldest shown (Mar 18)
-    assert blob.index("2026-06-08") < blob.index("2026-03-18")
-
-
-def test_card_shows_engagement_breakdown():
-    # 3 events: 1 high-intent lead, 1 podcast, 1 click -> "3 touches — 1 ... · 1 ... · 1 ..."
-    card = notify.build_card(_acct(), _events())
-    blob = json.dumps(card, ensure_ascii=False)
-    assert "*Engagement:* 3 touches —" in blob
-    assert "1 high-intent lead" in blob and "1 podcast" in blob and "1 click" in blob
-
-
-def test_breakdown_pluralizes():
-    evs = [{"kind": "click", "points": 1, "occurred_at": "2026-06-01T00:00:00Z"},
-           {"kind": "click", "points": 1, "occurred_at": "2026-06-02T00:00:00Z"}]
-    card = notify.build_card(_acct(), evs)
-    assert "2 touches — 2 clicks" in json.dumps(card, ensure_ascii=False)
+    assert "*Signals:* High-intent lead 1 · Podcast 1 · Click 1" in blob
+    assert "Recent touches" not in blob               # no per-touch spam
+    for emoji in ("🔥", "📝", "👆", "🎙️", "🤝", "🎪"):
+        assert emoji not in blob                       # professional, emoji-free
+    assert "+10 pts" not in blob and "2026-06-08" not in blob   # no per-touch dates/points
 
 
 def test_test_flag_marks_message():
     card = notify.build_card(_acct(), _events(), test=True)
-    assert "🧪 [test]" in card["blocks"][0]["text"]["text"]
+    assert card["blocks"][0]["text"]["text"] == "[TEST] Acme Health — Hot"
 
 
 def test_app_url_adds_button():

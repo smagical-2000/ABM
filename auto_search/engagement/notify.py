@@ -19,18 +19,17 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# kind -> (emoji, label) for the touch timeline in the card
+# kind -> label (no emoji — the Slack card stays clean/professional)
 _KIND = {
-    "high_intent_lead": ("📝", "High-intent lead"),
-    "meeting_booked": ("🤝", "Meeting"),
-    "opportunity": ("💰", "Opportunity"),
-    "reply": ("✉️", "Reply"),
-    "click": ("👆", "Click"),
-    "podcast_lead": ("🎙️", "Podcast"),
-    "tradeshow": ("🎪", "Tradeshow"),
-    "low_intent_lead": ("📄", "TOFU content"),
+    "high_intent_lead": "High-intent lead",
+    "meeting_booked": "Meeting",
+    "opportunity": "Opportunity",
+    "reply": "Reply",
+    "click": "Click",
+    "podcast_lead": "Podcast",
+    "tradeshow": "Tradeshow",
+    "low_intent_lead": "TOFU content",
 }
-_TIER_EMOJI = {"Hot": "🔥", "Warm": "🌤️", "Some": "🌥️", "Lower": "☁️"}
 
 
 def build_card(account: dict, events: list[dict], *, dms: list[dict] | None = None,
@@ -45,14 +44,12 @@ def build_card(account: dict, events: list[dict], *, dms: list[dict] | None = No
     name = account.get("name") or account.get("account_id") or "Unknown account"
     tier = account.get("tier") or "—"
     score = account.get("score") or 0
-    emoji = _TIER_EMOJI.get(tier, "🔥")
-    header = (f"🧪 [test] {name}" if test
-              else f"{emoji} {name} is {tier}")
+    header = f"[TEST] {name} — {tier}" if test else f"{name} — {tier}"
 
     bits = [f"*Heat:* {score} pts ({tier})"]
     breakdown = _breakdown(events)
     if breakdown:
-        bits.append(f"*Engagement:* {breakdown}")
+        bits.append(f"*Signals:* {breakdown}")
     cls = _classification(account)
     if cls:
         bits.append(f"*Classification:* {cls}")
@@ -69,10 +66,6 @@ def build_card(account: dict, events: list[dict], *, dms: list[dict] | None = No
         {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(bits)}},
     ]
 
-    timeline = _timeline_lines(events)
-    if timeline:
-        blocks.append({"type": "section",
-                       "text": {"type": "mrkdwn", "text": "*Recent touches*\n" + timeline}})
     dm_lines = _dm_lines(dms)
     if dm_lines:
         blocks.append({"type": "section",
@@ -152,25 +145,9 @@ _JUNK_SEGMENTS = frozenset({"Matches", "Sheet30"})
 
 
 def _breakdown(events: list[dict]) -> str:
-    """'5 touches — 2 high-intent leads · 1 podcast · 1 click · 1 reply' from the
-    per-kind event counts (events are one-per-contact×kind, so this is meaningful)."""
+    """Per-kind counts only (no per-touch spam): 'High-intent lead 1 · Click 2 · Reply 1'.
+    Events are one-per-contact×kind, so the count is meaningful. Ordered by weight."""
     if not events:
         return ""
     counts = Counter(e.get("kind") for e in events)
-    total = sum(counts.values())
-    parts = []
-    for kind, n in counts.most_common():
-        label = _KIND.get(kind, ("", kind or "touch"))[1].lower()
-        parts.append(f"{n} {label}{'s' if n != 1 else ''}")
-    return f"{total} touch{'es' if total != 1 else ''} — " + " · ".join(parts)
-
-
-def _timeline_lines(events: list[dict], *, limit: int = 6) -> str:
-    """Up to `limit` most-recent touches, newest first: '📝 High-intent lead · Jun 8 · +10'."""
-    rows = sorted(events, key=lambda e: e.get("occurred_at") or "", reverse=True)[:limit]
-    out = []
-    for e in rows:
-        emoji, label = _KIND.get(e.get("kind"), ("•", e.get("kind") or "Touch"))
-        day = (e.get("occurred_at") or "")[:10]
-        out.append(f"{emoji} {label} · {day} · +{e.get('points', 0)}")
-    return "\n".join(out)
+    return " · ".join(f"{_KIND.get(k, k or 'Touch')} {n}" for k, n in counts.most_common())

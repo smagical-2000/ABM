@@ -461,6 +461,11 @@ function EngagementView({ pushToast }){
   const [activating,setActivating]=useState(null);
   const [segFilter,setSegFilter]=useState('all');
   const [syncing,setSyncing]=useState(false);
+  // Auto-activate: when on, every Hot account is activated once (enriched + posted
+  // to Slack), deduped via localStorage so it never re-posts. Mirrors auto-score.
+  const [autoActivate,setAutoActivate]=useState(()=>localStorage.getItem('autoActivateEnabled')==='1');
+  useEffect(()=>{ try{ localStorage.setItem('autoActivateEnabled', autoActivate?'1':'0'); }catch(_e){} },[autoActivate]);
+  const autoRef=useRef(false);
 
   function load(){
     return Promise.all([window.API.engagement(),window.API.engagementInbox()]).then(([eng,inb])=>{
@@ -483,6 +488,28 @@ function EngagementView({ pushToast }){
       const n=(r&&r.contacts||[]).filter(p=>p.email||p.phone).length;
       pushToast&&pushToast(`Activated ${a.name} — posted to Slack${n?` with ${n} contact${n===1?'':'s'}`:''}`,'success');
     }).catch(e=>pushToast&&pushToast(`Activate failed: ${e.message}`,'danger')); }
+
+  // Auto-activate Hot accounts (once each) when the toggle is on. Sequential so we
+  // don't hammer Slack/enrichment; deduped in localStorage so re-renders don't re-post.
+  useEffect(()=>{
+    if(!autoActivate || !accounts.length || autoRef.current) return;
+    let done; try{ done=new Set(JSON.parse(localStorage.getItem('engagementActivated')||'[]')); }catch(_e){ done=new Set(); }
+    const todo=accounts.filter(a=>tierOf(a.score)==='Hot' && !done.has(a.id));
+    if(!todo.length) return;
+    autoRef.current=true;
+    pushToast&&pushToast(`Auto-activating ${todo.length} Hot account${todo.length===1?'':'s'}…`,'muted');
+    (async()=>{
+      for(const a of todo){
+        try{
+          await window.API.activateEngagement(a.id);
+          done.add(a.id);
+          try{ localStorage.setItem('engagementActivated', JSON.stringify([...done])); }catch(_e){}
+        }catch(_e){ /* leave for the next cycle */ }
+      }
+      autoRef.current=false;
+      pushToast&&pushToast('Auto-activation complete','success');
+    })();
+  },[accounts,autoActivate]);
 
   const movers=useMemo(()=>{
     const changed=accounts.filter(a=>a.trend==='up'&&tierOf(a.score)!==tierOf(a.score-a.deltaWeek));
@@ -509,7 +536,14 @@ function EngagementView({ pushToast }){
             <h1 style={{margin:0,fontSize:24,fontWeight:600,letterSpacing:'-.02em',color:'#18181b'}}>Engagement</h1>
             <p style={{margin:'5px 0 0',fontSize:14,color:'#71717a',maxWidth:640}}>Buyer intent across email, podcast &amp; Salesforce — matched to your accounts, ranked by heat.{lastSync&&lastSync.last_synced_at?` Synced ${relTime(lastSync.last_synced_at)}.`:''}</p>
           </div>
-          <div style={{display:'flex',alignItems:'center',gap:8}}>
+          <div style={{display:'flex',alignItems:'center',gap:12}}>
+            <label title="Auto-activate every Hot account (enrich + post to Slack), once each"
+              style={{display:'inline-flex',alignItems:'center',gap:7,fontSize:13,color:'#3f3f46',cursor:'pointer',userSelect:'none'}}>
+              <span onClick={()=>setAutoActivate(v=>!v)} style={{position:'relative',width:34,height:20,borderRadius:999,background:autoActivate?'#10b981':'#e4e4e7',transition:'background .15s',flexShrink:0}}>
+                <span style={{position:'absolute',top:2,left:autoActivate?16:2,width:16,height:16,borderRadius:'50%',background:'#fff',boxShadow:'0 1px 2px rgba(0,0,0,.2)',transition:'left .15s'}}/>
+              </span>
+              Auto-activate Hot
+            </label>
             <button onClick={()=>{window.location.href='/api/engagement/export.csv';}}
               style={{display:'inline-flex',alignItems:'center',gap:6,borderRadius:8,background:'#fff',border:'1px solid #e4e4e7',padding:'8px 14px',fontFamily:'var(--font-sans)',fontSize:13,fontWeight:600,color:'#3f3f46',cursor:'pointer'}}>
               <Icon name="ext" size={15}/>Export CSV

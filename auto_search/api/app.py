@@ -648,6 +648,17 @@ def create_app() -> FastAPI:
             "segment": fw_label or seg,
         }
 
+    def _momentum(series: list[int] | None, weeks: int = 8) -> tuple[list[int], str, int]:
+        """(series, trend, delta_week) for the console sparkline. trend compares the
+        last 2 weeks vs the prior 2; delta_week is the most recent week's points."""
+        s = list(series) if series else [0] * weeks
+        if len(s) < weeks:
+            s = [0] * (weeks - len(s)) + s
+        delta_week = s[-1]
+        recent, prior = sum(s[-2:]), sum(s[-4:-2])
+        trend = "up" if recent > prior else "down" if recent < prior else "flat"
+        return s, trend, delta_week
+
     def _abm_display(discovery_repo) -> dict[str, dict]:
         """account_id -> display info for ABM-only engaged accounts (abm_<key>)."""
         from auto_search.normalize import normalize_company_name
@@ -682,12 +693,14 @@ def create_app() -> FastAPI:
                 lists_by.setdefault(aid, set()).update(c.get("matched_lists") or [])
         scored = {a["account_id"]: a for a in app.state.scoring.list_scored()}
         abm = _abm_display(app.state.repo)
+        series_by = repo.account_weekly_series(weeks=8)
         out: list[dict] = []
         for r in repo.engaged_accounts():
             aid = r["account_id"]
             s = scored.get(aid) or {}
             d = abm.get(aid, {})
             delivered = r.get("delivered") or 0
+            series, trend, delta_week = _momentum(series_by.get(aid))
             out.append({
                 **r,
                 "name": s.get("name") or d.get("name") or aid,
@@ -695,6 +708,8 @@ def create_app() -> FastAPI:
                 "domain": s.get("domain") or d.get("domain"),
                 "tier": engagement_scoring.tier_for(r.get("score") or 0),
                 "lists": sorted(lists_by.get(aid, [])),
+                "abm": "abm" in lists_by.get(aid, set()),
+                "series": series, "trend": trend, "delta_week": delta_week,
                 "open_rate": (round(100 * (r.get("opened") or 0) / delivered)
                               if delivered else None),
                 "reply_rate": (round(100 * (r.get("replied_sends") or 0) / delivered)

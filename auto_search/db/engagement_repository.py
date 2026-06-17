@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -156,6 +156,35 @@ def _event_row(e: dict) -> dict:
     }
 
 
+def _bucket_weekly(rows: list[tuple], *, weeks: int, now: datetime | None = None
+                   ) -> dict[str, list[int]]:
+    """Bucket (account_id, occurred_at, points) into a per-account list of `weeks`
+    weekly point-sums, oldest first (index -1 = current week). The momentum series
+    the console sparkline draws. `occurred_at` may be a datetime or ISO string."""
+    now = now or datetime.now(UTC)
+    out: dict[str, list[int]] = {}
+    for account_id, occurred, points in rows:
+        if not account_id or not occurred:
+            continue
+        ts = occurred if isinstance(occurred, datetime) else _parse_iso(occurred)
+        if ts is None:
+            continue
+        weeks_ago = int((now - ts).days // 7)
+        idx = weeks - 1 - weeks_ago
+        if 0 <= idx < weeks:
+            series = out.setdefault(account_id, [0] * weeks)
+            series[idx] += int(points or 0)
+    return out
+
+
+def _parse_iso(value: str) -> datetime | None:
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+    except (ValueError, TypeError):
+        return None
+
+
 def _engaged_row(account_id: str, ev: dict, c: dict) -> dict:
     """Shape one engaged-account rollup row (matches the SQL view's columns)."""
     return {
@@ -250,6 +279,11 @@ class EngagementJsonRepository:
                 if e.get("account_id") == account_id]
         rows.sort(key=lambda e: e.get("occurred_at") or "", reverse=True)
         return rows
+
+    def account_weekly_series(self, *, weeks: int = 8) -> dict[str, list[int]]:
+        rows = [(e.get("account_id"), e.get("occurred_at"), e.get("points"))
+                for e in self._store["events"].values() if e.get("account_id")]
+        return _bucket_weekly(rows, weeks=weeks)
 
     def contacts(self, *, account_id=None, unresolved_only=False) -> list[dict]:
         rows = list(self._store["contacts"].values())
@@ -433,6 +467,16 @@ class EngagementPostgresRepository:
                 (account_id,),
             ).fetchall()
         return [_norm(dict(r)) for r in rows]
+
+    def account_weekly_series(self, *, weeks: int = 8) -> dict[str, list[int]]:
+        cutoff = datetime.now(UTC) - timedelta(weeks=weeks)
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT account_id, occurred_at, points FROM engagement_events "
+                "WHERE account_id IS NOT NULL AND occurred_at >= %s", (cutoff,)
+            ).fetchall()
+        return _bucket_weekly(
+            [(r["account_id"], r["occurred_at"], r["points"]) for r in rows], weeks=weeks)
 
     def contacts(self, *, account_id=None, unresolved_only=False) -> list[dict]:
         with self._pool.connection() as conn:

@@ -115,6 +115,24 @@ def test_unresolved_contacts_filter(tmp_path):
     assert {c["external_id"] for c in repo.contacts(unresolved_only=True)} == {"2"}
 
 
+def test_account_weekly_series_buckets_by_week(tmp_path):
+    from datetime import UTC, datetime, timedelta
+    repo = _repo(tmp_path)
+    now = datetime.now(UTC)
+    this_week = now.isoformat()
+    three_weeks = (now - timedelta(weeks=3)).isoformat()
+    repo.add_event(_event("email:click:1", "click", 1, at=this_week))
+    repo.add_event(_event("form:high_intent_lead:2", "high_intent_lead", 10, at=this_week))
+    repo.add_event(_event("podcast:podcast_lead:3", "podcast_lead", 4, at=three_weeks))
+    repo.add_event(_event("email:click:9", "click", 1, account_id=None, at=this_week))  # unmatched
+    series = repo.account_weekly_series(weeks=8)
+    s = series["acc_x"]
+    assert len(s) == 8
+    assert s[-1] == 11        # current week: click 1 + lead 10
+    assert s[-4] == 4         # 3 weeks ago: podcast 4
+    assert None not in series  # unmatched (account_id None) is excluded
+
+
 def test_recent_events_newest_first(tmp_path):
     repo = _repo(tmp_path)
     repo.add_event(_event("email:click:1", "click", 1, at="2026-06-01T00:00:00+00:00"))

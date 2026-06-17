@@ -60,6 +60,7 @@ const KIND = {
   tradeshow:       { label:'Tradeshow',          dot:'#f97316', weight:10, big:true },
   podcast_lead:    { label:'Podcast',            dot:'#7c3aed', weight:4 },
   reply:           { label:'Reply',              dot:'#10b981', weight:6 },
+  low_intent_lead: { label:'TOFU content',       dot:'#94a3b8', weight:2 },
   click:           { label:'Click',              dot:'#0ea5e9', weight:1 },
 };
 const kindOf = (k)=> KIND[k] || { label:k||'Touch', dot:'#d4d4d8', weight:1 };

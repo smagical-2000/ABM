@@ -172,24 +172,28 @@ def run_sfdc_sync(*, engagement_repo, scoring_repo, discovery_repo, client=None,
     try:
         hi_leads = list(client.iter_high_intent_leads(since=since))
         ts_leads = list(client.iter_tradeshow_leads(since=since))
+        lo_leads = list(client.iter_low_intent_leads(since=since))
         # ELT raw landing: keep what we transform from, for replay/audit.
         engagement_repo.land_raw(
-            "sfdc_leads", {"high_intent": len(hi_leads), "tradeshow": len(ts_leads)},
-            source=SFDC_SOURCE)
+            "sfdc_leads", {"high_intent": len(hi_leads), "tradeshow": len(ts_leads),
+                           "low_intent": len(lo_leads)}, source=SFDC_SOURCE)
 
         c1, e1 = sfdc_mod.parse_leads(hi_leads, kind="high_intent_lead",
                                       channel="form", campaign_field="LeadSource", now=now)
         c2, e2 = sfdc_mod.parse_leads(ts_leads, kind="tradeshow", channel="event",
                                       campaign_field="Tradeshow__c", now=now)
-        # one contact per Lead id (a lead in both sets dedups); events keep both kinds
-        contacts_by_id = {c["external_id"]: c for c in (c1 + c2)}
-        contact_rows, event_rows = list(contacts_by_id.values()), e1 + e2
+        c3, e3 = sfdc_mod.parse_leads(lo_leads, kind="low_intent_lead",
+                                      channel="content", campaign_field="LeadSource", now=now)
+        # one contact per Lead id (a lead in multiple sets dedups); events keep each kind
+        contacts_by_id = {c["external_id"]: c for c in (c1 + c2 + c3)}
+        contact_rows, event_rows = list(contacts_by_id.values()), e1 + e2 + e3
         matched, new_events = cross_and_persist(
             engagement_repo=engagement_repo, scoring_repo=scoring_repo,
             discovery_repo=discovery_repo, contact_rows=contact_rows,
             event_rows=event_rows, persist_unmatched=False)
         stats = {
             "high_intent_leads": len(hi_leads), "tradeshow_leads": len(ts_leads),
+            "low_intent_leads": len(lo_leads),
             "contacts": len(contact_rows), "events": len(event_rows),
             "new_events": new_events, "matched_contacts": matched,
             "unresolved_contacts": len(contact_rows) - matched,

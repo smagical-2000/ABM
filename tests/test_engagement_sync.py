@@ -178,15 +178,19 @@ async def test_podcast_and_replyio_coexist_on_same_account(tmp_path):
 
 
 class _FakeSfdcClient:
-    def __init__(self, leads, tradeshow=None):
+    def __init__(self, leads, tradeshow=None, low_intent=None):
         self._leads = leads
         self._ts = tradeshow or []
+        self._lo = low_intent or []
 
     def iter_high_intent_leads(self, *, since="2026-01-01"):
         yield from self._leads
 
     def iter_tradeshow_leads(self, *, since="2026-01-01"):
         yield from self._ts
+
+    def iter_low_intent_leads(self, *, since="2026-01-01"):
+        yield from self._lo
 
 
 def _sfdc_leads():
@@ -237,6 +241,22 @@ def test_run_sfdc_sync_includes_tradeshow_meetings(tmp_path):
     ts = next(e for e in repo.events_for_account("acc_christus") if e["kind"] == "tradeshow")
     assert ts["points"] == 10 and ts["channel"] == "event"
     assert ts["campaign"] == "HIMSS 2026"             # show name, not 'Trade Show'
+
+
+def test_run_sfdc_sync_includes_low_intent_tofu(tmp_path):
+    repo = EngagementJsonRepository(path=str(tmp_path / "sflo.json"))
+    low = [{"Id": "00L1", "Company": "Newport Healthcare", "Email": "x@newporthealthcare.com",
+            "BN_Email_Domain__c": "newporthealthcare.com", "LeadSource": "6 UM Trends 2026 | TOFU",
+            "Status": "New", "CreatedDate": "2026-04-01T00:00:00.000+0000"}]
+    stats = sync_mod.run_sfdc_sync(
+        engagement_repo=repo, scoring_repo=_FakeScoring(), discovery_repo=_FakeDiscovery(),
+        client=_FakeSfdcClient(_sfdc_leads(), low_intent=low), now="2026-06-14T00:00:00Z")
+    assert stats["low_intent_leads"] == 1
+    e = next(ev for ev in repo.events_for_account("abm_newporthealthcare") if ev["kind"] == "low_intent_lead")
+    assert e["points"] == 2 and e["channel"] == "content"
+    # Newport: 1 high-intent lead (10) + 1 TOFU content (2) = 12
+    accts = {a["account_id"]: a for a in repo.engaged_accounts()}
+    assert accts["abm_newporthealthcare"]["score"] == 12
 
 
 def test_run_sfdc_sync_is_idempotent(tmp_path):

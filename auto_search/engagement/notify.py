@@ -28,6 +28,7 @@ _KIND = {
     "click": ("👆", "Click"),
     "podcast_lead": ("🎙️", "Podcast"),
     "tradeshow": ("🎪", "Tradeshow"),
+    "low_intent_lead": ("📄", "TOFU content"),
 }
 _TIER_EMOJI = {"Hot": "🔥", "Warm": "🌤️", "Some": "🌥️", "Lower": "☁️"}
 

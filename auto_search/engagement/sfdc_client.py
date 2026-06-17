@@ -127,6 +127,18 @@ class SalesforceClient:
             "WHERE LeadSource = 'Trade Show' AND Status = 'Qualified' "
             f"AND CreatedDate >= {since}T00:00:00Z ORDER BY CreatedDate DESC")
 
+    def iter_low_intent_leads(self, *, since: str = SINCE_DEFAULT) -> Iterator[dict]:
+        """TOFU low-intent leads — gated content/guide downloads, tagged by the org as
+        LeadSource '… | TOFU' (e.g. '6 UM Trends 2026 | TOFU'). Created on/after
+        `since`. Lower buying intent than the contact-form high-intent leads."""
+        if not _DATE_RE.match(since):
+            raise ValueError(f"since must be YYYY-MM-DD, got {since!r}")
+        yield from self.query(
+            "SELECT Id, FirstName, LastName, Company, Email, BN_Email_Domain__c, "
+            "Website, Title, LeadSource, Status, CreatedDate FROM Lead "
+            "WHERE LeadSource LIKE '%| TOFU' "
+            f"AND CreatedDate >= {since}T00:00:00Z ORDER BY CreatedDate DESC")
+
     def iter_meetings(self, *, days: int = 180) -> Iterator[dict]:
         """Booked meetings (Event Type='Meeting') created in the last `days`, with
         the related Account's name + website for crossing."""

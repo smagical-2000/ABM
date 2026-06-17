@@ -835,10 +835,12 @@ def create_app() -> FastAPI:
         if not events and not contacts:
             raise HTTPException(status_code=404, detail="account not found")
         body = await _json_body(request)
+        is_test = bool(body.get("test"))
         account = _engaged_one(account_id, events, contacts)
-        # enrich (paid) — gated to activation; degrades to [] on any failure
+        # enrich (paid) — only on a real activation; a {"test": true} wiring post
+        # never spends credits. Degrades to [] on any failure.
         dms: list[dict] = []
-        if account.get("domain"):
+        if account.get("domain") and not is_test:
             from auto_search.engagement import enrichment
             try:
                 dms = await enrichment.enrich_account(account["domain"],
@@ -848,7 +850,7 @@ def create_app() -> FastAPI:
         app_url = os.getenv("ENGAGEMENT_APP_URL")
         ok = await asyncio.to_thread(
             engagement_notify.activate_account, account, events,
-            dms=dms, app_url=app_url, test=bool(body.get("test")))
+            dms=dms, app_url=app_url, test=is_test)
         if not ok:
             raise HTTPException(status_code=502, detail="Slack post failed (check webhook)")
         return {"posted": True, "account_id": account_id, "contacts": dms}

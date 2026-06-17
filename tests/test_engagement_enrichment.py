@@ -77,3 +77,26 @@ async def test_enrich_no_decision_makers(monkeypatch):
         return []
     monkeypatch.setattr(enrichment.apollo, "decision_makers", empty)
     assert await enrichment.enrich_account("acme.com") == []
+
+
+def test_merge_uses_custom_ref_and_tolerates_null_entries():
+    # FullEnrich returns rows reordered + one null — must still map to the right person
+    dms = [{"name": "A"}, {"name": "B"}, {"name": "C"}]
+    data = [
+        None,                                                              # junk/partial
+        {"custom": {"ref": "2"}, "contact_info": {"most_probable_work_email": {"email": "c@x.com"}}},
+        {"custom": {"ref": "0"}, "contact_info": {"phones": [{"number": "+1 0"}]}},
+    ]
+    out = enrichment._merge(dms, data)
+    assert out[0]["phone"] == "+1 0" and out[0]["email"] is None   # ref 0 → A
+    assert out[1]["email"] is None and out[1]["phone"] is None     # B: no row
+    assert out[2]["email"] == "c@x.com"                            # ref 2 → C
+
+
+def test_merge_positional_fallback_when_no_ref():
+    dms = [{"name": "A"}, {"name": "B"}]
+    data = [{"contact_info": {"most_probable_work_email": {"email": "a@x.com"},
+                              "most_probable_phone": {"number": "+1"}}}, None]
+    out = enrichment._merge(dms, data)
+    assert out[0]["email"] == "a@x.com" and out[0]["phone"] == "+1"
+    assert out[1]["email"] is None and out[1]["phone"] is None     # null entry safe

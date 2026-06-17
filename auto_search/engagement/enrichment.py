@@ -65,7 +65,8 @@ async def _fullenrich(dms: list[dict], domain: str | None, company: str | None,
             "domain": domain or "", "company_name": company or "",
             "linkedin_url": d.get("linkedin") or "",
             "enrich_fields": ["contact.work_emails", "contact.phones"],
-        } for d in dms],
+            "custom": {"ref": str(i)},   # correlation key so results map to the right person
+        } for i, d in enumerate(dms)],
     }
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     own = http is None
@@ -103,18 +104,35 @@ async def _poll(client: httpx.AsyncClient, eid: str, headers: dict) -> list[dict
 
 
 def _merge(dms: list[dict], data: list[dict]) -> list[dict]:
-    """Map FullEnrich results back to the Apollo decision-makers (submission order)."""
+    """Map FullEnrich results back to the right decision-maker. Prefer the `custom.ref`
+    we stamped on submission (robust if FullEnrich reorders/drops rows); fall back to
+    positional. Tolerant of null/partial entries — one bad row never voids the rest."""
+    by_ref = {}
+    for e in data:
+        if isinstance(e, dict):
+            ref = (e.get("custom") or {}).get("ref")
+            if ref is not None:
+                by_ref[str(ref)] = e
+    use_ref = bool(by_ref)   # refs echoed → match strictly; else fall back to position
     out = []
     for i, d in enumerate(dms):
-        ci = (data[i].get("contact_info") if i < len(data) else None) or {}
-        email = (ci.get("most_probable_work_email") or {}).get("email")
-        if not email and ci.get("work_emails"):
-            email = ci["work_emails"][0].get("email")
-        phone = (ci.get("most_probable_phone") or {}).get("number")
-        if not phone and ci.get("phones"):
-            phone = ci["phones"][0].get("number")
-        out.append({**d, "email": email, "phone": phone})
+        if use_ref:
+            e = by_ref.get(str(i)) or {}
+        else:
+            e = data[i] if i < len(data) and isinstance(data[i], dict) else {}
+        ci = e.get("contact_info") or {}
+        out.append({**d, "email": _pick(ci, "most_probable_work_email", "work_emails", "email"),
+                    "phone": _pick(ci, "most_probable_phone", "phones", "number")})
     return out
+
+
+def _pick(ci: dict, best_key: str, list_key: str, field: str) -> str | None:
+    """Most-probable value, else the first from the list — null/shape-safe."""
+    best = (ci.get(best_key) or {}).get(field)
+    if best:
+        return best
+    lst = ci.get(list_key) or []
+    return lst[0].get(field) if lst and isinstance(lst[0], dict) else None
 
 
 def _first(name: str | None) -> str:

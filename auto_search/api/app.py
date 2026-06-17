@@ -29,7 +29,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -725,7 +725,34 @@ def create_app() -> FastAPI:
         return {"accounts": _engaged_view(), "last_sync": last_sync,
                 "running": bool(getattr(app.state, "engagement_running", False))}
 
-    # NOTE: defined before /{account_id} so "inbox" isn't captured as an account id.
+    # NOTE: defined before /{account_id} so "export.csv"/"inbox" aren't captured as ids.
+    @app.get("/api/engagement/export.csv")
+    def engagement_export_csv():
+        """Download the engaged-account board as CSV — one row per account with the
+        full intent payload, for sales to work in a sheet."""
+        import csv
+        import io
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["Account", "Domain", "Classification", "Fit tier", "Lists",
+                    "Heat tier", "Score", "Trend", "Δ this week", "Contacts",
+                    "Clicks", "Replies", "Meetings", "Open rate %", "Reply rate %",
+                    "Last touch"])
+        for a in _engaged_view():
+            w.writerow([
+                a.get("name"), a.get("domain") or "",
+                a.get("framework") or a.get("segment") or "", a.get("fit_tier") or "",
+                " + ".join(a.get("lists") or []), a.get("tier"), a.get("score"),
+                a.get("trend"), a.get("delta_week"), a.get("contacts"),
+                a.get("clicks"), a.get("replies"), a.get("meetings"),
+                "" if a.get("open_rate") is None else a.get("open_rate"),
+                "" if a.get("reply_rate") is None else a.get("reply_rate"),
+                (a.get("last_touch") or "")[:10],
+            ])
+        return Response(content=buf.getvalue(), media_type="text/csv",
+                        headers={"Content-Disposition":
+                                 "attachment; filename=magical-engagement.csv"})
+
     @app.get("/api/engagement/inbox")
     def get_engagement_inbox(limit: int = 200):
         """Recent meaningful touches across all accounts (the Inbox feed) +

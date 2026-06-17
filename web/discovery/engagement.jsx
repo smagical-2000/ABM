@@ -198,11 +198,7 @@ function AccountRow({ a, onOpen, onActivate }){
       </div>
       <HeatMark score={a.score}/>
       <MomentumCell account={a}/>
-      {tier==='Hot'&&!a.actioned
-        ? <span style={{display:'inline-flex',alignItems:'center',gap:6,fontSize:12.5,fontWeight:500,color:'#b45309',whiteSpace:'nowrap'}}>
-            <Icon name="alert" size={13}/>Unactioned · {daysSince(a.lastTouch)}d
-          </span>
-        : <span style={{...TX.meta,whiteSpace:'nowrap'}}>{a.actioned?'Actioned · ':'Last touch '}{relTime(a.lastTouch)}</span>}
+      <span style={{...TX.meta,whiteSpace:'nowrap'}}>Last touch {relTime(a.lastTouch)}</span>
       <div style={{display:'flex',justifyContent:'flex-end',alignItems:'center',gap:6}}>
         {tier==='Hot'&&<button onClick={e=>{e.stopPropagation();onActivate(a);}}
           style={{background:'#fffbeb',border:'1px solid #fde68a',fontFamily:'var(--font-sans)',fontSize:12,fontWeight:500,color:'#b45309',cursor:'pointer',padding:'4px 10px',borderRadius:6}}>Activate</button>}
@@ -491,11 +487,11 @@ function EngagementView({ pushToast }){
     return [...base].sort((x,y)=>y.deltaWeek-x.deltaWeek).slice(0,4);
   },[accounts]);
   const unresolvedTouches=inbox.filter(e=>!e.account).length;
-  const hotUnactioned=accounts.filter(a=>tierOf(a.score)==='Hot'&&!a.actioned).length;
+  const hotCount=accounts.filter(a=>tierOf(a.score)==='Hot').length;
   const justWentHot=movers.filter(a=>tierOf(a.score)==='Hot'&&tierOf(a.score-a.deltaWeek)!=='Hot').length;
   const needs=[];
   if(justWentHot) needs.push({n:justWentHot,label:justWentHot===1?'account just went Hot':'accounts just went Hot',icon:'arrowUp',fg:'#047857',bg:'rgba(16,185,129,.1)',go:'accounts'});
-  if(hotUnactioned) needs.push({n:hotUnactioned,label:'Hot, not yet actioned',icon:'zap',fg:'#b45309',bg:'#fffbeb',go:'accounts'});
+  if(hotCount) needs.push({n:hotCount,label:hotCount===1?'Hot account':'Hot accounts',icon:'zap',fg:'#b45309',bg:'#fffbeb',go:'accounts'});
   if(unresolvedTouches) needs.push({n:unresolvedTouches,label:'touches need resolution',icon:'help',fg:'#b45309',bg:'#fffbeb',go:'inbox'});
   const stats={ accounts:accounts.length, touches:inbox.length };
 
@@ -510,9 +506,15 @@ function EngagementView({ pushToast }){
             <h1 style={{margin:0,fontSize:24,fontWeight:600,letterSpacing:'-.02em',color:'#18181b'}}>Engagement</h1>
             <p style={{margin:'5px 0 0',fontSize:14,color:'#71717a',maxWidth:640}}>Buyer intent across email, podcast &amp; Salesforce — matched to your accounts, ranked by heat.{lastSync&&lastSync.last_synced_at?` Synced ${relTime(lastSync.last_synced_at)}.`:''}</p>
           </div>
-          <button onClick={sync} disabled={syncing} style={{display:'inline-flex',alignItems:'center',gap:7,borderRadius:8,background:'#4f46e5',border:'none',padding:'8px 14px',fontFamily:'var(--font-sans)',fontSize:13,fontWeight:600,color:'#fff',cursor:'pointer',boxShadow:'0 1px 2px rgba(24,24,27,.05)',opacity:syncing?.6:1}}>
-            <Icon name="refresh" size={15} className={syncing?'spin':''}/>{syncing?'Syncing…':'Sync'}
-          </button>
+          <div style={{display:'flex',alignItems:'center',gap:8}}>
+            <button onClick={()=>{window.location.href='/api/engagement/export.csv';}}
+              style={{display:'inline-flex',alignItems:'center',gap:6,borderRadius:8,background:'#fff',border:'1px solid #e4e4e7',padding:'8px 14px',fontFamily:'var(--font-sans)',fontSize:13,fontWeight:600,color:'#3f3f46',cursor:'pointer'}}>
+              <Icon name="ext" size={15}/>Export CSV
+            </button>
+            <button onClick={sync} disabled={syncing} style={{display:'inline-flex',alignItems:'center',gap:7,borderRadius:8,background:'#4f46e5',border:'none',padding:'8px 14px',fontFamily:'var(--font-sans)',fontSize:13,fontWeight:600,color:'#fff',cursor:'pointer',boxShadow:'0 1px 2px rgba(24,24,27,.05)',opacity:syncing?.6:1}}>
+              <Icon name="refresh" size={15} className={syncing?'spin':''}/>{syncing?'Syncing…':'Sync'}
+            </button>
+          </div>
         </div>
 
         {loading

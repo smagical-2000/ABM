@@ -68,6 +68,16 @@ def test_get_unknown_account_404(client):
     assert client.get("/api/engagement/nope").status_code == 404
 
 
+def test_export_csv_has_header_and_rows(client):
+    r = client.get("/api/engagement/export.csv")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/csv")
+    assert "attachment; filename=magical-engagement.csv" in r.headers.get("content-disposition", "")
+    lines = r.text.strip().splitlines()
+    assert lines[0].startswith("Account,Domain,Classification")
+    assert any("acc_x" in ln or "," in ln for ln in lines[1:])   # at least one data row
+
+
 def test_sync_endpoint_starts_background(client):
     res = client.post("/api/engagement/sync").json()
     assert res["started"] is True

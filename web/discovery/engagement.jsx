@@ -96,6 +96,19 @@ function mapDetail(d){
 // ── helpers ───────────────────────────────────────────────────────────────────
 function relTime(iso){ if(!iso)return'—'; const d=Math.max(0,Date.now()-new Date(iso).getTime()),m=Math.round(d/60000); if(m<2)return'just now'; if(m<60)return`${m}m`; const h=Math.round(m/60); if(h<24)return`${h}h`; const dy=Math.round(h/24); return dy<30?`${dy}d`:new Date(iso).toLocaleDateString('en-US',{month:'short',day:'numeric'}); }
 function daysSince(iso){ return iso?Math.max(0,Math.round((Date.now()-new Date(iso).getTime())/86400000)):0; }
+// group drawer touches by kind + day so the timeline reads "Click ×8 · Jun 11 · +8"
+// instead of one identical row per contact (the old console's clean pattern).
+function groupEvents(events){
+  const m=new Map();
+  (events||[]).forEach(e=>{
+    const day=e.ts?new Date(e.ts).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}):'—';
+    const key=e.kind+'|'+day;
+    const g=m.get(key)||{kind:e.kind,day,count:0,pts:0,ts:''};
+    g.count+=1; g.pts+=(e.pts||0); if((e.ts||'')>g.ts)g.ts=e.ts;
+    m.set(key,g);
+  });
+  return [...m.values()].sort((a,b)=>(a.ts||'').localeCompare(b.ts||''));
+}
 const TX = {
   strong:{fontSize:14,fontWeight:500,color:'#18181b',lineHeight:1.4},
   body:{fontSize:13,fontWeight:400,color:'#52525b',lineHeight:1.4},
@@ -316,13 +329,6 @@ function DetailDrawer({ account:a, detail, accounts, onClose, onActivate }){
   const total=Object.values(breakdown).reduce((s,v)=>s+v,0)||a.score;
   const col=a.trend==='up'?'#10b981':a.trend==='down'?'#d4d4d8':'#a1a1aa';
   const t=TREND[a.trend]||TREND.flat;
-  const SEGL={health_system:'Health System',specialty:'Specialty',payer:'Payer'};
-  const peers=accounts.filter(p=>p.segment===a.segment);
-  const ranked=[...peers].sort((x,y)=>y.score-x.score);
-  const rankPos=ranked.findIndex(p=>p.id===a.id)+1;
-  const beat=peers.filter(p=>p.score<a.score).length;
-  const pctile=peers.length>1?Math.round((beat/(peers.length-1))*100):100;
-  const maxS=Math.max(a.score,...peers.map(p=>p.score),1);
   return (
     <div style={{position:'fixed',inset:0,zIndex:40}}>
       <div className="fade" onClick={onClose} style={{position:'absolute',inset:0,background:'rgba(24,24,27,.15)'}}/>
@@ -358,21 +364,6 @@ function DetailDrawer({ account:a, detail, accounts, onClose, onActivate }){
             <div style={{display:'flex',justifyContent:'space-between',marginTop:6,...TX.meta}}><span>8 weeks ago</span><span>this week</span></div>
           </div>
 
-          {peers.length>1&&(
-            <div style={{marginTop:12,borderRadius:12,border:'1px solid #f4f4f5',padding:'14px 18px'}}>
-              <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline'}}>
-                <span style={TX.label}>vs {SEGL[a.segment]||'segment'} peers</span>
-                <span style={{fontSize:12,color:'#71717a'}}>#{rankPos} of {peers.length} · hotter than {pctile}%</span>
-              </div>
-              <div style={{position:'relative',height:26,marginTop:14}}>
-                <div style={{position:'absolute',left:0,right:0,top:13,height:1,background:'#f4f4f5'}}/>
-                {peers.map(p=>{ const self=p.id===a.id, pc=HEAT[tierOf(p.score)];
-                  return <span key={p.id} title={`${p.name} · ${p.score}`} style={{position:'absolute',left:`${(p.score/maxS)*100}%`,top:self?2:7,transform:'translateX(-50%)',width:self?3:2,height:self?22:12,borderRadius:2,background:self?pc.solid:'#d4d4d8'}}/>; })}
-                <span style={{position:'absolute',left:`${(a.score/maxS)*100}%`,top:-3,transform:'translateX(-50%)',fontSize:11,fontWeight:600,fontVariantNumeric:'tabular-nums',color:hc.fg}}>{a.score}</span>
-              </div>
-            </div>
-          )}
-
           <div style={{...TX.label,marginTop:22,marginBottom:10}}>Score breakdown</div>
           <div style={{borderRadius:12,border:'1px solid #f4f4f5',overflow:'hidden'}}>
             {Object.entries(breakdown).sort((x,y)=>y[1]-x[1]).map(([k,pts],i,arr)=>{ const m=kindOf(k);
@@ -394,31 +385,28 @@ function DetailDrawer({ account:a, detail, accounts, onClose, onActivate }){
           {d.contacts.length>0&&<>
             <div style={{...TX.label,marginTop:22,marginBottom:10}}>Contacts engaging · {a.contacts}</div>
             <div style={{display:'flex',flexWrap:'wrap',gap:5,alignItems:'center'}}>
-              {d.contacts.slice(0,8).map((c,i)=>(
-                <span key={i} title={c} style={{display:'flex',alignItems:'center',gap:7,padding:'5px 10px 5px 6px',borderRadius:999,background:'#fafafa',border:'1px solid #f4f4f5'}}>
-                  <span style={{width:22,height:22,borderRadius:'50%',background:'#e4e4e7',display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,fontWeight:600,color:'#52525b'}}>{(c[0]||'?').toUpperCase()}</span>
-                  <span style={TX.body}>{c}</span>
-                </span>
+              {d.contacts.slice(0,12).map((c,i)=>(
+                <span key={i} title={c} style={{width:28,height:28,borderRadius:'50%',background:'#fafafa',border:'1px solid #f4f4f5',display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,fontWeight:600,color:'#52525b'}}>{(c[0]||'?').toUpperCase()}</span>
               ))}
+              {d.contacts.length>12&&<span style={{...TX.meta,marginLeft:4}}>+{d.contacts.length-12} more</span>}
             </div>
           </>}
 
           <div style={{...TX.label,marginTop:22,marginBottom:10}}>Engagement timeline</div>
           <div style={{borderLeft:'1px solid #f4f4f5',marginLeft:4}}>
-            {[...d.events].sort((x,y)=>new Date(x.ts)-new Date(y.ts)).map((e,i)=>{ const m=kindOf(e.kind);
+            {groupEvents(d.events).map((g,i)=>{ const m=kindOf(g.kind);
               return (
                 <div key={i} style={{position:'relative',paddingLeft:20,paddingBottom:14}}>
                   <span style={{position:'absolute',left:-4,top:4,width:8,height:8,borderRadius:'50%',background:m.dot,boxShadow:'0 0 0 3px #fff'}}/>
-                  <div style={{...TX.body}}>{e.label}{e.count>1&&<span style={{color:'#a1a1aa'}}> ×{e.count}</span>}</div>
+                  <div style={{...TX.body}}>{m.label}{g.count>1&&<span style={{color:'#a1a1aa'}}> ×{g.count}</span>}</div>
                   <div style={{...TX.meta,marginTop:2,display:'flex',gap:6,flexWrap:'wrap'}}>
-                    {e.person&&<><span>{e.person}</span><span style={{color:'#e4e4e7'}}>·</span></>}
-                    <span>{new Date(e.ts).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</span>
+                    <span>{g.day}</span>
                     <span style={{color:'#e4e4e7'}}>·</span>
-                    <span style={{fontWeight:500,color:m.dot}}>+{e.pts*(e.count||1)} pts</span>
+                    <span style={{fontWeight:500,color:m.dot}}>+{g.pts} pts</span>
                   </div>
                 </div>
               ); })}
-            {d.events.length===0&&<div style={{paddingLeft:20,...TX.meta}}>Loading…</div>}
+            {d.events.length===0&&<div style={{paddingLeft:20,...TX.meta}}>No touches.</div>}
           </div>
         </div>
         <div style={{borderTop:'1px solid #f4f4f5',padding:'14px 24px',display:'flex',gap:8}}>

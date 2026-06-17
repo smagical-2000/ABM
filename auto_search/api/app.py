@@ -639,11 +639,13 @@ def create_app() -> FastAPI:
         fit tier (authoritative) AND the segment (scored's, else cleaned ABM's). The
         junk ABM segments collapse to None (the 'Unclassified' fix)."""
         fw = (scored or {}).get("framework")
+        fw_label = _FRAMEWORK_LABEL.get(fw, fw) if fw else None
+        seg = _clean_segment((scored or {}).get("segment") or (abm or {}).get("segment"))
         return {
-            "framework": _FRAMEWORK_LABEL.get(fw, fw) if fw else None,
+            "framework": fw_label,
             "fit_tier": (scored or {}).get("tier_label"),
-            "segment": _clean_segment((scored or {}).get("segment")
-                                      or (abm or {}).get("segment")),
+            # display class: scored framework label (clean) over a raw lowercase segment
+            "segment": fw_label or seg,
         }
 
     def _abm_display(discovery_repo) -> dict[str, dict]:

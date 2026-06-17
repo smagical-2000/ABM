@@ -150,7 +150,8 @@ def test_run_podcast_sync_is_idempotent(tmp_path):
     second = sync_mod.run_podcast_sync(
         engagement_repo=repo, scoring_repo=_FakeScoring(), discovery_repo=_FakeDiscovery(),
         rows=_podcast_rows(), now="2026-06-14T00:00:00Z")
-    assert first["new_events"] == 4 and second["new_events"] == 0   # re-sync adds nothing
+    # only the 3 matched leads persist (unmatched dropped); re-sync adds nothing
+    assert first["new_events"] == 3 and second["new_events"] == 0
     # podcast + replyio keep independent sync cursors
     assert repo.get_sync_state("podcast")["status"] == "success"
 

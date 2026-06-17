@@ -30,15 +30,16 @@ _MIN_ACTIVITY_ROWS = 20      # below this over `days`, widen the window to 60d
 
 def cross_and_persist(*, engagement_repo, scoring_repo, discovery_repo,
                       contact_rows: list[dict], event_rows: list[dict],
-                      persist_unmatched: bool = True) -> tuple[int, int]:
+                      persist_unmatched: bool = False) -> tuple[int, int]:
     """Cross each contact to a scored/ABM account, stamp the result onto the
     contact's events, then upsert contacts + add events. Returns
     (matched_contacts, new_events). Shared by every source's sync.
 
-    `persist_unmatched=False` stores only contacts/events that matched an account —
-    used by high-volume inbound sources (SFDC leads) where the unmatched rows are
-    not-our-target noise that would flood the resolve queue. The matched count is
-    still returned in full either way."""
+    Policy (per the user): we only TRACK companies on the ABM list or the scored/
+    discovery list, so by default we store only contacts/events that matched one of
+    those — unmatched engagement is dropped, not queued. The matched count is still
+    returned in full either way. Pass `persist_unmatched=True` to also keep the
+    unmatched (e.g. a future net-new-in-market view)."""
     index = build_index(scoring_repo, discovery_repo)
     matched = 0
     for c in contact_rows:

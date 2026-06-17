@@ -68,6 +68,33 @@ def test_get_unknown_account_404(client):
     assert client.get("/api/engagement/nope").status_code == 404
 
 
+def test_activate_test_mode_skips_enrichment_credit_safety(client, monkeypatch):
+    """Credit-safety gate: a {"test": true} activation must NOT enrich (no Apollo/
+    FullEnrich spend); a real activation enriches once. Slack is stubbed out."""
+    from auto_search.db.scoring_repository import ScoringJsonRepository
+    from auto_search.engagement import enrichment, notify
+
+    calls = []
+
+    async def fake_enrich(domain, *, company=None):
+        calls.append(domain)
+        return [{"name": "X", "title": "VP RevCycle", "email": "x@acme.com", "phone": "+1 5"}]
+
+    monkeypatch.setattr(enrichment, "enrich_account", fake_enrich)
+    monkeypatch.setattr(notify, "activate_account", lambda *a, **k: True)   # no real Slack
+    monkeypatch.setattr(ScoringJsonRepository, "get",
+                        lambda self, aid: {"name": "Acme", "domain": "acme.com"}
+                        if aid == "acc_x" else None)
+
+    r1 = client.post("/api/engagement/acc_x/activate", json={"test": True})
+    assert r1.status_code == 200 and r1.json()["posted"] is True
+    assert calls == []                       # test post spent zero enrichment credits
+
+    r2 = client.post("/api/engagement/acc_x/activate", json={})
+    assert r2.status_code == 200 and calls == ["acme.com"]   # real activation enriched once
+    assert r2.json()["contacts"][0]["email"] == "x@acme.com"
+
+
 def test_export_csv_has_header_and_rows(client):
     r = client.get("/api/engagement/export.csv")
     assert r.status_code == 200

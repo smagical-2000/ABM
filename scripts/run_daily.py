@@ -6,6 +6,8 @@
        on monitored accounts + event keywords → decision-maker filter → qualify → panel
     3. SFDC engagement  (run_engagement_sfdc.py)                  — read-only high-intent
        inbound leads → cross to scored/ABM → heat (idempotent; matched-only)
+    4. Weekly digest    (run_engagement_digest.py, MONDAYS only)  — post the accounts
+       that heated up in the last 7 days to Slack (lean; no-ops without the webhook)
 
 All legs run every time (one leg's failure never skips the others); the process
 exits non-zero if ANY leg failed, so Railway flags the run. Folding them into one
@@ -17,6 +19,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 _SCRIPTS = Path(__file__).resolve().parent
@@ -31,9 +34,13 @@ def main() -> int:
     discovery_rc = _run("run_discovery.py", "--days", "1", "--no-limit")
     social_rc = _run("run_social.py", "--since-hours", "24", "--max-enrich", "100")
     sfdc_rc = _run("run_engagement_sfdc.py", "--since", "2026-01-01")
-    if discovery_rc or social_rc or sfdc_rc:
+    # weekly "hot movers" digest — Mondays only, after the SFDC pull refreshes heat.
+    digest_rc = 0
+    if datetime.now(UTC).weekday() == 0:
+        digest_rc = _run("run_engagement_digest.py", "--days", "7")
+    if discovery_rc or social_rc or sfdc_rc or digest_rc:
         print(f"\n[run_daily] FAILED — discovery={discovery_rc} social={social_rc} "
-              f"sfdc={sfdc_rc}", flush=True)
+              f"sfdc={sfdc_rc} digest={digest_rc}", flush=True)
         return 1
     print("\n[run_daily] all legs OK", flush=True)
     return 0

@@ -176,10 +176,11 @@ async def test_podcast_and_replyio_coexist_on_same_account(tmp_path):
 
 
 class _FakeSfdcClient:
-    def __init__(self, leads, tradeshow=None, low_intent=None):
+    def __init__(self, leads, tradeshow=None, low_intent=None, sao=None):
         self._leads = leads
         self._ts = tradeshow or []
         self._lo = low_intent or []
+        self._sao = sao or []
 
     def iter_high_intent_leads(self, *, since="2026-01-01"):
         yield from self._leads
@@ -189,6 +190,9 @@ class _FakeSfdcClient:
 
     def iter_low_intent_leads(self, *, since="2026-01-01"):
         yield from self._lo
+
+    def iter_sales_accepted_opportunities(self, *, since="2026-01-01"):
+        yield from self._sao
 
 
 def _sfdc_leads():
@@ -255,6 +259,26 @@ def test_run_sfdc_sync_includes_low_intent_tofu(tmp_path):
     # Newport: 1 high-intent lead (10) + 1 TOFU content (2) = 12
     accts = {a["account_id"]: a for a in repo.engaged_accounts()}
     assert accts["abm_newporthealthcare"]["score"] == 12
+
+
+def test_run_sfdc_sync_includes_sales_accepted_opportunities(tmp_path):
+    repo = EngagementJsonRepository(path=str(tmp_path / "sfsao.json"))
+    sao = [{"Id": "0061", "Name": "CHRISTUS Deal", "StageName": "Discovery",
+            "IsClosed": False, "IsWon": False, "Amount": 90000.0,
+            "AccountId": "001CH", "Account": {"Name": "CHRISTUS Health",
+                                              "Website": "https://www.christushealth.org/"},
+            "CreatedDate": "2026-05-01T00:00:00.000+0000"}]
+    stats = sync_mod.run_sfdc_sync(
+        engagement_repo=repo, scoring_repo=_FakeScoring(), discovery_repo=_FakeDiscovery(),
+        client=_FakeSfdcClient(_sfdc_leads(), sao=sao), now="2026-06-14T00:00:00Z")
+    assert stats["sales_accepted_opportunities"] == 1
+    e = next(ev for ev in repo.events_for_account("acc_christus")
+             if ev["kind"] == "sales_accepted_opportunity")
+    assert e["points"] == 10 and e["channel"] == "crm"
+    assert e["external_id"] == "crm:sales_accepted_opportunity:acct:001CH"
+    # CHRISTUS: 1 high-intent lead (10) + 1 SAO (10) = 20
+    accts = {a["account_id"]: a for a in repo.engaged_accounts()}
+    assert accts["acc_christus"]["score"] == 20
 
 
 def test_run_sfdc_sync_is_idempotent(tmp_path):

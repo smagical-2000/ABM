@@ -55,6 +55,7 @@ const HEAT = {
 const tierOf = (s)=> s>=21?'Hot':s>=12?'Warm':s>=6?'Some':'Lower';
 const KIND = {
   high_intent_lead:{ label:'High-intent lead', dot:'#f43f5e', weight:10, big:true },
+  sales_accepted_opportunity:{ label:'Sales accepted opp', dot:'#e11d48', weight:10, big:true },
   opportunity:     { label:'Opportunity',       dot:'#f43f5e', weight:10, big:true },
   meeting_booked:  { label:'Meeting booked',     dot:'#6366f1', weight:10, big:true },
   tradeshow:       { label:'Tradeshow',          dot:'#f97316', weight:10, big:true },
@@ -253,7 +254,7 @@ function KindSummary({ kinds }){
 }
 
 const ICOLS='minmax(0,1fr) 220px 86px 48px 56px';
-const BIG_KINDS=['high_intent_lead','opportunity','meeting_booked','tradeshow'];
+const BIG_KINDS=['high_intent_lead','sales_accepted_opportunity','opportunity','meeting_booked','tradeshow'];
 function InboxGroupRow({ g, onResolve }){
   const [hov,setHov]=useState(false);
   const unresolved=!g.account;

@@ -9,6 +9,7 @@ def test_points_for_canonical_kinds():
     assert scoring.points_for("click") == 1
     assert scoring.points_for("reply") == 6
     assert scoring.points_for("meeting_booked") == 10
+    assert scoring.points_for("sales_accepted_opportunity") == 10   # SFDC SAO ≈ BOFU
     # zero-point + unknown kinds score 0
     assert scoring.points_for("open") == 0
     assert scoring.points_for("delivered") == 0

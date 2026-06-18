@@ -104,6 +104,70 @@ def test_two_distinct_accounts_make_two_contacts():
     assert len(events) == 2
 
 
+# ── sales accepted opportunities (Qualified_Meeting__c = true) ──────────
+
+
+def test_sao_event_shape_and_points():
+    contacts, events = sfdc.parse_sao([_opp()], now="2026-06-15T00:00:00+00:00")
+    assert len(contacts) == 1 and len(events) == 1
+    e = events[0]
+    assert e["source"] == "sfdc"
+    assert e["channel"] == "crm"
+    assert e["kind"] == "sales_accepted_opportunity"
+    assert e["points"] == 10
+    assert e["external_id"] == "crm:sales_accepted_opportunity:acct:001ACME"
+    assert e["contact_ext"] == "acct:001ACME"
+    assert e["company"] == "Acme Health"
+    assert e["raw"]["stage"] == ["Qualification"]
+    assert e["raw"]["count"] == 1
+    assert e["occurred_at"].startswith("2026-06-05")          # CreatedDate
+    c = contacts[0]
+    assert c["external_id"] == "acct:001ACME"
+    assert c["email_domain"] == "acme.com"                    # from Account.Website
+    assert c["company_key"]
+    assert c["meeting_booked"] is True                        # SAO implies a qualified meeting
+
+
+def test_sao_dedups_per_account_scores_ten_once():
+    # two SAOs on ONE account -> 1 contact, 1 event scoring 10 (not 20)
+    opps = [_opp(Id="0061", CreatedDate="2026-05-01T00:00:00.000+0000"),
+            _opp(Id="0062", StageName="Discovery", CreatedDate="2026-06-01T00:00:00.000+0000")]
+    contacts, events = sfdc.parse_sao(opps)
+    assert len(contacts) == 1 and len(events) == 1
+    e = events[0]
+    assert e["points"] == 10
+    assert e["raw"]["count"] == 2                              # audit trail keeps both
+    assert sorted(e["raw"]["ids"]) == ["0061", "0062"]
+    assert e["occurred_at"].startswith("2026-06-01")          # most recent
+
+
+def test_sao_won_deal_carried_in_raw():
+    _, events = sfdc.parse_sao([_opp(IsWon=True, IsClosed=True, StageName="Closed Won")])
+    assert events[0]["raw"]["is_won"] == [True]
+    assert events[0]["raw"]["stage"] == ["Closed Won"]
+
+
+def test_sao_two_accounts_make_two_contacts():
+    a = _opp(Id="0061", AccountId="001A", Account={"Name": "A Co", "Website": "a.com"})
+    b = _opp(Id="0062", AccountId="001B", Account={"Name": "B Co", "Website": "b.com"})
+    contacts, events = sfdc.parse_sao([a, b])
+    assert {c["external_id"] for c in contacts} == {"acct:001A", "acct:001B"}
+    assert len(events) == 2
+
+
+def test_sao_accountless_falls_back_to_company_name():
+    o = _opp(Id="0069", AccountId=None, Account={"Name": "Yosemite Medical", "Website": None})
+    contacts, _ = sfdc.parse_sao([o])
+    assert contacts[0]["external_id"].startswith("name:")
+    assert contacts[0]["company"] == "Yosemite Medical"
+
+
+def test_sao_no_account_identity_skipped():
+    o = _opp(Id="0060", AccountId=None, Account=None)
+    contacts, events = sfdc.parse_sao([o])
+    assert contacts == [] and events == []
+
+
 # ── high-intent leads (the active sync path) ────────────────────────────
 
 

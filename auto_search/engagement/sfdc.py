@@ -1,15 +1,19 @@
 """SFDC ingest — Salesforce records -> engagement contacts + events. PURE (no I/O).
 
-Active source (per the user, "for now to test"): **high-intent inbound leads**
-(`parse_leads`) — the org's High Intent Leads definition (contact/sales-form
-LeadSources). Each lead is contact-level: one contact + one 'high_intent_lead' event
-(≈ BOFU, 10) per Lead id, crossed by email domain / company.
+Active sources:
+- **high-intent inbound leads** (`parse_leads`) — the org's High Intent Leads
+  definition (contact/sales-form LeadSources). Contact-level: one contact + one
+  'high_intent_lead' event (≈ BOFU, 10) per Lead id, crossed by email domain / company.
+  Reused for tradeshow-Qualified + TOFU leads via the `kind`/`channel` args.
+- **Sales Accepted Opportunities** (`parse_sao`) — Opportunity.Qualified_Meeting__c
+  = true. Account-level: one 'sales_accepted_opportunity' event (≈ BOFU, 10) per
+  account, crossed by Account domain / company.
 
 Also implemented but not yet wired into the live sync — booked meetings + open/won
 opportunities (`parse`). Tasks are excluded (99% outbound rep dials = activity, not
-intent). Meetings/opps cross at the **account** level (Who.Email isn't readable for
-the integration user) and emit at most one event per account x kind, so an account
-with 20 auto-logged meetings scores 10, not 200.
+intent). Account-level parsers cross at the **account** level (Who.Email isn't
+readable for the integration user) and emit at most one event per account x kind, so
+an account with 20 auto-logged meetings scores 10, not 200.
 
 Crossing (account_id) is applied later by cross.py at sync time. Hand these the raw
 records from sfdc_client; get back dicts ready for cross_and_persist.
@@ -74,6 +78,44 @@ def parse_leads(leads: list[dict], *, kind: str = "high_intent_lead",
                     "employee_range": ld.get("Employee_Range__c"),
                     "is_converted": bool(ld.get("IsConverted"))},
         })
+    return contact_rows, event_rows
+
+
+def parse_sao(opportunities: list[dict], *, now: str | None = None
+              ) -> tuple[list[dict], list[dict]]:
+    """Map Sales Accepted Opportunities -> (contact_rows, event_rows). PURE.
+
+    Account-level (an SAO is a deal on an Account; the integration user can't read a
+    person on it): one contact + one 'sales_accepted_opportunity' event per account,
+    deduped to the most-recent date — so an account with several SAOs scores 10 once,
+    not 10×N (the one-touch-per-account×kind rule). Kind weight = 10 (≈ BOFU). The
+    raw payload keeps every SAO's stage/amount/won + ids for the audit trail.
+    Crossing by Account domain / company is applied later by cross.py.
+    """
+    now = now or datetime.now(UTC).isoformat()
+    accounts: dict[str, dict] = {}
+    for o in opportunities:
+        key, company, domain = _account_identity(o, name_from_subject=False)
+        if not key:
+            continue
+        acc = _slot(accounts, key, company, domain)
+        occurred = _dt(o.get("CreatedDate")) or now
+        _record(acc["opp"], occurred, _sid(o.get("Id")), o.get("Name"),
+                stage=o.get("StageName"), is_won=bool(o.get("IsWon")),
+                amount=o.get("Amount"))
+
+    contact_rows: list[dict] = []
+    event_rows: list[dict] = []
+    for key, acc in accounts.items():
+        contact_rows.append({
+            "source": SOURCE, "external_id": key, "email": None,
+            "email_domain": acc["domain"], "company": acc["company"],
+            "company_key": normalize_company_name(acc["company"] or ""),
+            "title": None, "meeting_booked": True,   # SAO implies a qualified meeting
+            "opted_out": False,
+        })
+        event_rows.append(_event(key, "crm", "sales_accepted_opportunity",
+                                 acc["company"], acc["opp"], now))
     return contact_rows, event_rows
 
 

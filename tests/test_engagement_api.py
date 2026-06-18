@@ -68,6 +68,43 @@ def test_get_unknown_account_404(client):
     assert client.get("/api/engagement/nope").status_code == 404
 
 
+def test_recent_field_picks_meaningful_touch_excludes_noise(tmp_path, monkeypatch):
+    """The Activity tab's `recent` field: the most significant MEANINGFUL touch in the
+    last 14 days — meeting/lead/SAO over a click, click-only never surfaces, and old
+    touches drop out of the window. Relative dates so it never ages out."""
+    from datetime import UTC, datetime, timedelta
+
+    monkeypatch.delenv("BASIC_AUTH_USER", raising=False)
+    monkeypatch.delenv("BASIC_AUTH_PASS", raising=False)
+    monkeypatch.setattr(_app, "get_repository", lambda: JsonFileRepository(tmp_path / "d2.json"))
+    monkeypatch.setattr(_app, "get_scoring_repository",
+                        lambda: ScoringJsonRepository(tmp_path / "s2.json"))
+    eng = EngagementJsonRepository(path=str(tmp_path / "e2.json"))
+    now = datetime.now(UTC)
+    iso = lambda days: (now - timedelta(days=days)).isoformat()  # noqa: E731
+
+    def seed(aid, ext, kind, points, days):
+        eng.upsert_contact({"external_id": ext, "account_id": aid, "company": aid,
+                            "matched_lists": ["abm"]})
+        eng.add_event({"external_id": f"{kind}:{ext}", "kind": kind, "channel": "x",
+                       "points": points, "contact_ext": ext, "account_id": aid,
+                       "occurred_at": iso(days)})
+
+    seed("acc_a", "a1", "click", 1, 1)              # A: a click …
+    seed("acc_a", "a1b", "meeting_booked", 10, 3)   #    … and a meeting (meeting wins)
+    seed("acc_b", "b1", "click", 1, 1)              # B: click-only → not surfaced
+    seed("acc_c", "c1", "meeting_booked", 10, 40)   # C: meaningful but 40d old → out of window
+    monkeypatch.setattr(_app, "get_engagement_repository", lambda: eng)
+    monkeypatch.setattr(_app.engagement_sync_mod, "run_sync", _noop_sync)
+
+    from auto_search.api.app import create_app
+    with TestClient(create_app()) as c:
+        accts = {a["account_id"]: a for a in c.get("/api/engagement").json()["accounts"]}
+    assert accts["acc_a"]["recent"]["kind"] == "meeting_booked"   # meaningful over the click
+    assert accts["acc_b"]["recent"] is None                       # click-only never surfaces
+    assert accts["acc_c"]["recent"] is None                       # outside the 14-day window
+
+
 def test_activate_test_mode_skips_enrichment_credit_safety(client, monkeypatch):
     """Credit-safety gate: a {"test": true} activation must NOT enrich (no Apollo/
     FullEnrich spend); a real activation enriches once. Slack is stubbed out."""

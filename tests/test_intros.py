@@ -138,6 +138,9 @@ async def test_generate_filters_sub_director_and_ranks_engaged(monkeypatch):
     async def no_apollo(domain):
         return []                                        # force the Apify fallback path
 
+    # fixed 3-connector roster so the test is independent of the production list
+    monkeypatch.setattr(service.profiles, "founder_urls",
+                        lambda: ["https://x/in/a", "https://x/in/b", "https://x/in/c"])
     monkeypatch.setattr(service.profiles, "fetch_founder", fake_founder)
     monkeypatch.setattr(service.profiles, "apollo_contacts", no_apollo)
     monkeypatch.setattr(service.profiles, "search_contacts", fake_search)

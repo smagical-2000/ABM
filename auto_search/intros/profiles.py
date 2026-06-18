@@ -32,11 +32,23 @@ _ACTOR_SEARCH = "harvestapi~linkedin-profile-search"
 FOUNDER_COST_USD = 0.01
 CONTACT_COST_USD = 0.015
 
-# The founders whose networks we match against. Env-overridable without a deploy.
+# The people whose networks we match against ("founders" is the legacy field name;
+# the roster is really the whole go-to-market team). The sales team (AEs/SDRs) is the
+# high-value half — their networks reach hospital execs the founders' don't. Stored
+# https + trailing-slash (the shape freshdata accepts). Env-overridable without a deploy.
 DEFAULT_FOUNDER_URLS = (
+    # founders
     "https://www.linkedin.com/in/hsambhi/",
     "https://www.linkedin.com/in/rosiechopra/",
     "https://www.linkedin.com/in/geoffreygmartin/",
+    # sales team (AEs / SDRs)
+    "https://www.linkedin.com/in/justingernot/",
+    "https://www.linkedin.com/in/matt-royalty-a5416a27/",
+    "https://www.linkedin.com/in/colin-m-43248367/",
+    "https://www.linkedin.com/in/ben-davies-4b794620b/",
+    "https://www.linkedin.com/in/gabriel-hanna-9030981b0/",
+    "https://www.linkedin.com/in/justin-pride-255b466/",
+    "https://www.linkedin.com/in/alykhan-jina-73b247102/",
 )
 
 
@@ -102,8 +114,11 @@ def _founder_stints(raw: dict) -> tuple[list[Stint], list[Stint]]:
 
 
 async def fetch_founder(url: str) -> FounderProfile | None:
-    """Scrape one founder profile -> FounderProfile, or None if unresolvable."""
-    items = await apify._run_actor(_ACTOR_ENRICH, {"linkedin_url": url})
+    """Scrape one connector profile -> FounderProfile, or None if unresolvable.
+    Normalizes the URL (freshdata 400s on Apollo's http:// / no-trailing-slash shape)
+    so any roster entry works regardless of how it was pasted."""
+    items = await apify._run_actor(_ACTOR_ENRICH,
+                                   {"linkedin_url": normalize_linkedin_url(url) or url})
     if not items or not isinstance(items[0], dict):
         return None
     raw = items[0].get("data") if isinstance(items[0].get("data"), dict) else items[0]

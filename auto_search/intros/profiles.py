@@ -182,10 +182,28 @@ def parse_contact(item: dict) -> tuple[WarmContact, list[Stint], list[Stint]] | 
     return contact, exp, edu
 
 
+_PAREN = re.compile(r"\s*\([^)]*\)")                       # "(AKA Infinity … PC)"
+_AKA = re.compile(r"\s*\b(a\.?k\.?a\.?|d\.?b\.?a\.?|f\.?k\.?a\.?)\b.*$", re.I)  # "… AKA …"
+_LEGAL = re.compile(r"[\s,]+(p\.?c\.?|pllc|llc|llp|inc|corp|co|ltd)\.?\s*$", re.I)
+
+
+def search_company_name(name: str | None) -> str:
+    """Clean a stored ABM name into something LinkedIn's company search can match.
+    Drops parentheticals ('(AKA …)'), trailing AKA/DBA aliases, and a legal suffix
+    (PC/LLC/Inc/…). e.g. 'Radiology Alliance (AKA Infinity Management & Radiology
+    Alliance PC)' -> 'Radiology Alliance'. Never returns empty (falls back to raw)."""
+    s = _PAREN.sub("", name or "")
+    s = _AKA.sub("", s)
+    s = re.sub(r"\s+", " ", s).strip().strip(",").strip()
+    s = _LEGAL.sub("", s).strip().strip(",").strip()
+    return s or (name or "").strip()
+
+
 async def search_contacts(company_name: str, *, limit: int | None = None) -> list[dict]:
-    """Raw Full-mode search hits for ICP decision-makers at `company_name`."""
+    """Raw Full-mode search hits for ICP decision-makers at `company_name`. The name
+    is cleaned first so messy ABM entries ('… (AKA …)', '… PC') match a real company."""
     return await apify._run_actor(_ACTOR_SEARCH, {
-        "currentCompanies": [company_name],
+        "currentCompanies": [search_company_name(company_name)],
         "currentJobTitles": ICP_TITLES,
         "profileScraperMode": "Full",
         "maxItems": limit or max_contacts(),

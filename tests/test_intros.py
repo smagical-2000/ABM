@@ -214,6 +214,18 @@ def test_normalize_linkedin_url_fixes_apollo_shape():
     assert n(None) is None
 
 
+def test_search_company_name_cleans_messy_abm_names():
+    from auto_search.intros.profiles import search_company_name
+    assert search_company_name(
+        "Radiology Alliance (AKA Infinity Management & Radiology Alliance PC)") == "Radiology Alliance"
+    assert search_company_name("Acme Health PC") == "Acme Health"
+    assert search_company_name("Acme Health, Inc.") == "Acme Health"
+    assert search_company_name("Acme Health LLC") == "Acme Health"
+    assert search_company_name("Acme Health dba Foo Clinic") == "Acme Health"
+    assert search_company_name("Acme Health") == "Acme Health"      # clean already → no-op
+    assert search_company_name("") == ""                            # never crashes
+
+
 @pytest.mark.asyncio
 async def test_generate_scrapes_contact_adds_shared_school(monkeypatch):
     repo = _FakeDiscoRepo()

@@ -102,7 +102,8 @@ def parse_sao(opportunities: list[dict], *, now: str | None = None
         occurred = _dt(o.get("CreatedDate")) or now
         _record(acc["opp"], occurred, _sid(o.get("Id")), o.get("Name"),
                 stage=o.get("StageName"), is_won=bool(o.get("IsWon")),
-                amount=o.get("Amount"))
+                amount=o.get("Amount"), sql_create_date=o.get("SQL_Create_Date__c"),
+                qual_call_date=o.get("Qualification_Call_Date__c"))
 
     contact_rows: list[dict] = []
     event_rows: list[dict] = []

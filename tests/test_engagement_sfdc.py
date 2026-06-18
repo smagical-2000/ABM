@@ -141,6 +141,16 @@ def test_sao_dedups_per_account_scores_ten_once():
     assert e["occurred_at"].startswith("2026-06-01")          # most recent
 
 
+def test_sao_audit_dates_carried_in_raw():
+    o = _opp(**{"SQL_Create_Date__c": "2026-06-01", "Qualification_Call_Date__c": "2026-06-03"})
+    _, events = sfdc.parse_sao([o])
+    assert events[0]["raw"]["sql_create_date"] == ["2026-06-01"]
+    assert events[0]["raw"]["qual_call_date"] == ["2026-06-03"]
+    # null audit dates are dropped, not stored as None
+    _, ev2 = sfdc.parse_sao([_opp(**{"SQL_Create_Date__c": None, "Qualification_Call_Date__c": None})])
+    assert "sql_create_date" not in ev2[0]["raw"] and "qual_call_date" not in ev2[0]["raw"]
+
+
 def test_sao_won_deal_carried_in_raw():
     _, events = sfdc.parse_sao([_opp(IsWon=True, IsClosed=True, StageName="Closed Won")])
     assert events[0]["raw"]["is_won"] == [True]

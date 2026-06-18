@@ -283,14 +283,19 @@ def test_run_sfdc_sync_includes_sales_accepted_opportunities(tmp_path):
 
 def test_run_sfdc_sync_is_idempotent(tmp_path):
     repo = EngagementJsonRepository(path=str(tmp_path / "sf2.json"))
+    # include an SAO so idempotency is proven end-to-end across both id namespaces
+    sao = [{"Id": "0061", "Name": "CHRISTUS Deal", "StageName": "Discovery",
+            "IsClosed": False, "IsWon": False, "AccountId": "001CH",
+            "Account": {"Name": "CHRISTUS Health", "Website": "https://www.christushealth.org/"},
+            "CreatedDate": "2026-05-01T00:00:00.000+0000"}]
     first = sync_mod.run_sfdc_sync(
         engagement_repo=repo, scoring_repo=_FakeScoring(), discovery_repo=_FakeDiscovery(),
-        client=_FakeSfdcClient(_sfdc_leads()), now="2026-06-14T00:00:00Z")
+        client=_FakeSfdcClient(_sfdc_leads(), sao=sao), now="2026-06-14T00:00:00Z")
     second = sync_mod.run_sfdc_sync(
         engagement_repo=repo, scoring_repo=_FakeScoring(), discovery_repo=_FakeDiscovery(),
-        client=_FakeSfdcClient(_sfdc_leads()), now="2026-06-14T00:00:00Z")
-    # only the 2 matched leads persist (unmatched aren't stored); re-sync adds nothing
-    assert first["new_events"] == 2 and second["new_events"] == 0
+        client=_FakeSfdcClient(_sfdc_leads(), sao=sao), now="2026-06-14T00:00:00Z")
+    # 2 matched leads + 1 SAO persist (unmatched aren't stored); re-sync adds nothing
+    assert first["new_events"] == 3 and second["new_events"] == 0
 
 
 @pytest.mark.asyncio

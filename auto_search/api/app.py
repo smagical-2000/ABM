@@ -707,6 +707,31 @@ def create_app() -> FastAPI:
             rec["name"] = rec["name"] or t.get("name")
         return out
 
+    # touches that don't, on their own, make an account worth resurfacing on the
+    # Activity view — a click or a TOFU download isn't "they moved" (mirrors the lean
+    # bar the user/Galyna asked for: a real worklist, not noise).
+    _ACTIVITY_NOISE = frozenset({"click", "low_intent_lead"})
+
+    def _recent_touch_by_account(repo, *, days: int = 14) -> dict[str, dict]:
+        """account_id -> the most significant MEANINGFUL touch in the last `days`
+        ({kind, at}). Powers the Activity view's "what changed" + recency."""
+        from auto_search.db.engagement_repository import _parse_iso
+        cutoff = datetime.now(UTC) - timedelta(days=days)
+        best: dict[str, dict] = {}
+        for e in repo.recent_events(limit=5000):
+            aid = e.get("account_id")
+            if not aid or e.get("kind") in _ACTIVITY_NOISE:
+                continue
+            ts = _parse_iso(e.get("occurred_at"))
+            if not ts or ts < cutoff:
+                continue
+            pts = int(e.get("points") or 0)
+            cur = best.get(aid)
+            if cur is None or pts > cur["_pts"] or (pts == cur["_pts"] and ts > cur["_ts"]):
+                best[aid] = {"kind": e.get("kind"), "at": e.get("occurred_at"),
+                             "_pts": pts, "_ts": ts}
+        return {aid: {"kind": v["kind"], "at": v["at"]} for aid, v in best.items()}
+
     def _engaged_view() -> list[dict]:
         """Engaged accounts ranked by heat, enriched with display info, tier + rates."""
         repo = getattr(app.state, "engagement_repo", None)
@@ -720,6 +745,7 @@ def create_app() -> FastAPI:
         scored = {a["account_id"]: a for a in app.state.scoring.list_scored()}
         abm = _abm_display(app.state.repo)
         series_by = repo.account_weekly_series(weeks=8)
+        recent_by = _recent_touch_by_account(repo)
         out: list[dict] = []
         for r in repo.engaged_accounts():
             aid = r["account_id"]
@@ -736,6 +762,7 @@ def create_app() -> FastAPI:
                 "lists": sorted(lists_by.get(aid, [])),
                 "abm": "abm" in lists_by.get(aid, set()),
                 "series": series, "trend": trend, "delta_week": delta_week,
+                "recent": recent_by.get(aid),
                 "open_rate": (round(100 * (r.get("opened") or 0) / delivered)
                               if delivered else None),
                 "reply_rate": (round(100 * (r.get("replied_sends") or 0) / delivered)

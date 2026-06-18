@@ -1,10 +1,11 @@
 const { useState, useEffect, useMemo, useRef } = React;
 
 // ── Engagement console (redesign) ────────────────────────────────────────────
-// Momentum-first heat board: per-account 8-week sparkline, a "movers since last
-// sync" strip, a "what needs you" action bar, Inbox (grouped touches), a detail
-// drawer (momentum hero + peer comparison + breakdown + timeline) and an Activate
-// → Slack flow. Reads /api/engagement (+ /inbox, /{id}); posts /{id}/activate.
+// Momentum-first heat board. Default "Activity" tab = the worklist (accounts that
+// moved recently, what changed, newest first); "Accounts" = the full list by heat;
+// "Inbox" = grouped touches. Plus a "what needs you" action bar, a detail drawer
+// (momentum hero + breakdown + timeline) and an Activate → Slack flow. Reads
+// /api/engagement (+ /inbox, /{id}); posts /{id}/activate.
 // Ported from the standalone design; primitives mapped to the app's window.Icons /
 // SegmentBadge, mock data swapped for the live API.
 
@@ -84,6 +85,7 @@ function mapAccount(r){
     contacts:r.contacts||0, domain:r.domain||'', framework:frameworkText(r),
     score:r.score||0, series:(r.series&&r.series.length?r.series:[0,0,0,0,0,0,0,0]),
     trend:r.trend||'flat', deltaWeek:r.delta_week||0, actioned:false, lastTouch:r.last_touch,
+    recent:r.recent||null,   // {kind, at} — most significant meaningful touch (last 14d)
   };
 }
 const mapInbox = (e)=>({ company:e.company, account:e.account_name||null, match:e.match_tier||null,
@@ -181,9 +183,10 @@ function HeatMark({ score }){
 
 // ── ACCOUNTS ─────────────────────────────────────────────────────────────────
 const COLS='minmax(0,1fr) 96px 208px 156px 92px';
-function AccountRow({ a, onOpen, onActivate }){
+function AccountRow({ a, onOpen, onActivate, showReason }){
   const [hov,setHov]=useState(false);
   const tier=tierOf(a.score), hc=HEAT[tier];
+  const rk=showReason&&a.recent?kindOf(a.recent.kind):null;
   return (
     <div onClick={()=>onOpen(a)} onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
       style={{display:'grid',gridTemplateColumns:COLS,alignItems:'center',gap:20,padding:'14px 28px',
@@ -199,7 +202,13 @@ function AccountRow({ a, onOpen, onActivate }){
       </div>
       <HeatMark score={a.score}/>
       <MomentumCell account={a}/>
-      <span style={{...TX.meta,whiteSpace:'nowrap'}}>Last touch {relTime(a.lastTouch)}</span>
+      {rk
+        ? <span style={{display:'inline-flex',alignItems:'center',gap:7,minWidth:0}}>
+            <span style={{width:7,height:7,borderRadius:'50%',background:rk.dot,flexShrink:0}}/>
+            <span style={{...TX.body,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{rk.label}</span>
+            <span style={{...TX.meta,whiteSpace:'nowrap'}}>· {relTime(a.recent.at)}</span>
+          </span>
+        : <span style={{...TX.meta,whiteSpace:'nowrap'}}>Last touch {relTime(a.lastTouch)}</span>}
       <div style={{display:'flex',justifyContent:'flex-end',alignItems:'center',gap:6}}>
         {tier==='Hot'&&<button onClick={e=>{e.stopPropagation();onActivate(a);}}
           style={{background:'#fffbeb',border:'1px solid #fde68a',fontFamily:'var(--font-sans)',fontSize:12,fontWeight:500,color:'#b45309',cursor:'pointer',padding:'4px 10px',borderRadius:6}}>Activate</button>}
@@ -220,6 +229,27 @@ function AccountsView({ accounts, onOpen, onActivate, segFilter }){
       {vis.length===0
         ? <div style={{padding:'40px 28px',textAlign:'center',...TX.meta}}>No accounts in this segment.</div>
         : vis.map(a=><AccountRow key={a.id} a={a} onOpen={onOpen} onActivate={onActivate}/>)}
+    </>
+  );
+}
+
+// Activity = the worklist: only accounts that actually moved recently (a meaningful
+// touch, not a click — filtered server-side via `recent`), newest first, tier-jumps up
+// top. The short list a rep works from, vs Accounts (everything, by lifetime heat).
+function ActivityView({ accounts, onOpen, onActivate, segFilter }){
+  const up=a=>tierOf(a.score)!==tierOf(a.score-a.deltaWeek)?1:0;
+  const vis=accounts
+    .filter(a=>(segFilter==='all'||a.segment===segFilter)&&a.recent)
+    .sort((a,b)=> up(b)-up(a) || (b.recent.at||'').localeCompare(a.recent.at||'') || b.deltaWeek-a.deltaWeek);
+  return (
+    <>
+      <div style={{display:'grid',gridTemplateColumns:COLS,gap:20,padding:'8px 28px',borderBottom:'1px solid #f4f4f5',background:'#fafafa'}}>
+        <div style={TX.label}>Account</div><div style={TX.label}>Heat</div>
+        <div style={TX.label}>Momentum · last 8 weeks</div><div style={TX.label}>What changed</div><div/>
+      </div>
+      {vis.length===0
+        ? <div style={{padding:'40px 28px',textAlign:'center',...TX.meta}}>Nothing has moved here lately — check Accounts for the full list.</div>
+        : vis.map(a=><AccountRow key={a.id} a={a} onOpen={onOpen} onActivate={onActivate} showReason/>)}
     </>
   );
 }
@@ -456,7 +486,7 @@ function EngagementView({ pushToast }){
   const [inbox,setInbox]=useState([]);
   const [lastSync,setLastSync]=useState(null);
   const [loading,setLoading]=useState(true);
-  const [tab,setTab]=useState('accounts');
+  const [tab,setTab]=useState('activity');
   const [open,setOpen]=useState(null);
   const [detail,setDetail]=useState(null);
   const [activating,setActivating]=useState(null);
@@ -521,10 +551,11 @@ function EngagementView({ pushToast }){
   const hotCount=accounts.filter(a=>tierOf(a.score)==='Hot').length;
   const justWentHot=movers.filter(a=>tierOf(a.score)==='Hot'&&tierOf(a.score-a.deltaWeek)!=='Hot').length;
   const needs=[];
-  if(justWentHot) needs.push({n:justWentHot,label:justWentHot===1?'account just went Hot':'accounts just went Hot',icon:'arrowUp',fg:'#047857',bg:'rgba(16,185,129,.1)',go:'accounts'});
+  if(justWentHot) needs.push({n:justWentHot,label:justWentHot===1?'account just went Hot':'accounts just went Hot',icon:'arrowUp',fg:'#047857',bg:'rgba(16,185,129,.1)',go:'activity'});
   if(hotCount) needs.push({n:hotCount,label:hotCount===1?'Hot account':'Hot accounts',icon:'zap',fg:'#b45309',bg:'#fffbeb',go:'accounts'});
   if(unresolvedTouches) needs.push({n:unresolvedTouches,label:'touches need resolution',icon:'help',fg:'#b45309',bg:'#fffbeb',go:'inbox'});
-  const stats={ accounts:accounts.length, touches:inbox.length };
+  const stats={ accounts:accounts.length, touches:inbox.length,
+                active:accounts.filter(a=>a.recent).length };
 
   function Tab({ id, label, count }){ const act=tab===id; return <button onClick={()=>setTab(id)} style={{position:'relative',display:'inline-flex',alignItems:'center',gap:6,padding:'10px 14px',border:'none',background:'none',cursor:'pointer',fontFamily:'var(--font-sans)',fontSize:13,fontWeight:act?500:400,color:act?'#18181b':'#a1a1aa',marginBottom:-1}}>{label}<span style={{fontSize:11,fontVariantNumeric:'tabular-nums',borderRadius:999,padding:'1px 6px',background:act?'#18181b':'#f4f4f5',color:act?'#fff':'#a1a1aa'}}>{count}</span>{act&&<span style={{position:'absolute',insetInline:0,bottom:-1,height:2,borderRadius:999,background:'#18181b'}}/>}</button>; }
 
@@ -558,32 +589,6 @@ function EngagementView({ pushToast }){
         {loading
           ? <div style={{padding:'80px 0',textAlign:'center',...TX.meta}}>Loading engagement…</div>
           : <>
-        {movers.length>0&&(
-          <div style={{marginBottom:18}}>
-            <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
-              <span style={{fontSize:11,fontWeight:600,textTransform:'uppercase',letterSpacing:'.06em',color:'#a1a1aa'}}>Movers since last sync</span>
-              <span style={{height:1,flex:1,background:'#f4f4f5'}}/>
-              <span style={{fontSize:12,color:'#a1a1aa'}}>{movers.length} {movers.length===1?'account':'accounts'} climbing</span>
-            </div>
-            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(248px,1fr))',gap:10}}>
-              {movers.map(a=>{ const tier=tierOf(a.score), hc=HEAT[tier]; const prevTier=tierOf(a.score-a.deltaWeek), pc=HEAT[prevTier];
-                return (
-                  <button key={a.id} onClick={()=>openAccount(a)} style={{display:'flex',alignItems:'center',gap:13,textAlign:'left',cursor:'pointer',padding:'13px 16px',borderRadius:12,background:'#fff',border:'1px solid #e4e4e7',boxShadow:'0 1px 2px rgba(24,24,27,.03)'}}>
-                    <span style={{display:'flex',alignItems:'center',gap:5,flexShrink:0}}>
-                      <span style={{width:8,height:8,borderRadius:'50%',background:pc.solid,opacity:.5}}/>
-                      <Icon name="arrowRight" size={13} style={{color:'#d4d4d8'}}/>
-                      <span style={{width:11,height:11,borderRadius:'50%',background:hc.solid}}/>
-                    </span>
-                    <span style={{minWidth:0,flex:1}}>
-                      <span style={{display:'block',fontSize:13.5,fontWeight:500,color:'#18181b',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{a.name}</span>
-                      <span style={{display:'block',fontSize:12,color:hc.fg,marginTop:2,fontWeight:500}}>{prevTier!==tier?`${prevTier} → ${tier}`:`Climbing in ${tier}`}</span>
-                    </span>
-                    <span style={{flexShrink:0,display:'inline-flex',alignItems:'center',gap:3,fontSize:13,fontWeight:600,fontVariantNumeric:'tabular-nums',color:'#047857'}}><Icon name="arrowUp" size={12}/>{a.deltaWeek}</span>
-                  </button>
-                ); })}
-            </div>
-          </div>
-        )}
 
         <div style={{display:'flex',alignItems:'center',marginBottom:20,padding:'14px 22px',background:'#fff',borderRadius:12,border:'1px solid #e4e4e7'}}>
           {needs.length?needs.map((it,i)=>(
@@ -602,9 +607,10 @@ function EngagementView({ pushToast }){
 
         <div style={{background:'#fff',borderRadius:12,border:'1px solid #e4e4e7',overflow:'hidden'}}>
           <div style={{display:'flex',alignItems:'stretch',borderBottom:'1px solid #f4f4f5',padding:'0 16px'}}>
+            <Tab id="activity" label="Activity" count={stats.active}/>
             <Tab id="accounts" label="Accounts" count={stats.accounts}/>
             <Tab id="inbox" label="Inbox" count={stats.touches}/>
-            {tab==='accounts'&&(
+            {(tab==='accounts'||tab==='activity')&&(
               <label style={{display:'inline-flex',alignItems:'center',gap:5,marginLeft:'auto',fontSize:12,color:'#a1a1aa'}}>Segment
                 <select value={segFilter} onChange={e=>setSegFilter(e.target.value)} style={{appearance:'none',borderRadius:6,border:'1px solid #e4e4e7',background:'#fff',padding:'4px 24px 4px 8px',fontFamily:'var(--font-sans)',fontSize:12,fontWeight:500,color:'#3f3f46'}}>
                   <option value="all">All</option><option value="health_system">Health System</option><option value="specialty">Specialty</option><option value="payer">Payer</option>
@@ -612,7 +618,9 @@ function EngagementView({ pushToast }){
               </label>
             )}
           </div>
-          {tab==='accounts'
+          {tab==='activity'
+            ? <ActivityView accounts={accounts} onOpen={openAccount} onActivate={setActivating} segFilter={segFilter}/>
+            : tab==='accounts'
             ? <AccountsView accounts={accounts} onOpen={openAccount} onActivate={setActivating} segFilter={segFilter}/>
             : <InboxView events={inbox} onResolve={()=>{}}/>}
         </div>

@@ -38,16 +38,35 @@ SYSTEM_PROMPT = textwrap.dedent("""
     - topic: one of prior_auth | denials | rcm_ai | eligibility | policy |
       operations (best single fit; "policy" for CMS/regulatory, "rcm_ai" when
       automation/AI is the angle, "operations" for general RCM ops).
-    - why_it_matters: ONE sentence on why it's relevant to a seller of RCM
-      automation (the wedge / urgency it creates). "" when not relevant.
+    - why_it_matters: ONE sentence of ANALYSIS the headline does NOT already state.
+      The reader has read the title — do NOT restate, paraphrase, or repeat its
+      numbers/claims. Instead say the SO-WHAT: the market shift it signals, the buyer
+      pain or budget pressure it exposes, the competitive/timing dynamic, or what it
+      changes for an RCM buyer's priorities. If your sentence could be guessed from
+      the title alone, rewrite it. "" when not relevant.
     - get_behind: 0-100 — how hard Magical should get behind this as an outreach
       wedge RIGHT NOW. HIGH when Magical directly automates the problem it raises
       (prior auth, denials, eligibility, claims) AND it is urgent (a new rule,
       mandate, deadline, or record-high stat) AND broad (national / all-payer).
       LOW when narrow, regional, vague, or only loosely about reimbursement.
       0 when not relevant.
-    - play: ONE sentence a rep can actually use — WHO to target + the hook to open
-      with (quote a crisp line). "" when not relevant.
+    - play: ONE sentence a rep uses — WHO to target + the angle that ties this to
+      Magical's value. Lead with the buyer and the opener, NOT a re-quote of the
+      headline stat. Must read differently from why_it_matters. "" when not relevant.
+
+    The title, why_it_matters, and play must each add something DIFFERENT — title =
+    the fact, why_it_matters = the implication, play = the move. Never three echoes
+    of the same sentence.
+
+    Example (pattern only — write fresh for each real article, never copy this):
+    title "CMS finalizes rule requiring payers to answer prior-auth in 72 hours":
+    - WEAK (just echoes the title): "CMS will require 72-hour prior-auth decisions,
+      creating urgency for automation."
+    - STRONG why_it_matters: "A hard turnaround clock makes manual prior-auth
+      non-compliant overnight — every payer and large provider now has a deadline,
+      not a someday project."
+    - STRONG play: "Target payer ops leaders facing the 72-hour mandate: open with how
+      Magical auto-adjudicates prior auth to hit the clock without adding headcount."
 
     Return ONLY a JSON array, one object per id, every id echoed exactly:
     [{"id": "<id>", "relevant": true|false, "topic": "prior_auth"|...,

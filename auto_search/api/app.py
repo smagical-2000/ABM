@@ -1527,10 +1527,6 @@ def create_app() -> FastAPI:
             return account                            # already in flight
         _assert_budget(app, 0.25)
         app.state.scoring_repo.set_warm_intros(account_id, {"state": "generating"})
-        # Green/yellow (high/medium fit) earn the paid school enrichment; red/low
-        # stay Apollo-only and free — a shared alma mater only matters on accounts
-        # we'd actually pursue.
-        enrich = account.get("tier_band") in ("high", "medium")
 
         async def _run() -> None:
             op = spend_guard.Operation(app.state.scoring_repo, "warm_intros",
@@ -1541,9 +1537,11 @@ def create_app() -> FastAPI:
                           model="apify")
 
             try:
+                # On-demand: the rep chose this account, so fully scrape its ICP
+                # decision-makers via Apify for the richest cross-match (spend-guarded).
                 payload = await intros_service.generate(
                     account, discovery_repo=app.state.repo, on_cost=on_cost,
-                    enrich_schools=enrich)
+                    scrape_contacts=True)
                 app.state.scoring_repo.set_warm_intros(account_id, payload)
             except Exception as e:  # noqa: BLE001 — land in 'error', never crash the loop
                 logger.exception("warm intros failed for %s", account_id)
@@ -1572,11 +1570,11 @@ def create_app() -> FastAPI:
                 return False                      # already in flight
             if force or wi.get("state") != "ready":
                 return True                       # forced, or no intros yet
-            # Already has intros: re-run only green/yellow whose intros predate
-            # school enrichment, so the alma-mater net is backfilled exactly once.
-            # Red/low keep their free Apollo list untouched (no re-pay, no churn).
+            # Already has intros: re-run only green/yellow whose intros predate the
+            # full Apify contact scrape, so the employer+school net is backfilled
+            # exactly once. Red/low keep their free Apollo list untouched (no re-pay).
             return (r.get("tier_band") in ("high", "medium")
-                    and not wi.get("schools_enriched"))
+                    and not wi.get("contacts_scraped"))
 
         todo = [r["account_id"] for r in rows if _needs(r)]
         if not todo:
@@ -1616,7 +1614,7 @@ def create_app() -> FastAPI:
                     try:
                         payload = await intros_service.generate(
                             account, discovery_repo=app.state.repo,
-                            on_cost=on_cost, enrich_schools=enrich)
+                            on_cost=on_cost, scrape_contacts=enrich)
                         app.state.scoring_repo.set_warm_intros(aid, payload)
                     except Exception as e:  # noqa: BLE001 — one account mustn't kill the batch
                         logger.exception("batch warm intros failed for %s", aid)

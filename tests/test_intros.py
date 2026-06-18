@@ -215,7 +215,7 @@ def test_normalize_linkedin_url_fixes_apollo_shape():
 
 
 @pytest.mark.asyncio
-async def test_generate_enrich_schools_adds_shared_school(monkeypatch):
+async def test_generate_scrapes_contact_adds_shared_school(monkeypatch):
     repo = _FakeDiscoRepo()
 
     async def fake_founder(url):
@@ -226,27 +226,28 @@ async def test_generate_enrich_schools_adds_shared_school(monkeypatch):
                  "linkedin": "http://www.linkedin.com/in/pat-alum",
                  "city": "X", "state": "Y", "employment_history": []}]
 
-    async def fake_schools(url):
+    async def fake_scrape(url):
         assert url == "https://www.linkedin.com/in/pat-alum/"     # normalized first
-        return [_stint("University of Waterloo", 2003, 2007, school=True)]
+        # full Apify profile: experience + education (here a shared alma mater)
+        return [], [_stint("University of Waterloo", 2003, 2007, school=True)]
 
     monkeypatch.setattr(service.profiles, "fetch_founder", fake_founder)
     monkeypatch.setattr(service.profiles, "apollo_contacts", apollo_ok)
-    monkeypatch.setattr(service.profiles, "fetch_schools", fake_schools)
+    monkeypatch.setattr(service.profiles, "fetch_contact_stints", fake_scrape)
 
     costs = []
     out = await service.generate({"name": "Acme", "domain": "acme.com"},
-                                 discovery_repo=repo, enrich_schools=True,
+                                 discovery_repo=repo, scrape_contacts=True,
                                  on_cost=lambda usd, step: costs.append(step))
-    assert out["schools_enriched"] is True
+    assert out["contacts_scraped"] is True
     assert out["contacts"][0]["paths"][0]["kind"] == "shared_school"
     assert out["contacts"][0]["schools"] == ["University of Waterloo"]   # on file
     assert out["warm_count"] == 1
-    assert "school_enrich" in costs                   # the paid enrich was recorded
+    assert "contact_scrape" in costs                  # the paid Apify scrape was recorded
 
 
 @pytest.mark.asyncio
-async def test_generate_skips_school_enrich_when_disabled(monkeypatch):
+async def test_generate_skips_contact_scrape_when_disabled(monkeypatch):
     repo = _FakeDiscoRepo()
 
     async def fake_founder(url):
@@ -257,15 +258,15 @@ async def test_generate_skips_school_enrich_when_disabled(monkeypatch):
                  "linkedin": "http://www.linkedin.com/in/pat-alum", "employment_history": []}]
 
     async def must_not_run(url):
-        raise AssertionError("fetch_schools must not run for a red/low account")
+        raise AssertionError("fetch_contact_stints must not run when scrape disabled")
 
     monkeypatch.setattr(service.profiles, "fetch_founder", fake_founder)
     monkeypatch.setattr(service.profiles, "apollo_contacts", apollo_ok)
-    monkeypatch.setattr(service.profiles, "fetch_schools", must_not_run)
+    monkeypatch.setattr(service.profiles, "fetch_contact_stints", must_not_run)
 
     out = await service.generate({"name": "Acme", "domain": "acme.com"},
-                                 discovery_repo=repo)        # enrich_schools defaults False
-    assert out["schools_enriched"] is False
+                                 discovery_repo=repo)        # scrape_contacts defaults False
+    assert out["contacts_scraped"] is False
     assert out["warm_count"] == 0                            # no school -> no path
 
 

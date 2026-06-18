@@ -233,16 +233,15 @@ def parse_apollo(item: dict) -> tuple[WarmContact, list[Stint], list[Stint]] | N
     return contact, exp, []
 
 
-# ── school enrichment (freshdata, green/yellow only) ──────────────────
-# Apollo carries employment but no schools, and a shared alma mater is the widest
-# warm net there is — a university has orders of magnitude more alumni than an
-# ex-employer. For high-value (green/yellow) accounts we backfill education by
-# enriching each surviving decision-maker's profile, so shared-school paths can
-# fire. freshdata rejects Apollo's raw URL shape (http://, no trailing slash)
-# with HTTP 400, so we normalize first — that was the whole reason an earlier
-# probe came back empty.
+# ── ICP contact profile scrape (freshdata) ───────────────────────────
+# Apollo finds the right decision-makers (free, domain-precise) but its data is
+# employment-only. To cross-match the same way both sides do, we scrape each kept
+# decision-maker's FULL profile via the same Apify actor as the team — so employer
+# AND school paths can fire (a shared alma mater is the widest warm net: a
+# university has orders of magnitude more alumni than an ex-employer). freshdata
+# 400s on Apollo's raw URL shape (http://, no trailing slash), so normalize first.
 
-# freshdata ~ $9/1k per profile (the user's quoted rate): one enrich per kept DM.
+# freshdata ~ $9/1k per profile (the user's quoted rate): one scrape per kept DM.
 ENRICH_CONTACT_COST_USD = 0.009
 
 
@@ -257,17 +256,17 @@ def normalize_linkedin_url(url: str | None) -> str | None:
     return u.rstrip("/") + "/"
 
 
-async def fetch_schools(normalized_url: str) -> list[Stint]:
-    """freshdata enrich (URL already normalized) -> education Stints. [] on any
-    failure, so a single dead enrich never kills the batch — the contact just
-    stays school-less and matching degrades to employer/engaged."""
+async def fetch_contact_stints(normalized_url: str) -> tuple[list[Stint], list[Stint]]:
+    """freshdata scrape of one ICP profile (URL already normalized) -> (experience,
+    education) Stints — the full profile, so the contact cross-matches the team on
+    both employer and school. ([], []) on any failure, so a single dead scrape never
+    kills the batch — the contact just stays on its Apollo data and matching degrades."""
     try:
         items = await apify._run_actor(_ACTOR_ENRICH, {"linkedin_url": normalized_url})
-    except Exception:  # noqa: BLE001 — one enrich failing mustn't break the run
-        logger.exception("school enrich failed for %s", normalized_url)
-        return []
+    except Exception:  # noqa: BLE001 — one scrape failing mustn't break the run
+        logger.exception("contact scrape failed for %s", normalized_url)
+        return [], []
     if not items or not isinstance(items[0], dict):
-        return []
+        return [], []
     raw = items[0].get("data") if isinstance(items[0].get("data"), dict) else items[0]
-    _, edu = _founder_stints(raw)        # reuse the freshdata educations parser
-    return edu
+    return _founder_stints(raw)          # (experience, education) — same parser as the team

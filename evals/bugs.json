@@ -72,6 +72,15 @@
       "root_cause": "Social engagement qualified on any single interaction, with no per-person threshold and no competitor-vs-own distinction.",
       "guard": "tests/test_social_engagement_gate.py",
       "lesson": "Engagement qualifies only on intent-bearing volume (a comment, or 2+ likes) and ONLY for competitor accounts, not our own (getMagical). Collect multiple touches per person, then decide."
+    },
+    {
+      "id": "replyio-reporting-500-on-offset-datetime",
+      "date": "2026-06-14",
+      "area": "auto_search/engagement/replyio_client.py (Reply.io v3 POST /reporting/emails)",
+      "symptom": "Engagement sync 500'd. POST /v3/reporting/emails with a from/to that carried a timezone offset ('2026-05-15T00:00:00+00:00') returned 500 Internal Server Error; date-only ('2026-05-15') and Z-suffixed datetimes returned 200.",
+      "root_cause": "datetime.isoformat() emits a '+00:00' offset, which Reply.io's report endpoint cannot parse. The reporting window is day-granular, so a bare date is the right shape.",
+      "guard": "tests/test_engagement_replyio_client.py::test_reporting_window_is_date_only_not_offset_datetime",
+      "lesson": "Send the reporting from/to as a bare 'YYYY-MM-DD' date. Verify connectors against the LIVE API, not just mocks — a mock happily accepts the bad format; only the real endpoint reveals the 500."
     }
   ]
 }

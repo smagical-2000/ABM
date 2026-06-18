@@ -29,7 +29,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -44,13 +44,17 @@ from auto_search.abm import (
 )
 from auto_search.api.auth import install_basic_auth
 from auto_search.db import get_repository
+from auto_search.db.engagement_repository import get_engagement_repository
 from auto_search.db.scoring_repository import (
     STALE_SCORING_SECONDS,
     get_scoring_repository,
 )
+from auto_search.engagement import notify as engagement_notify
+from auto_search.engagement import scoring as engagement_scoring
+from auto_search.engagement import sync as engagement_sync_mod
 from auto_search.intros import profiles as intros_profiles
 from auto_search.intros import service as intros_service
-from auto_search.normalize import normalize_company_name, normalize_linkedin_url
+from auto_search.normalize import clean_domain, normalize_company_name, normalize_linkedin_url
 from auto_search.run_control import RunControl
 from auto_search.runtime import is_production
 from auto_search.scoring import budget as budget_guard
@@ -332,6 +336,14 @@ async def lifespan(app: FastAPI):
     app.state.scoring = ScoringService(scoring_repo)
     app.state.repo = repo
     app.state.scoring_repo = scoring_repo
+    # Engagement store (Reply.io heat). Additive + isolated — never block startup.
+    try:
+        app.state.engagement_repo = get_engagement_repository()
+        app.state.engagement_repo.ensure_schema()
+    except Exception:  # noqa: BLE001
+        logger.exception("engagement init failed")
+        app.state.engagement_repo = None
+    app.state.engagement_running = False           # one sync at a time
     app.state.abm_index = _load_abm_index(repo)   # ABM target list -> match index
     _seed_social_targets(repo)                    # ensure Magical is always monitored
     app.state.social_running = False              # one social poll at a time
@@ -429,6 +441,29 @@ def create_app() -> FastAPI:
     def _abm_index() -> AbmIndex | None:
         return getattr(app.state, "abm_index", None)
 
+    def _engagement_tiers() -> tuple[dict, dict]:
+        """(by_domain, by_company_key) -> engagement heat tier, for the AGT-1390
+        Discovery score lift (an engaged account ranks higher). Best-effort."""
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            return {}, {}
+        try:
+            tier_by_acct = {a["account_id"]: engagement_scoring.tier_for(a.get("score") or 0)
+                            for a in repo.engaged_accounts()}
+            by_dom, by_key = {}, {}
+            for c in repo.contacts():
+                t = tier_by_acct.get(c.get("account_id"))
+                if not t:
+                    continue
+                if c.get("email_domain"):
+                    by_dom.setdefault(c["email_domain"], t)
+                if c.get("company_key"):
+                    by_key.setdefault(c["company_key"], t)
+            return by_dom, by_key
+        except Exception:  # noqa: BLE001 — never break the panel read
+            logger.exception("engagement tier lookup failed")
+            return {}, {}
+
     def _abm_social_lookup(name, domain=None):
         """Is this company on the ABM target list? The social flow uses it to
         treat a tracked account as authoritative — surfaced + highlighted without
@@ -447,6 +482,7 @@ def create_app() -> FastAPI:
             logger.exception("panel qualify cost lookup failed")
             costs, est = {}, None
         index = _abm_index()
+        eng_dom, eng_key = _engagement_tiers()   # AGT-1390: engaged accounts rank higher
         out: list[PanelCompany] = []
         for c in companies:
             cost = costs.get(c.company_key)
@@ -454,8 +490,10 @@ def create_app() -> FastAPI:
             abm_match = match_one(index, name=c.name, domain=c.domain, states=states)
             sigs = [{"signal_type": s.signal_type, "title": s.title, "role": s.role,
                      "tier": s.tier, "observed_at": s.observed_at} for s in (c.signals or [])]
+            eng_tier = eng_dom.get(clean_domain(c.domain)) or eng_key.get(c.company_key)
             it = priority.intent(
-                sigs, abm_confirmed=bool(abm_match and abm_match.tier == "confirmed"))
+                sigs, abm_confirmed=bool(abm_match and abm_match.tier == "confirmed"),
+                outcomes={"engagement_tier": eng_tier} if eng_tier else None)
             # Lone standard hire (single biller/coder, nothing stronger) → Watch list,
             # not Discovery. Same gate the cron parks on, so the views agree.
             is_watchlist = job_stacking.should_park_flat(sigs)
@@ -598,6 +636,307 @@ def create_app() -> FastAPI:
             finally:
                 op.finish()
                 app.state.news_running = False
+
+        _schedule_coro(app, _run())
+        return {"started": True}
+
+    # ── engagement (Reply.io heat) ──────────────────────────────────────────────
+
+    # ABM-import artifacts that are sheet/tab names, not classifications — Unclassified.
+    _JUNK_SEGMENTS = frozenset({"Matches", "Sheet30"})
+    _FRAMEWORK_LABEL = {"specialty": "Specialty", "health_system": "Health System",
+                        "payer": "Payer"}
+
+    def _clean_segment(seg):
+        """Normalize an ABM segment to a clean label; junk (sheet names) -> None.
+        The workbook truncated 'Specialties (Definitive, 20,000...' and abbreviates
+        physician groups as 'PGs - X' — fix both so they read as real classes."""
+        s = (seg or "").strip()
+        if not s or s in _JUNK_SEGMENTS:
+            return None
+        if s.startswith("Specialties (Definitive"):
+            return "Specialties"
+        if s.startswith("PGs - "):
+            return "Physician Group - " + s[len("PGs - "):]
+        return s
+
+    def _classify(scored: dict, abm: dict) -> dict:
+        """Classification shown on an engaged account: the scored system's framework +
+        fit tier (authoritative) AND the segment (scored's, else cleaned ABM's). The
+        junk ABM segments collapse to None (the 'Unclassified' fix)."""
+        fw = (scored or {}).get("framework")
+        fw_label = _FRAMEWORK_LABEL.get(fw, fw) if fw else None
+        seg = _clean_segment((scored or {}).get("segment") or (abm or {}).get("segment"))
+        return {
+            "framework": fw_label,
+            "fit_tier": (scored or {}).get("tier_label"),
+            # display class: scored framework label (clean) over a raw lowercase segment
+            "segment": fw_label or seg,
+        }
+
+    def _momentum(series: list[int] | None, weeks: int = 8) -> tuple[list[int], str, int]:
+        """(series, trend, delta_week) for the console sparkline. trend compares the
+        last 2 weeks vs the prior 2; delta_week is the most recent week's points."""
+        s = list(series) if series else [0] * weeks
+        if len(s) < weeks:
+            s = [0] * (weeks - len(s)) + s
+        delta_week = s[-1]
+        recent, prior = sum(s[-2:]), sum(s[-4:-2])
+        trend = "up" if recent > prior else "down" if recent < prior else "flat"
+        return s, trend, delta_week
+
+    def _abm_display(discovery_repo) -> dict[str, dict]:
+        """account_id -> display info for ABM-only engaged accounts (abm_<key>)."""
+        from auto_search.normalize import normalize_company_name
+        out: dict[str, dict] = {}
+        targets = (discovery_repo.abm_targets()
+                   if hasattr(discovery_repo, "abm_targets") else [])
+        for t in targets:
+            key = normalize_company_name(t.get("name") or "")
+            if not key:
+                continue
+            aid = f"abm_{key}"
+            rec = out.get(aid)
+            if rec is None:
+                rec = out[aid] = {"name": t.get("name"), "segment": None, "domain": None}
+            # duplicate rows per company are common (one carries the real class, one
+            # the junk 'Matches' tab) — keep the first NON-junk segment + a domain.
+            if rec["segment"] is None:
+                rec["segment"] = _clean_segment(t.get("segment"))
+            rec["domain"] = rec["domain"] or t.get("domain")
+            rec["name"] = rec["name"] or t.get("name")
+        return out
+
+    def _engaged_view() -> list[dict]:
+        """Engaged accounts ranked by heat, enriched with display info, tier + rates."""
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            return []
+        lists_by: dict[str, set] = {}
+        for c in repo.contacts():
+            aid = c.get("account_id")
+            if aid:
+                lists_by.setdefault(aid, set()).update(c.get("matched_lists") or [])
+        scored = {a["account_id"]: a for a in app.state.scoring.list_scored()}
+        abm = _abm_display(app.state.repo)
+        series_by = repo.account_weekly_series(weeks=8)
+        out: list[dict] = []
+        for r in repo.engaged_accounts():
+            aid = r["account_id"]
+            s = scored.get(aid) or {}
+            d = abm.get(aid, {})
+            delivered = r.get("delivered") or 0
+            series, trend, delta_week = _momentum(series_by.get(aid))
+            out.append({
+                **r,
+                "name": s.get("name") or d.get("name") or aid,
+                **_classify(s, d),
+                "domain": s.get("domain") or d.get("domain"),
+                "tier": engagement_scoring.tier_for(r.get("score") or 0),
+                "lists": sorted(lists_by.get(aid, [])),
+                "abm": "abm" in lists_by.get(aid, set()),
+                "series": series, "trend": trend, "delta_week": delta_week,
+                "open_rate": (round(100 * (r.get("opened") or 0) / delivered)
+                              if delivered else None),
+                "reply_rate": (round(100 * (r.get("replied_sends") or 0) / delivered)
+                               if delivered else None),
+            })
+        out.sort(key=lambda x: (x.get("score") or 0, x.get("last_touch") or ""), reverse=True)
+        return out
+
+    @app.get("/api/engagement")
+    def get_engagement():
+        repo = getattr(app.state, "engagement_repo", None)
+        last_sync = repo.get_sync_state() if repo else None
+        return {"accounts": _engaged_view(), "last_sync": last_sync,
+                "running": bool(getattr(app.state, "engagement_running", False))}
+
+    # NOTE: defined before /{account_id} so "export.csv"/"inbox" aren't captured as ids.
+    @app.get("/api/engagement/export.csv")
+    def engagement_export_csv():
+        """Download the engaged-account board as CSV — one row per account with the
+        full intent payload, for sales to work in a sheet."""
+        import csv
+        import io
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["Account", "Domain", "Classification", "Fit tier", "Lists",
+                    "Heat tier", "Score", "Trend", "Δ this week", "Contacts",
+                    "Clicks", "Replies", "Meetings", "Open rate %", "Reply rate %",
+                    "Last touch"])
+        for a in _engaged_view():
+            w.writerow([
+                a.get("name"), a.get("domain") or "",
+                a.get("framework") or a.get("segment") or "", a.get("fit_tier") or "",
+                " + ".join(a.get("lists") or []), a.get("tier"), a.get("score"),
+                a.get("trend"), a.get("delta_week"), a.get("contacts"),
+                a.get("clicks"), a.get("replies"), a.get("meetings"),
+                "" if a.get("open_rate") is None else a.get("open_rate"),
+                "" if a.get("reply_rate") is None else a.get("reply_rate"),
+                (a.get("last_touch") or "")[:10],
+            ])
+        return Response(content=buf.getvalue(), media_type="text/csv",
+                        headers={"Content-Disposition":
+                                 "attachment; filename=magical-engagement.csv"})
+
+    @app.get("/api/engagement/inbox")
+    def get_engagement_inbox(limit: int = 200):
+        """Recent meaningful touches across all accounts (the Inbox feed) +
+        the unresolved-contact count."""
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            return {"events": [], "unresolved": 0}
+        scored = {a["account_id"]: a for a in app.state.scoring.list_scored()}
+        abm = _abm_display(app.state.repo)
+        all_contacts = repo.contacts()
+        tier_by_contact = {c["external_id"]: c.get("match_tier") for c in all_contacts}
+        events = []
+        for e in repo.recent_events(limit=limit):
+            aid = e.get("account_id")
+            disp = scored.get(aid) or abm.get(aid) or {}
+            events.append({
+                "kind": e.get("kind"), "channel": e.get("channel"),
+                "points": e.get("points"), "company": e.get("company"),
+                "account_id": aid, "account_name": disp.get("name"),
+                "campaign": e.get("campaign"), "occurred_at": e.get("occurred_at"),
+                "match_tier": tier_by_contact.get(e.get("contact_ext")),
+            })
+        return {"events": events,
+                "unresolved": sum(1 for c in all_contacts if not c.get("account_id"))}
+
+    def _engaged_one(account_id, events, contacts):
+        """Single-account rollup for the drawer — from the rows already fetched, so
+        opening a drawer doesn't recompute the whole board."""
+        score = sum(e.get("points") or 0 for e in events)
+        delivered = sum(c.get("delivered") or 0 for c in contacts)
+        opened = sum(c.get("opened") or 0 for c in contacts)
+        replied = sum(c.get("replied") or 0 for c in contacts)
+        s = {}
+        if hasattr(app.state.scoring_repo, "get"):
+            s = app.state.scoring_repo.get(account_id) or {}
+        d = (_abm_display(app.state.repo).get(account_id, {})
+             if account_id.startswith("abm_") else {})
+        return {
+            "account_id": account_id,
+            "name": s.get("name") or d.get("name") or account_id,
+            **_classify(s, d),
+            "domain": s.get("domain") or d.get("domain"),
+            "score": score, "tier": engagement_scoring.tier_for(score),
+            "clicks": sum(1 for e in events if e.get("kind") == "click"),
+            "replies": sum(1 for e in events if e.get("kind") == "reply"),
+            "meetings": sum(1 for e in events if e.get("kind") == "meeting_booked"),
+            "contacts": len(contacts), "delivered": delivered, "opened": opened,
+            "replied_sends": replied,
+            "last_touch": max((e.get("occurred_at") for e in events if e.get("occurred_at")),
+                              default=None),
+            "lists": sorted({x for c in contacts for x in (c.get("matched_lists") or [])}),
+            "open_rate": round(100 * opened / delivered) if delivered else None,
+            "reply_rate": round(100 * replied / delivered) if delivered else None,
+        }
+
+    @app.get("/api/engagement/{account_id}")
+    def get_engagement_account(account_id: str):
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=404, detail="engagement not available")
+        events = repo.events_for_account(account_id)
+        contacts = repo.contacts(account_id=account_id)
+        if not events and not contacts:
+            raise HTTPException(status_code=404, detail="account not found")
+        return {"account": _engaged_one(account_id, events, contacts),
+                "events": events, "contacts": contacts}
+
+    @app.post("/api/engagement/{account_id}/activate")
+    async def engagement_activate(account_id: str, request: Request):
+        """Activate an account → enrich it (decision-makers + verified email/mobile
+        via Apollo + FullEnrich) and post a full sales packet (intent story + heat +
+        contacts) to the Slack engagement channel. Enrichment runs ONLY here (on
+        activation), so credits are spent only on accounts a rep chose to action.
+        Body may pass {"test": true} to mark the message as a wiring test."""
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=503, detail="engagement store not available")
+        events = repo.events_for_account(account_id)
+        contacts = repo.contacts(account_id=account_id)
+        if not events and not contacts:
+            raise HTTPException(status_code=404, detail="account not found")
+        body = await _json_body(request)
+        is_test = bool(body.get("test"))
+        account = _engaged_one(account_id, events, contacts)
+        # SDR intel brief — reuse the scored account's already-stored research
+        # (discovery triggers + Claude dossier). Free, instant, no live call. It's
+        # a non-critical garnish, so a DB hiccup here must never block activation.
+        research: dict = {}
+        try:
+            scored = (app.state.scoring_repo.get(account_id)
+                      if hasattr(app.state.scoring_repo, "get") else None)
+            research = engagement_notify.summarize_research(scored)
+        except Exception:  # noqa: BLE001 — intel is optional; activation must not 500
+            logger.exception("intel brief failed for %s", account_id)
+        # enrich (paid) — only on a real activation; a {"test": true} wiring post
+        # never spends credits. Degrades to [] on any failure.
+        dms: list[dict] = []
+        if account.get("domain") and not is_test:
+            from auto_search.engagement import enrichment
+            try:
+                dms = await enrichment.enrich_account(account["domain"],
+                                                      company=account.get("name"))
+            except Exception:  # noqa: BLE001 — never block the activation post
+                logger.exception("activation enrichment failed for %s", account_id)
+        app_url = os.getenv("ENGAGEMENT_APP_URL")
+        ok = await asyncio.to_thread(
+            engagement_notify.activate_account, account, events,
+            dms=dms, research=research, app_url=app_url, test=is_test)
+        if not ok:
+            raise HTTPException(status_code=502, detail="Slack post failed (check webhook)")
+        return {"posted": True, "account_id": account_id, "contacts": dms}
+
+    @app.post("/api/engagement/sync")
+    def engagement_sync(since: str = "2026-01-01", max_contacts: int | None = None):
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=503, detail="engagement store not available")
+        if getattr(app.state, "engagement_running", False):
+            return {"started": False, "busy": True}
+        app.state.engagement_running = True
+
+        async def _run() -> None:
+            try:
+                await engagement_sync_mod.run_sync(
+                    engagement_repo=repo, scoring_repo=app.state.scoring_repo,
+                    discovery_repo=app.state.repo, since=since, max_contacts=max_contacts)
+            except Exception:  # noqa: BLE001 — never crash the loop
+                logger.exception("engagement sync failed")
+            finally:
+                app.state.engagement_running = False
+
+        _schedule_coro(app, _run())
+        return {"started": True}
+
+    @app.post("/api/engagement/sfdc/sync")
+    def engagement_sfdc_sync(since: str = "2026-01-01"):
+        """Pull Salesforce (read-only): high-intent inbound leads created on/after
+        `since` (YYYY-MM-DD), cross to scored/ABM accounts, score into heat. Only
+        matched leads are stored. Shares the one-at-a-time lock."""
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=503, detail="engagement store not available")
+        if getattr(app.state, "engagement_running", False):
+            return {"started": False, "busy": True}
+        app.state.engagement_running = True
+
+        async def _run() -> None:
+            import asyncio
+            try:
+                # run_sfdc_sync is blocking (httpx.Client) — off the event loop.
+                await asyncio.to_thread(
+                    engagement_sync_mod.run_sfdc_sync,
+                    engagement_repo=repo, scoring_repo=app.state.scoring_repo,
+                    discovery_repo=app.state.repo, since=since)
+            except Exception:  # noqa: BLE001 — never crash the loop
+                logger.exception("sfdc engagement sync failed")
+            finally:
+                app.state.engagement_running = False
 
         _schedule_coro(app, _run())
         return {"started": True}

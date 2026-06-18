@@ -114,18 +114,15 @@ def last_signal_at(signals: list[dict]) -> datetime | None:
 
 
 def outcome_adjustment(outcomes: dict | None = None) -> int:
-    """Closed-loop boost from downstream outcomes — PLACEHOLDER (returns 0 today).
+    """Closed-loop boost from real engagement — an account that is actually engaging
+    (Warm/Hot in the engagement heat board, not just showing discovery signals)
+    ranks a notch higher. Hot +2, Warm +1, Some/Lower/none 0.
 
-    The intent score is signal-based: it predicts who LOOKS in-market. The next
-    step is to learn from what actually converts. When an outcomes store exists per
-    account — its contacts engaged, a meeting was booked, a deal progressed — this
-    returns a positive delta so proven-warm accounts (and lookalikes) rank higher.
-    Wired into the call site + surfaced in the UI hint now, so building it later is
-    a drop-in, not a refactor.
-
-        outcomes = {"engaged": bool, "meeting_booked": bool, "deal_stage": str, ...}
+        outcomes = {"engagement_tier": "Hot" | "Warm" | "Some" | "Lower"}
     """
-    return 0
+    if not outcomes:
+        return 0
+    return {"hot": 2, "warm": 1}.get((outcomes.get("engagement_tier") or "").lower(), 0)
 
 
 def intent(signals: list[dict], *, abm_confirmed: bool = False,
@@ -169,7 +166,10 @@ def intent(signals: list[dict], *, abm_confirmed: bool = False,
     last = last_signal_at(signals)
     if last and (now - last).days < _RECENCY_DAYS:
         score += _RECENCY_BONUS
-    score += outcome_adjustment(outcomes)        # closed-loop learning (0 today)
+    eng_bump = outcome_adjustment(outcomes)      # engagement heat lift (AGT-1390)
+    if eng_bump:
+        score += eng_bump
+        parts.append(f"engaged · {outcomes.get('engagement_tier')}")
 
     score = max(0, min(score, 100))
     tier = "hot" if score >= hot_threshold() else "watch"

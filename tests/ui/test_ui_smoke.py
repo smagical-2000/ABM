@@ -169,6 +169,26 @@ VALUES
   38,'',true,(now())::text)
 ON CONFLICT (url) DO UPDATE SET
   get_behind=EXCLUDED.get_behind, play=EXCLUDED.play, why_it_matters=EXCLUDED.why_it_matters;
+
+-- Engagement (Reply.io heat): one account so the Engagement tab renders populated.
+-- account_id ui_demo_job matches the seeded scored account -> name resolves; score
+-- 16 (reply 6 + meeting 10) -> Warm.
+INSERT INTO engagement_contacts
+  (source, external_id, email, email_domain, company, company_key, account_id,
+   match_tier, matched_lists, delivered, opened, replied)
+VALUES
+  ('replyio','uieng1','jane@uidemo.example','uidemo.example','UI Demo Health System',
+   'uidemohealthsystem','ui_demo_job','domain','["scored"]'::jsonb,10,6,1)
+ON CONFLICT (source, external_id) DO NOTHING;
+
+INSERT INTO engagement_events
+  (source, external_id, channel, kind, points, contact_ext, company, account_id, occurred_at)
+VALUES
+  ('replyio','email:reply:uieng1','email','reply',6,'uieng1','UI Demo Health System',
+   'ui_demo_job', now()-interval '1 day'),
+  ('replyio','email:meeting_booked:uieng1','email','meeting_booked',10,'uieng1',
+   'UI Demo Health System','ui_demo_job', now()-interval '2 hours')
+ON CONFLICT (source, external_id) DO NOTHING;
 """
 
 
@@ -184,8 +204,10 @@ def _free_port() -> int:
 def base_url():
     # Ensure every table exists (incl. parked_companies) before seeding — the
     # local DB may predate newer tables; schema.sql is all CREATE IF NOT EXISTS.
-    schema = Path(__file__).resolve().parents[2] / "auto_search" / "db" / "schema.sql"
-    subprocess.run(["psql", DB, "-f", str(schema)], capture_output=True, text=True)
+    db_dir = Path(__file__).resolve().parents[2] / "auto_search" / "db"
+    subprocess.run(["psql", DB, "-f", str(db_dir / "schema.sql")], capture_output=True, text=True)
+    subprocess.run(["psql", DB, "-f", str(db_dir / "engagement_schema.sql")],
+                   capture_output=True, text=True)
     # Seed the local DB (best-effort; skip the whole module if no local Postgres).
     seed = subprocess.run(["psql", DB, "-c", _SEED_SQL], capture_output=True, text=True)
     if seed.returncode != 0:
@@ -382,12 +404,20 @@ def test_social_listening_panel_opens(page):
 def test_every_tab_mounts_without_console_errors(page):
     """Each nav tab renders cleanly — catches a white-screen on any tab, including
     the new Watch list (a fresh babel-compiled file)."""
-    for tab in ("Discovery", "Scored", "News", "Watch list"):
+    for tab in ("Discovery", "Scored", "News", "Watch list", "Engagement"):
         page.click(f"text={tab}")
         page.wait_for_timeout(700)
         real = [e for e in page.console_errors
                 if not any(x in e.lower() for x in ("favicon", "tailwind", "cdn", "font"))]
         assert not real, f"console errors on {tab}: {real[:5]}"
+
+
+def test_engagement_tab_shows_account(page):
+    """The Engagement tab renders a real engaged account with its heat tier (the
+    new babel-compiled engagement.jsx must not white-screen)."""
+    page.click("text=Engagement")
+    page.wait_for_selector("text=UI Demo Health System", timeout=10_000)
+    assert page.get_by_text("Warm", exact=False).count() > 0
 
 
 def test_watch_list_tab_shows_qualified_and_parked(page):

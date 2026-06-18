@@ -70,6 +70,13 @@ window.API = {
   },
   refreshNews: () => http('/api/news/refresh', { method: 'POST' }),
 
+  // ── engagement (Reply.io heat) ───────────────────────────────────────────────
+  engagement: () => http('/api/engagement'),
+  engagementInbox: () => http('/api/engagement/inbox'),
+  engagementAccount: (id) => http(`/api/engagement/${encodeURIComponent(id)}`),
+  syncEngagement: () => http('/api/engagement/sync', { method: 'POST' }),
+  activateEngagement: (id) => http(`/api/engagement/${encodeURIComponent(id)}/activate`, { method: 'POST' }),
+
   // ── watch list: lone-standard-hire leads kept out of Discovery ──────────────
   parked: () => http('/api/discovery/parked'),                       // not yet qualified
   watchlistLeads: () => http('/api/panel?status=qualified&watchlist=only'),  // qualified, low intent

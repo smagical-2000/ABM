@@ -66,6 +66,18 @@ def test_leader_hire_plus_abm_is_hot():
     assert i.tier == "hot" and "ABM target" in i.reason
 
 
+def test_engagement_heat_lifts_score(_=None):
+    # AGT-1390: a Warm/Hot *engaged* account ranks a notch higher + names it.
+    sigs = [_job("Denials Specialist")]
+    base = priority.intent(sigs, now=NOW).score
+    hot = priority.intent(sigs, now=NOW, outcomes={"engagement_tier": "Hot"})
+    warm = priority.intent(sigs, now=NOW, outcomes={"engagement_tier": "Warm"})
+    assert hot.score == base + 2 and "engaged · Hot" in hot.reason
+    assert warm.score == base + 1
+    assert priority.intent(sigs, now=NOW, outcomes={"engagement_tier": "Lower"}).score == base
+    assert priority.outcome_adjustment(None) == 0
+
+
 def test_multi_signal_type_is_hot_and_leads_with_strongest():
     i = priority.intent([_job("Medical Biller", tier="standard"), _sig("leadership_change")], now=NOW)
     assert i.tier == "hot"

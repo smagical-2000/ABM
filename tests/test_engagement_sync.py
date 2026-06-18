@@ -172,6 +172,46 @@ async def test_podcast_and_replyio_coexist_on_same_account(tmp_path):
     assert accts["acc_christus"]["score"] == 10        # reply 6 + podcast 4, combined
 
 
+# ── podcast via published CSV URL (read-only GET → same sync path) ──────
+
+
+class _FakeResp:
+    def __init__(self, text):
+        self.text = text
+
+    def raise_for_status(self):
+        pass
+
+
+class _FakeHttp:
+    def __init__(self, text):
+        self._text = text
+        self.calls = []
+
+    def get(self, url):
+        self.calls.append(url)
+        return _FakeResp(self._text)
+
+
+def test_run_podcast_url_sync_fetches_parses_and_crosses(tmp_path):
+    repo = EngagementJsonRepository(path=str(tmp_path / "podurl.json"))
+    csv_text = (
+        "ICP,Work Email,Account Name,Submit Date\n"
+        "Yes,a@christushealth.org,CHRISTUS Health,2026-05-01\n"
+        "No,b@randomco.com,Random Co,2026-05-02\n")          # ICP No → skipped
+    http = _FakeHttp(csv_text)
+    stats = sync_mod.run_podcast_url_sync(
+        engagement_repo=repo, scoring_repo=_FakeScoring(), discovery_repo=_FakeDiscovery(),
+        url="https://docs.google.com/x/pub?output=csv", http=http, now="2026-06-14T00:00:00Z")
+    assert http.calls == ["https://docs.google.com/x/pub?output=csv"]   # GET the published URL
+    assert stats["new_events"] == 1 and stats["matched_contacts"] == 1   # only the ICP-Yes lead
+    accts = {a["account_id"]: a for a in repo.engaged_accounts()}
+    assert accts["acc_christus"]["score"] == 4               # one ICP-Yes podcast lead x 4
+    assert "randomco" not in " ".join(accts)                 # ICP No never persisted
+    e = repo.events_for_account("acc_christus")
+    assert any(ev["kind"] == "podcast_lead" and ev["points"] == 4 for ev in e)
+
+
 # ── sfdc sync (same source-agnostic cross + store path) ─────────────────
 
 

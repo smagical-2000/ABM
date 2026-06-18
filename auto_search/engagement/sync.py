@@ -150,6 +150,27 @@ def run_podcast_sync(*, engagement_repo, scoring_repo, discovery_repo,
         raise
 
 
+def run_podcast_url_sync(*, engagement_repo, scoring_repo, discovery_repo, url: str,
+                         http=None, now: str | None = None) -> dict:
+    """Fetch the published Podcast Lead Status CSV (read-only GET) then run the podcast
+    sync. The sheet is published to web as CSV; we only ever GET that URL — no Google
+    auth, no write. Idempotent (same source-agnostic cross + store path as the manual
+    snapshot). `http` is an httpx.Client for tests; created per call otherwise."""
+    import httpx
+
+    from auto_search.engagement import podcast as podcast_mod
+    client = http or httpx.Client(timeout=30.0, follow_redirects=True)
+    try:
+        resp = client.get(url)
+        resp.raise_for_status()
+        rows = podcast_mod.load_csv(resp.text)
+    finally:
+        if http is None:
+            client.close()
+    return run_podcast_sync(engagement_repo=engagement_repo, scoring_repo=scoring_repo,
+                            discovery_repo=discovery_repo, rows=rows, now=now)
+
+
 def run_sfdc_sync(*, engagement_repo, scoring_repo, discovery_repo, client=None,
                   since: str = "2026-01-01", now: str | None = None) -> dict:
     """Pull Salesforce (read-only) LEAD engagement -> cross -> store. Idempotent;

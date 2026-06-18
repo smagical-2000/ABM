@@ -1281,15 +1281,15 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
   const fitCounts = { high: 0, medium: 0, low: 0, out: 0 };
   scoredOnly.forEach((a) => { const b = bandOf(a); if (b in fitCounts) fitCounts[b] += 1; });
   // Warm-intros backfill (mirrors the server's _needs): an account needs a run
-  // if it has no intros yet, or it's green/yellow with intros that predate the
-  // school net (schools_enriched falsy). Green/yellow also pay for school
-  // enrichment (~$9/1k profiles, ≤8/account — display estimate; the budget guard
-  // is server-side). Red/low keep their free Apollo list, so they never re-run.
+  // if it has no intros yet, or it's green/yellow with intros that predate the full
+  // Apify contact scrape (contacts_scraped falsy). Green/yellow also pay for the
+  // scrape (~$9/1k profiles, ≤8/account — display estimate; the budget guard is
+  // server-side). Red/low keep their free Apollo list, so they never re-run.
   const introNeeds = (a) => {
     const wi = a.warm_intros || {};
     if (wi.state === 'generating') return false;
     if (wi.state !== 'ready') return true;
-    return ['high', 'medium'].includes(bandOf(a)) && !wi.schools_enriched;
+    return ['high', 'medium'].includes(bandOf(a)) && !wi.contacts_scraped;
   };
   const introTodo = scoredOnly.filter(introNeeds);
   const introGY = introTodo.filter((a) => ['high', 'medium'].includes(bandOf(a))).length;

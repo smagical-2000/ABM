@@ -32,11 +32,23 @@ _ACTOR_SEARCH = "harvestapi~linkedin-profile-search"
 FOUNDER_COST_USD = 0.01
 CONTACT_COST_USD = 0.015
 
-# The founders whose networks we match against. Env-overridable without a deploy.
+# The people whose networks we match against ("founders" is the legacy field name;
+# the roster is really the whole go-to-market team). The sales team (AEs/SDRs) is the
+# high-value half — their networks reach hospital execs the founders' don't. Stored
+# https + trailing-slash (the shape freshdata accepts). Env-overridable without a deploy.
 DEFAULT_FOUNDER_URLS = (
+    # founders
     "https://www.linkedin.com/in/hsambhi/",
     "https://www.linkedin.com/in/rosiechopra/",
     "https://www.linkedin.com/in/geoffreygmartin/",
+    # sales team (AEs / SDRs)
+    "https://www.linkedin.com/in/justingernot/",
+    "https://www.linkedin.com/in/matt-royalty-a5416a27/",
+    "https://www.linkedin.com/in/colin-m-43248367/",
+    "https://www.linkedin.com/in/ben-davies-4b794620b/",
+    "https://www.linkedin.com/in/gabriel-hanna-9030981b0/",
+    "https://www.linkedin.com/in/justin-pride-255b466/",
+    "https://www.linkedin.com/in/alykhan-jina-73b247102/",
 )
 
 
@@ -102,8 +114,11 @@ def _founder_stints(raw: dict) -> tuple[list[Stint], list[Stint]]:
 
 
 async def fetch_founder(url: str) -> FounderProfile | None:
-    """Scrape one founder profile -> FounderProfile, or None if unresolvable."""
-    items = await apify._run_actor(_ACTOR_ENRICH, {"linkedin_url": url})
+    """Scrape one connector profile -> FounderProfile, or None if unresolvable.
+    Normalizes the URL (freshdata 400s on Apollo's http:// / no-trailing-slash shape)
+    so any roster entry works regardless of how it was pasted."""
+    items = await apify._run_actor(_ACTOR_ENRICH,
+                                   {"linkedin_url": normalize_linkedin_url(url) or url})
     if not items or not isinstance(items[0], dict):
         return None
     raw = items[0].get("data") if isinstance(items[0].get("data"), dict) else items[0]
@@ -167,10 +182,28 @@ def parse_contact(item: dict) -> tuple[WarmContact, list[Stint], list[Stint]] | 
     return contact, exp, edu
 
 
+_PAREN = re.compile(r"\s*\([^)]*\)")                       # "(AKA Infinity … PC)"
+_AKA = re.compile(r"\s*\b(a\.?k\.?a\.?|d\.?b\.?a\.?|f\.?k\.?a\.?)\b.*$", re.I)  # "… AKA …"
+_LEGAL = re.compile(r"[\s,]+(p\.?c\.?|pllc|llc|llp|inc|corp|co|ltd)\.?\s*$", re.I)
+
+
+def search_company_name(name: str | None) -> str:
+    """Clean a stored ABM name into something LinkedIn's company search can match.
+    Drops parentheticals ('(AKA …)'), trailing AKA/DBA aliases, and a legal suffix
+    (PC/LLC/Inc/…). e.g. 'Radiology Alliance (AKA Infinity Management & Radiology
+    Alliance PC)' -> 'Radiology Alliance'. Never returns empty (falls back to raw)."""
+    s = _PAREN.sub("", name or "")
+    s = _AKA.sub("", s)
+    s = re.sub(r"\s+", " ", s).strip().strip(",").strip()
+    s = _LEGAL.sub("", s).strip().strip(",").strip()
+    return s or (name or "").strip()
+
+
 async def search_contacts(company_name: str, *, limit: int | None = None) -> list[dict]:
-    """Raw Full-mode search hits for ICP decision-makers at `company_name`."""
+    """Raw Full-mode search hits for ICP decision-makers at `company_name`. The name
+    is cleaned first so messy ABM entries ('… (AKA …)', '… PC') match a real company."""
     return await apify._run_actor(_ACTOR_SEARCH, {
-        "currentCompanies": [company_name],
+        "currentCompanies": [search_company_name(company_name)],
         "currentJobTitles": ICP_TITLES,
         "profileScraperMode": "Full",
         "maxItems": limit or max_contacts(),
@@ -218,16 +251,15 @@ def parse_apollo(item: dict) -> tuple[WarmContact, list[Stint], list[Stint]] | N
     return contact, exp, []
 
 
-# ── school enrichment (freshdata, green/yellow only) ──────────────────
-# Apollo carries employment but no schools, and a shared alma mater is the widest
-# warm net there is — a university has orders of magnitude more alumni than an
-# ex-employer. For high-value (green/yellow) accounts we backfill education by
-# enriching each surviving decision-maker's profile, so shared-school paths can
-# fire. freshdata rejects Apollo's raw URL shape (http://, no trailing slash)
-# with HTTP 400, so we normalize first — that was the whole reason an earlier
-# probe came back empty.
+# ── ICP contact profile scrape (freshdata) ───────────────────────────
+# Apollo finds the right decision-makers (free, domain-precise) but its data is
+# employment-only. To cross-match the same way both sides do, we scrape each kept
+# decision-maker's FULL profile via the same Apify actor as the team — so employer
+# AND school paths can fire (a shared alma mater is the widest warm net: a
+# university has orders of magnitude more alumni than an ex-employer). freshdata
+# 400s on Apollo's raw URL shape (http://, no trailing slash), so normalize first.
 
-# freshdata ~ $9/1k per profile (the user's quoted rate): one enrich per kept DM.
+# freshdata ~ $9/1k per profile (the user's quoted rate): one scrape per kept DM.
 ENRICH_CONTACT_COST_USD = 0.009
 
 
@@ -242,17 +274,17 @@ def normalize_linkedin_url(url: str | None) -> str | None:
     return u.rstrip("/") + "/"
 
 
-async def fetch_schools(normalized_url: str) -> list[Stint]:
-    """freshdata enrich (URL already normalized) -> education Stints. [] on any
-    failure, so a single dead enrich never kills the batch — the contact just
-    stays school-less and matching degrades to employer/engaged."""
+async def fetch_contact_stints(normalized_url: str) -> tuple[list[Stint], list[Stint]]:
+    """freshdata scrape of one ICP profile (URL already normalized) -> (experience,
+    education) Stints — the full profile, so the contact cross-matches the team on
+    both employer and school. ([], []) on any failure, so a single dead scrape never
+    kills the batch — the contact just stays on its Apollo data and matching degrades."""
     try:
         items = await apify._run_actor(_ACTOR_ENRICH, {"linkedin_url": normalized_url})
-    except Exception:  # noqa: BLE001 — one enrich failing mustn't break the run
-        logger.exception("school enrich failed for %s", normalized_url)
-        return []
+    except Exception:  # noqa: BLE001 — one scrape failing mustn't break the run
+        logger.exception("contact scrape failed for %s", normalized_url)
+        return [], []
     if not items or not isinstance(items[0], dict):
-        return []
+        return [], []
     raw = items[0].get("data") if isinstance(items[0].get("data"), dict) else items[0]
-    _, edu = _founder_stints(raw)        # reuse the freshdata educations parser
-    return edu
+    return _founder_stints(raw)          # (experience, education) — same parser as the team

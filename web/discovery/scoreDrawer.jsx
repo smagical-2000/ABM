@@ -97,7 +97,7 @@ function WarmIntrosSection({ account }) {
       {generating ? (
         <div className="flex items-center gap-2.5 rounded-xl border border-zinc-200 bg-zinc-50/60 px-4 py-3.5 text-[13px] text-zinc-500">
           <Icons.refresh className="h-4 w-4 animate-spin text-indigo-500" />
-          Finding decision-makers and matching the founders' networks…
+          Finding decision-makers and matching the team's networks…
         </div>
       ) : wi && wi.state === 'ready' ? (
         contacts.length === 0 ? (
@@ -145,7 +145,7 @@ function WarmIntrosSection({ account }) {
             })}
             <div className="flex items-center justify-between bg-zinc-50/60 px-4 py-2 text-[11.5px] text-zinc-400">
               <span>{warmCount > 0
-                ? `${warmCount} warm of ${contacts.length} · ${wi.source === 'apollo' ? 'Apollo' : 'LinkedIn'} · vs ${(wi.founders_used || []).length || 3} founders`
+                ? `${warmCount} warm of ${contacts.length} · ${wi.source === 'apollo' ? 'Apollo' : 'LinkedIn'} · across ${(wi.founders_used || []).length || 10} teammates`
                 : `${contacts.length} decision-maker${contacts.length === 1 ? '' : 's'} · no warm paths · ${wi.source === 'apollo' ? 'Apollo' : 'LinkedIn'}`}</span>
               {wi.generated_at && <span title={wi.generated_at}>{relativeTime(wi.generated_at)}</span>}
             </div>
@@ -155,7 +155,7 @@ function WarmIntrosSection({ account }) {
         <div className="rounded-xl border border-zinc-200 bg-zinc-50/40 px-4 py-3.5">
           <p className="text-[13px] leading-relaxed text-zinc-500">
             Find the ICP decision-makers at {account.name} and rank them by warmth
-            against the founders' networks — engagement with Magical's posts, shared
+            against the team's networks — engagement with Magical's posts, shared
             employers, shared schools. Evidence on every path.
           </p>
           {wi && wi.state === 'error' && (

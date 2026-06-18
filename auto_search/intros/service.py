@@ -77,14 +77,15 @@ def engaged_identity_sets(discovery_repo, company_key: str | None) -> tuple[set,
 
 
 async def generate(account: dict, *, discovery_repo, on_cost=None,
-                   enrich_schools: bool = False) -> dict:
+                   scrape_contacts: bool = False) -> dict:
     """Build the warm-intros payload for one scored account. Raises on a dead
     search so the caller can persist state='error' (retryable).
 
-    `enrich_schools` (green/yellow accounts only) backfills each kept decision-
-    maker's education via freshdata, since Apollo carries none — a shared alma
-    mater is the widest warm net. It bills ~$0.009/contact, so the caller gates
-    it on fit band; red/low accounts stay Apollo-only and free."""
+    `scrape_contacts` fully scrapes each kept decision-maker's profile via the same
+    Apify actor as the team (experience + education), so both sides cross-match on
+    complete data — employer AND shared-school paths fire. Apollo data is the
+    fallback if a scrape comes back empty. Bills ~$0.009/contact, so the caller
+    gates it (on-demand find-intros = on; the bulk run-all = green/yellow only)."""
     company = account.get("name") or ""
     domain = account.get("domain")
     founders = await ensure_founders(discovery_repo, on_cost=on_cost)
@@ -107,6 +108,13 @@ async def generate(account: dict, *, discovery_repo, on_cost=None,
     engaged_urls, engaged_names = engaged_identity_sets(
         discovery_repo, account.get("discovery_company_key"))
 
+    # The Apify name-search can return loosely-matched (wrong-company) people — e.g. a
+    # search for "Radiology Alliance" once surfaced a VA-disability consultant. Apollo
+    # is domain-precise so it doesn't need this; for the apify fallback, drop anyone
+    # whose CURRENT employer doesn't match the account name (kept lenient: substring
+    # either way, and we keep contacts with no employer data rather than over-drop).
+    target = paths.norm_company(profiles.search_company_name(company)) if source == "apify" else ""
+
     contacts = []
     dropped = 0
     for parsed in parsed_contacts:
@@ -116,15 +124,26 @@ async def generate(account: dict, *, discovery_repo, on_cost=None,
         if not is_decision_maker(contact.title)[0]:
             dropped += 1
             continue
-        # Green/yellow only: Apollo gives no schools, so fill education for the
-        # decision-makers we keep (never the ones we drop). One freshdata enrich
-        # each; URL normalized because Apollo's raw http:// shape 400s.
-        if enrich_schools and not edu and contact.linkedin_url:
+        if target:
+            currents = [e.norm for e in exp if e.end_year == 9999 and e.norm]
+            if currents and not any(target in c or c in target for c in currents):
+                dropped += 1                          # wrong-company name-search hit
+                continue
+        # Fully scrape the kept decision-maker's profile via Apify (the same actor as
+        # the team) so we cross-match on complete data — employer AND school. The
+        # scraped profile wins over Apollo's employment-only data; we keep Apollo's as
+        # the fallback when a scrape comes back empty. One scrape per kept DM; URL
+        # normalized because Apollo's raw http:// shape 400s. Only the Apollo path
+        # pays — the Apify people-search fallback already returns Full profiles
+        # (experience + education), so re-scraping would pay twice for the same data.
+        if scrape_contacts and source == "apollo" and contact.linkedin_url:
             url = profiles.normalize_linkedin_url(contact.linkedin_url)
             if url:
-                edu = edu + await profiles.fetch_schools(url)
+                s_exp, s_edu = await profiles.fetch_contact_stints(url)
+                exp = s_exp or exp
+                edu = s_edu or edu
                 if on_cost is not None:
-                    on_cost(profiles.ENRICH_CONTACT_COST_USD, "school_enrich")
+                    on_cost(profiles.ENRICH_CONTACT_COST_USD, "contact_scrape")
         # Keep the alma maters on the record (the user paid for this data) so a rep
         # sees them even when no founder shares one — useful context regardless.
         contact.schools = [s.org for s in edu if s.org]
@@ -140,12 +159,12 @@ async def generate(account: dict, *, discovery_repo, on_cost=None,
     warm = sum(1 for c in ranked if c.warmth > 0)
     logger.info("warm intros for %s: %d contacts via %s%s (%d warm, %d sub-bar dropped)",
                 company, len(ranked), source,
-                " +schools" if enrich_schools else "", warm, dropped)
+                " +scraped" if scrape_contacts else "", warm, dropped)
     return {
         "state": "ready",
         "generated_at": datetime.now(UTC).isoformat(),
         "source": source,
-        "schools_enriched": bool(enrich_schools),
+        "contacts_scraped": bool(scrape_contacts),
         "founders_used": [f.name for f in founders],
         "contacts": [
             {**c.model_dump(), "warmth": c.warmth} for c in ranked

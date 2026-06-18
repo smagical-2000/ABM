@@ -138,6 +138,9 @@ async def test_generate_filters_sub_director_and_ranks_engaged(monkeypatch):
     async def no_apollo(domain):
         return []                                        # force the Apify fallback path
 
+    # fixed 3-connector roster so the test is independent of the production list
+    monkeypatch.setattr(service.profiles, "founder_urls",
+                        lambda: ["https://x/in/a", "https://x/in/b", "https://x/in/c"])
     monkeypatch.setattr(service.profiles, "fetch_founder", fake_founder)
     monkeypatch.setattr(service.profiles, "apollo_contacts", no_apollo)
     monkeypatch.setattr(service.profiles, "search_contacts", fake_search)
@@ -156,6 +159,41 @@ async def test_generate_filters_sub_director_and_ranks_engaged(monkeypatch):
     assert out["warm_count"] == 2
     assert len(repo.profiles) == 3                        # founders cached after scrape
     assert "founder_profile" in costs and "contact_search" in costs
+
+
+@pytest.mark.asyncio
+async def test_generate_drops_wrong_company_apify_hit(monkeypatch):
+    """The Apify name-search can return a loosely-matched person at a DIFFERENT
+    company; drop them, keep the one whose current employer is the account."""
+    repo = _FakeDiscoRepo()
+
+    async def fake_founder(url):
+        return _founder(exp=[_stint("Olive", 2019, 2022)])
+
+    async def no_apollo(domain):
+        return []                                        # force the apify name-search
+
+    async def fake_search(company, limit=None):
+        cur = lambda co: {"position": "X", "companyName": co,                       # noqa: E731
+                          "startDate": {"year": 2021}, "endDate": {"text": "present"}}
+        return [
+            {"firstName": "Right", "lastName": "Exec", "headline": "Chief Financial Officer",
+             "linkedinUrl": "https://www.linkedin.com/in/right", "experience": [cur("TriHealth")]},
+            {"firstName": "Wrong", "lastName": "Exec", "headline": "Chief Financial Officer",
+             "linkedinUrl": "https://www.linkedin.com/in/wrong", "experience": [cur("Acme Plumbing")]},
+        ]
+
+    monkeypatch.setattr(service.profiles, "founder_urls",
+                        lambda: ["https://x/in/a"])
+    monkeypatch.setattr(service.profiles, "fetch_founder", fake_founder)
+    monkeypatch.setattr(service.profiles, "apollo_contacts", no_apollo)
+    monkeypatch.setattr(service.profiles, "search_contacts", fake_search)
+
+    out = await service.generate({"name": "TriHealth", "domain": "trihealth.com"},
+                                 discovery_repo=repo)
+    names = [c["name"] for c in out["contacts"]]
+    assert "Right Exec" in names                          # current employer = the account
+    assert "Wrong Exec" not in names                      # wrong-company hit dropped
 
 
 def test_parse_apollo_builds_stints_from_employment_history():
@@ -211,8 +249,20 @@ def test_normalize_linkedin_url_fixes_apollo_shape():
     assert n(None) is None
 
 
+def test_search_company_name_cleans_messy_abm_names():
+    from auto_search.intros.profiles import search_company_name
+    assert search_company_name(
+        "Radiology Alliance (AKA Infinity Management & Radiology Alliance PC)") == "Radiology Alliance"
+    assert search_company_name("Acme Health PC") == "Acme Health"
+    assert search_company_name("Acme Health, Inc.") == "Acme Health"
+    assert search_company_name("Acme Health LLC") == "Acme Health"
+    assert search_company_name("Acme Health dba Foo Clinic") == "Acme Health"
+    assert search_company_name("Acme Health") == "Acme Health"      # clean already → no-op
+    assert search_company_name("") == ""                            # never crashes
+
+
 @pytest.mark.asyncio
-async def test_generate_enrich_schools_adds_shared_school(monkeypatch):
+async def test_generate_scrapes_contact_adds_shared_school(monkeypatch):
     repo = _FakeDiscoRepo()
 
     async def fake_founder(url):
@@ -223,27 +273,59 @@ async def test_generate_enrich_schools_adds_shared_school(monkeypatch):
                  "linkedin": "http://www.linkedin.com/in/pat-alum",
                  "city": "X", "state": "Y", "employment_history": []}]
 
-    async def fake_schools(url):
+    async def fake_scrape(url):
         assert url == "https://www.linkedin.com/in/pat-alum/"     # normalized first
-        return [_stint("University of Waterloo", 2003, 2007, school=True)]
+        # full Apify profile: experience + education (here a shared alma mater)
+        return [], [_stint("University of Waterloo", 2003, 2007, school=True)]
 
     monkeypatch.setattr(service.profiles, "fetch_founder", fake_founder)
     monkeypatch.setattr(service.profiles, "apollo_contacts", apollo_ok)
-    monkeypatch.setattr(service.profiles, "fetch_schools", fake_schools)
+    monkeypatch.setattr(service.profiles, "fetch_contact_stints", fake_scrape)
 
     costs = []
     out = await service.generate({"name": "Acme", "domain": "acme.com"},
-                                 discovery_repo=repo, enrich_schools=True,
+                                 discovery_repo=repo, scrape_contacts=True,
                                  on_cost=lambda usd, step: costs.append(step))
-    assert out["schools_enriched"] is True
+    assert out["contacts_scraped"] is True
     assert out["contacts"][0]["paths"][0]["kind"] == "shared_school"
     assert out["contacts"][0]["schools"] == ["University of Waterloo"]   # on file
     assert out["warm_count"] == 1
-    assert "school_enrich" in costs                   # the paid enrich was recorded
+    assert "contact_scrape" in costs                  # the paid Apify scrape was recorded
 
 
 @pytest.mark.asyncio
-async def test_generate_skips_school_enrich_when_disabled(monkeypatch):
+async def test_generate_empty_scrape_keeps_apollo_experience(monkeypatch):
+    """A dead/empty Apify scrape must not wipe Apollo's employment — the contact
+    keeps matching on employer (graceful degradation, not a regression)."""
+    repo = _FakeDiscoRepo()
+
+    async def fake_founder(url):
+        return _founder(exp=[_stint("Olive", 2019, 2022)])
+
+    async def apollo_ok(domain):
+        return [{"name": "Pat Alum", "title": "VP Revenue Cycle",
+                 "linkedin": "http://www.linkedin.com/in/pat-alum",
+                 "employment_history": [{"org": "Olive", "title": "Lead",
+                                         "start": "2020", "end": "2021"}]}]
+
+    async def empty_scrape(url):
+        return [], []                                  # scrape came back blank
+
+    monkeypatch.setattr(service.profiles, "fetch_founder", fake_founder)
+    monkeypatch.setattr(service.profiles, "apollo_contacts", apollo_ok)
+    monkeypatch.setattr(service.profiles, "fetch_contact_stints", empty_scrape)
+
+    costs = []
+    out = await service.generate({"name": "Acme", "domain": "acme.com"},
+                                 discovery_repo=repo, scrape_contacts=True,
+                                 on_cost=lambda usd, step: costs.append(step))
+    assert out["contacts"][0]["paths"][0]["kind"] == "shared_employer"  # Apollo exp survived
+    assert out["warm_count"] == 1
+    assert "contact_scrape" in costs                   # the scrape ran (and was paid), just empty
+
+
+@pytest.mark.asyncio
+async def test_generate_skips_contact_scrape_when_disabled(monkeypatch):
     repo = _FakeDiscoRepo()
 
     async def fake_founder(url):
@@ -254,15 +336,15 @@ async def test_generate_skips_school_enrich_when_disabled(monkeypatch):
                  "linkedin": "http://www.linkedin.com/in/pat-alum", "employment_history": []}]
 
     async def must_not_run(url):
-        raise AssertionError("fetch_schools must not run for a red/low account")
+        raise AssertionError("fetch_contact_stints must not run when scrape disabled")
 
     monkeypatch.setattr(service.profiles, "fetch_founder", fake_founder)
     monkeypatch.setattr(service.profiles, "apollo_contacts", apollo_ok)
-    monkeypatch.setattr(service.profiles, "fetch_schools", must_not_run)
+    monkeypatch.setattr(service.profiles, "fetch_contact_stints", must_not_run)
 
     out = await service.generate({"name": "Acme", "domain": "acme.com"},
-                                 discovery_repo=repo)        # enrich_schools defaults False
-    assert out["schools_enriched"] is False
+                                 discovery_repo=repo)        # scrape_contacts defaults False
+    assert out["contacts_scraped"] is False
     assert out["warm_count"] == 0                            # no school -> no path
 
 

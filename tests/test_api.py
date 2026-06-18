@@ -334,7 +334,7 @@ class TestCostControls:
         _scored("red_old", "low")       # red, has intros           -> skip (free list stays)
         _scored("y_new", "medium")      # yellow, no intros yet      -> run
         repo.set_warm_intros("g_old", {"state": "ready", "contacts": []})
-        repo.set_warm_intros("g_done", {"state": "ready", "schools_enriched": True, "contacts": []})
+        repo.set_warm_intros("g_done", {"state": "ready", "contacts_scraped": True, "contacts": []})
         repo.set_warm_intros("red_old", {"state": "ready", "contacts": []})
 
         monkeypatch.setattr(_app_module, "_schedule_coro", lambda app, coro: coro.close())
@@ -342,7 +342,7 @@ class TestCostControls:
         assert out["scheduled"] == 2 and out["enrich_green_yellow"] == 2
         assert repo.get("g_old")["warm_intros"]["state"] == "generating"
         assert repo.get("y_new")["warm_intros"]["state"] == "generating"
-        assert repo.get("g_done")["warm_intros"].get("schools_enriched") is True   # untouched
+        assert repo.get("g_done")["warm_intros"].get("contacts_scraped") is True   # untouched
         assert repo.get("red_old")["warm_intros"]["state"] == "ready"              # not re-run
 
     def test_activity_poll_reaps_stalled_scoring(self, client):

@@ -63,7 +63,7 @@ ON CONFLICT (account_id) DO UPDATE SET
 -- UI Demo Clinic gets a READY warm-intros payload with NO warm paths (all direct),
 -- so the drawer's decluttered "no warm contacts" view is exercised + regressed.
 UPDATE scored_accounts SET warm_intros =
-  '{"state":"ready","source":"apollo","schools_enriched":true,"warm_count":0,
+  '{"state":"ready","source":"apollo","contacts_scraped":true,"warm_count":0,
     "founders_used":["Harpaul","Rosie","Geoffrey"],
     "contacts":[
       {"name":"Jane Roe","title":"VP Revenue Cycle","linkedin_url":"https://www.linkedin.com/in/jane-roe","location":"Cincinnati, Ohio","schools":["Xavier University"],"paths":[]},
@@ -74,7 +74,7 @@ WHERE account_id='ui_demo_social';
 -- UI Demo Health System gets a WARM path (warm_count 1) so the Scored board's
 -- "N warm" badge + the drawer's warm linkage are exercised + regressed.
 UPDATE scored_accounts SET warm_intros =
-  '{"state":"ready","source":"apollo","schools_enriched":false,"warm_count":1,
+  '{"state":"ready","source":"apollo","contacts_scraped":false,"warm_count":1,
     "founders_used":["Harpaul","Rosie","Geoffrey"],
     "contacts":[{"name":"Warm Exec","title":"VP Revenue Cycle","linkedin_url":"https://www.linkedin.com/in/warm-exec","location":"Dallas, Texas","schools":[],"paths":[{"kind":"shared_employer","founder":"Harpaul","evidence":"Both at Olive — overlapping 2019-2021","strength":80}],"warmth":80}]}'::jsonb
 WHERE account_id='ui_demo_job';

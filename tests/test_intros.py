@@ -161,6 +161,41 @@ async def test_generate_filters_sub_director_and_ranks_engaged(monkeypatch):
     assert "founder_profile" in costs and "contact_search" in costs
 
 
+@pytest.mark.asyncio
+async def test_generate_drops_wrong_company_apify_hit(monkeypatch):
+    """The Apify name-search can return a loosely-matched person at a DIFFERENT
+    company; drop them, keep the one whose current employer is the account."""
+    repo = _FakeDiscoRepo()
+
+    async def fake_founder(url):
+        return _founder(exp=[_stint("Olive", 2019, 2022)])
+
+    async def no_apollo(domain):
+        return []                                        # force the apify name-search
+
+    async def fake_search(company, limit=None):
+        cur = lambda co: {"position": "X", "companyName": co,                       # noqa: E731
+                          "startDate": {"year": 2021}, "endDate": {"text": "present"}}
+        return [
+            {"firstName": "Right", "lastName": "Exec", "headline": "Chief Financial Officer",
+             "linkedinUrl": "https://www.linkedin.com/in/right", "experience": [cur("TriHealth")]},
+            {"firstName": "Wrong", "lastName": "Exec", "headline": "Chief Financial Officer",
+             "linkedinUrl": "https://www.linkedin.com/in/wrong", "experience": [cur("Acme Plumbing")]},
+        ]
+
+    monkeypatch.setattr(service.profiles, "founder_urls",
+                        lambda: ["https://x/in/a"])
+    monkeypatch.setattr(service.profiles, "fetch_founder", fake_founder)
+    monkeypatch.setattr(service.profiles, "apollo_contacts", no_apollo)
+    monkeypatch.setattr(service.profiles, "search_contacts", fake_search)
+
+    out = await service.generate({"name": "TriHealth", "domain": "trihealth.com"},
+                                 discovery_repo=repo)
+    names = [c["name"] for c in out["contacts"]]
+    assert "Right Exec" in names                          # current employer = the account
+    assert "Wrong Exec" not in names                      # wrong-company hit dropped
+
+
 def test_parse_apollo_builds_stints_from_employment_history():
     item = {"name": "Jane Roe", "title": "VP Revenue Cycle",
             "linkedin": "http://www.linkedin.com/in/jane", "city": "Cincinnati", "state": "Ohio",

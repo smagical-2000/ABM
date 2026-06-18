@@ -108,6 +108,13 @@ async def generate(account: dict, *, discovery_repo, on_cost=None,
     engaged_urls, engaged_names = engaged_identity_sets(
         discovery_repo, account.get("discovery_company_key"))
 
+    # The Apify name-search can return loosely-matched (wrong-company) people — e.g. a
+    # search for "Radiology Alliance" once surfaced a VA-disability consultant. Apollo
+    # is domain-precise so it doesn't need this; for the apify fallback, drop anyone
+    # whose CURRENT employer doesn't match the account name (kept lenient: substring
+    # either way, and we keep contacts with no employer data rather than over-drop).
+    target = paths.norm_company(profiles.search_company_name(company)) if source == "apify" else ""
+
     contacts = []
     dropped = 0
     for parsed in parsed_contacts:
@@ -117,6 +124,11 @@ async def generate(account: dict, *, discovery_repo, on_cost=None,
         if not is_decision_maker(contact.title)[0]:
             dropped += 1
             continue
+        if target:
+            currents = [e.norm for e in exp if e.end_year == 9999 and e.norm]
+            if currents and not any(target in c or c in target for c in currents):
+                dropped += 1                          # wrong-company name-search hit
+                continue
         # Fully scrape the kept decision-maker's profile via Apify (the same actor as
         # the team) so we cross-match on complete data — employer AND school. The
         # scraped profile wins over Apollo's employment-only data; we keep Apollo's as

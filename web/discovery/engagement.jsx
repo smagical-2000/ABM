@@ -547,13 +547,11 @@ function EngagementView({ pushToast }){
     const base=changed.length?changed:accounts.filter(a=>a.trend==='up');
     return [...base].sort((x,y)=>y.deltaWeek-x.deltaWeek).slice(0,4);
   },[accounts]);
-  const unresolvedTouches=inbox.filter(e=>!e.account).length;
   const hotCount=accounts.filter(a=>tierOf(a.score)==='Hot').length;
   const justWentHot=movers.filter(a=>tierOf(a.score)==='Hot'&&tierOf(a.score-a.deltaWeek)!=='Hot').length;
   const needs=[];
   if(justWentHot) needs.push({n:justWentHot,label:justWentHot===1?'account just went Hot':'accounts just went Hot',icon:'arrowUp',fg:'#047857',bg:'rgba(16,185,129,.1)',go:'activity'});
   if(hotCount) needs.push({n:hotCount,label:hotCount===1?'Hot account':'Hot accounts',icon:'zap',fg:'#b45309',bg:'#fffbeb',go:'accounts'});
-  if(unresolvedTouches) needs.push({n:unresolvedTouches,label:'touches need resolution',icon:'help',fg:'#b45309',bg:'#fffbeb',go:'inbox'});
   const stats={ accounts:accounts.length, touches:inbox.length,
                 active:accounts.filter(a=>a.recent).length };
 
@@ -609,7 +607,6 @@ function EngagementView({ pushToast }){
           <div style={{display:'flex',alignItems:'stretch',borderBottom:'1px solid #f4f4f5',padding:'0 16px'}}>
             <Tab id="activity" label="Activity" count={stats.active}/>
             <Tab id="accounts" label="Accounts" count={stats.accounts}/>
-            <Tab id="inbox" label="Inbox" count={stats.touches}/>
             {(tab==='accounts'||tab==='activity')&&(
               <label style={{display:'inline-flex',alignItems:'center',gap:5,marginLeft:'auto',fontSize:12,color:'#a1a1aa'}}>Segment
                 <select value={segFilter} onChange={e=>setSegFilter(e.target.value)} style={{appearance:'none',borderRadius:6,border:'1px solid #e4e4e7',background:'#fff',padding:'4px 24px 4px 8px',fontFamily:'var(--font-sans)',fontSize:12,fontWeight:500,color:'#3f3f46'}}>
@@ -618,11 +615,9 @@ function EngagementView({ pushToast }){
               </label>
             )}
           </div>
-          {tab==='activity'
-            ? <ActivityView accounts={accounts} onOpen={openAccount} onActivate={setActivating} segFilter={segFilter}/>
-            : tab==='accounts'
+          {tab==='accounts'
             ? <AccountsView accounts={accounts} onOpen={openAccount} onActivate={setActivating} segFilter={segFilter}/>
-            : <InboxView events={inbox} onResolve={()=>{}}/>}
+            : <ActivityView accounts={accounts} onOpen={openAccount} onActivate={setActivating} segFilter={segFilter}/>}
         </div>
         </>}
       </main>

@@ -247,6 +247,37 @@ async def test_generate_scrapes_contact_adds_shared_school(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_generate_empty_scrape_keeps_apollo_experience(monkeypatch):
+    """A dead/empty Apify scrape must not wipe Apollo's employment — the contact
+    keeps matching on employer (graceful degradation, not a regression)."""
+    repo = _FakeDiscoRepo()
+
+    async def fake_founder(url):
+        return _founder(exp=[_stint("Olive", 2019, 2022)])
+
+    async def apollo_ok(domain):
+        return [{"name": "Pat Alum", "title": "VP Revenue Cycle",
+                 "linkedin": "http://www.linkedin.com/in/pat-alum",
+                 "employment_history": [{"org": "Olive", "title": "Lead",
+                                         "start": "2020", "end": "2021"}]}]
+
+    async def empty_scrape(url):
+        return [], []                                  # scrape came back blank
+
+    monkeypatch.setattr(service.profiles, "fetch_founder", fake_founder)
+    monkeypatch.setattr(service.profiles, "apollo_contacts", apollo_ok)
+    monkeypatch.setattr(service.profiles, "fetch_contact_stints", empty_scrape)
+
+    costs = []
+    out = await service.generate({"name": "Acme", "domain": "acme.com"},
+                                 discovery_repo=repo, scrape_contacts=True,
+                                 on_cost=lambda usd, step: costs.append(step))
+    assert out["contacts"][0]["paths"][0]["kind"] == "shared_employer"  # Apollo exp survived
+    assert out["warm_count"] == 1
+    assert "contact_scrape" in costs                   # the scrape ran (and was paid), just empty
+
+
+@pytest.mark.asyncio
 async def test_generate_skips_contact_scrape_when_disabled(monkeypatch):
     repo = _FakeDiscoRepo()
 

@@ -121,8 +121,10 @@ async def generate(account: dict, *, discovery_repo, on_cost=None,
         # the team) so we cross-match on complete data — employer AND school. The
         # scraped profile wins over Apollo's employment-only data; we keep Apollo's as
         # the fallback when a scrape comes back empty. One scrape per kept DM; URL
-        # normalized because Apollo's raw http:// shape 400s.
-        if scrape_contacts and contact.linkedin_url:
+        # normalized because Apollo's raw http:// shape 400s. Only the Apollo path
+        # pays — the Apify people-search fallback already returns Full profiles
+        # (experience + education), so re-scraping would pay twice for the same data.
+        if scrape_contacts and source == "apollo" and contact.linkedin_url:
             url = profiles.normalize_linkedin_url(contact.linkedin_url)
             if url:
                 s_exp, s_edu = await profiles.fetch_contact_stints(url)

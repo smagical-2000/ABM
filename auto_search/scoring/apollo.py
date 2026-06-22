@@ -109,6 +109,86 @@ def _shape(found: list[dict], enriched: list) -> list[dict]:
     return out
 
 
+async def match_contact(*, linkedin_url: str | None = None, first_name: str | None = None,
+                        last_name: str | None = None, domain: str | None = None,
+                        reveal_email: bool = True, reveal_phone: bool = False) -> dict | None:
+    """Match ONE known person (from a LinkedIn engager) and reveal their work email.
+    Returns {name, first_name, last_name, title, email, phone, company, domain, linkedin}
+    or None. Matches by LinkedIn URL when we have it (most precise), else by name +
+    company domain. Email is reliable. Phone reveal is OFF by default: Apollo rejects
+    `reveal_phone_number` without a `webhook_url` (mobile reveal is async), so phone
+    comes back empty until we add a webhook or FullEnrich. COSTS CREDITS."""
+    key = _key()
+    if not key:
+        return None
+    if not (linkedin_url or (last_name and domain)):
+        return None
+    body: dict = {"reveal_personal_emails": reveal_email, "reveal_phone_number": reveal_phone}
+    if linkedin_url:
+        body["linkedin_url"] = linkedin_url
+    if first_name:
+        body["first_name"] = first_name
+    if last_name:
+        body["last_name"] = last_name
+    if domain:
+        body["domain"] = domain
+    headers = {"X-Api-Key": key, "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT, headers=headers) as client:
+            r = await client.post(f"{_BASE}/people/match", json=body)
+            # Apollo 400s on reveal_phone_number without a webhook_url — retry once
+            # WITHOUT the phone flag so we still recover the (reliable) work email.
+            if r.status_code == 400 and body.pop("reveal_phone_number", None):
+                r = await client.post(f"{_BASE}/people/match", json=body)
+            if r.status_code != 200:
+                logger.warning("Apollo match -> HTTP %s", r.status_code)
+                return None
+            p = (r.json() or {}).get("person") or {}
+            if not p:
+                return None
+            org = p.get("organization") or {}
+            return {
+                "name": p.get("name") or " ".join(x for x in (first_name, last_name) if x),
+                "first_name": p.get("first_name") or first_name,
+                "last_name": p.get("last_name") or last_name,
+                "title": p.get("title"),
+                "email": _clean_email(p.get("email")) or _first_personal(p),
+                "phone": _first_phone(p),
+                "company": org.get("name"),
+                "domain": org.get("primary_domain") or domain,
+                "linkedin": p.get("linkedin_url") or linkedin_url,
+            }
+    except Exception as e:  # noqa: BLE001 — a bad match must never break the run
+        logger.warning("Apollo match failed: %s", e)
+        return None
+
+
+def _clean_email(email: str | None) -> str | None:
+    e = (email or "").strip().lower()
+    if not e or "@" not in e:
+        return None
+    # Apollo's placeholder when an email isn't unlocked is "email_not_unlocked@domain.com".
+    if "email_not_unlocked" in e or e.endswith("@domain.com"):
+        return None
+    return e
+
+
+def _first_personal(p: dict) -> str | None:
+    for e in (p.get("personal_emails") or []):
+        c = _clean_email(e if isinstance(e, str) else (e or {}).get("email"))
+        if c:
+            return c
+    return None
+
+
+def _first_phone(p: dict) -> str | None:
+    for ph in (p.get("phone_numbers") or []):
+        num = (ph.get("sanitized_number") or ph.get("raw_number")) if isinstance(ph, dict) else None
+        if num:
+            return str(num).strip()
+    return (str(p.get("sanitized_phone")).strip() if p.get("sanitized_phone") else None)
+
+
 # ── decision-maker contacts for warm intros ───────────────────────────
 # Seniority-filtered so we get actual decision-makers (CFO / CIO / VP RevCycle /
 # Director), not the "Revenue Cycle Specialist" the title keyword alone matches.

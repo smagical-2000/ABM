@@ -1,13 +1,15 @@
-"""Reply.io v3 client — READ ONLY.
+"""Reply.io client — read feeds + one deliberate write.
 
-Pulls email engagement + contacts for the engagement phase. Read-only by design:
-only GET requests plus the `/reporting/emails` *report* query (a POST that carries
-filters and returns data — it never mutates). We never create / update / delete in
-Reply.io.
+Pulls email engagement + contacts for the engagement phase: GET requests plus the
+`/reporting/emails` *report* query (a POST that returns data, never mutates). The ONE
+write is `add_to_campaign` — used only by the LinkedIn TOFU ad-engagement flow to
+create a contact and push it into the matching engagement campaign (replicating the
+old Clay step); no sync calls it.
 
-Auth: Bearer token from REPLYIO_API_KEY (.env, read via os.getenv — never logged).
-Base: https://api.reply.io/v3. Rate limit ~100/min, so we back off on 429 (honoring
-Retry-After) and on transient 5xx.
+Auth: the same REPLYIO_API_KEY backs both surfaces — Bearer on v3 (the read feeds),
+`x-api-key` on v1 (where campaigns + the add-and-push action live). Base v3:
+https://api.reply.io/v3; v1: https://api.reply.io/v1. Rate limit ~100/min, so we back
+off on 429 (honoring Retry-After) and on transient 5xx.
 
 Async (httpx.AsyncClient), mirroring auto_search/clients/* — pages with top/skip
 until `hasMore` is false, yielding raw rows. The ingest layer (M-C) owns mapping
@@ -27,6 +29,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 V3_BASE = "https://api.reply.io/v3"
+V1_BASE = "https://api.reply.io/v1"   # campaigns + the add-and-push-to-campaign write
 
 _MAX_RETRIES = 4
 _BACKOFF_CAP_SECONDS = 30.0
@@ -120,6 +123,42 @@ class ReplyioClient:
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             return await client.request(method, url, headers=self._headers,
                                         params=params, json=json)
+
+    # ── write (LinkedIn TOFU flow only) ─────────────────────────────────
+
+    async def add_to_campaign(self, *, campaign_id: int, email: str,
+                              first_name: str | None = None, last_name: str | None = None,
+                              company: str | None = None, title: str | None = None,
+                              phone: str | None = None) -> dict:
+        """Create a contact and push it into a campaign. WRITE (v1, x-api-key).
+
+        Reply.io v1 `POST /actions/addandpushtocampaign` — the same action Clay used.
+        Idempotent on Reply.io's side: re-adding an existing email updates the contact
+        rather than duplicating it. Backs off on 429 / 5xx like the read path."""
+        body = {"campaignId": int(campaign_id), "email": (email or "").strip()}
+        for k, v in (("firstName", first_name), ("lastName", last_name),
+                     ("company", company), ("title", title), ("phone", phone)):
+            if v and str(v).strip():
+                body[k] = str(v).strip()
+        url = f"{V1_BASE}/actions/addandpushtocampaign"
+        headers = {"x-api-key": self._key, "Content-Type": "application/json"}
+        resp = None
+        for attempt in range(1, _MAX_RETRIES + 1):
+            if self._http is not None:
+                resp = await self._http.request("POST", url, headers=headers, json=body)
+            else:
+                async with httpx.AsyncClient(timeout=self._timeout) as client:
+                    resp = await client.request("POST", url, headers=headers, json=body)
+            if (resp.status_code == 429 or resp.status_code >= 500) and attempt < _MAX_RETRIES:
+                await asyncio.sleep(_retry_after(resp, attempt))
+                continue
+            resp.raise_for_status()
+            try:
+                return resp.json()
+            except ValueError:
+                return {"status": resp.status_code, "body": resp.text[:200]}
+        resp.raise_for_status()
+        return {}
 
 
 # ── helpers ────────────────────────────────────────────────────────────

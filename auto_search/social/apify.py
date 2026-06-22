@@ -197,6 +197,35 @@ async def enrich(linkedin_url: str, *, client: httpx.AsyncClient | None = None) 
     return normalize_enrichment(items)
 
 
+# Reactions (likes) on a specific post — the LinkedIn TOFU ad-engagement flow. A
+# different actor than the profile-posts scraper: it takes post URLs directly and
+# returns a flat list of reactions, each with the reactor's actor + the postId.
+_ACTOR_REACTIONS = "harvestapi~linkedin-post-reactions"
+
+
+async def fetch_post_reactions(post_url: str, *, max_items: int = 50,
+                               client: httpx.AsyncClient | None = None) -> list[dict]:
+    """People who reacted to one post: [{name, position, linkedin_url, profile_id,
+    reaction_type}]. `max_items` caps reactions per post (0 = all, a viral-post
+    footgun — keep it bounded)."""
+    items = await _run_actor(_ACTOR_REACTIONS,
+                             {"posts": [post_url], "maxItems": max_items}, client=client)
+    out: list[dict] = []
+    for it in items:
+        actor = it.get("actor") or {}
+        name = (actor.get("name") or "").strip()
+        if not name:
+            continue
+        out.append({
+            "name": name,
+            "position": actor.get("position") or actor.get("info"),
+            "linkedin_url": actor.get("linkedinUrl") or actor.get("url"),
+            "profile_id": actor.get("id"),
+            "reaction_type": it.get("reactionType"),
+        })
+    return out
+
+
 # ── event keyword search (datadoping~linkedin-posts-search-scraper) ──────────
 # Search public LinkedIn posts by keyword (e.g. an event hashtag "HIMSS26"). Each
 # result carries the post text + author — we read the TEXT to confirm the author

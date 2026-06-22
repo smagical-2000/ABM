@@ -25,6 +25,7 @@ POINTS: dict[str, int] = {
     "high_intent_lead": 10, # SFDC high-intent inbound lead (contact/sales form ≈ BOFU)
     "tradeshow": 10,        # SFDC tradeshow lead that booked a meeting (Status=Qualified)
     "low_intent_lead": 2,   # SFDC TOFU content download (LeadSource '… | TOFU') — low intent
+    "linkedin_tofu": 2,     # like/comment on a Magical TOFU LinkedIn ad — low intent (≈ TOFU content)
 }
 
 # Touches we record for rates + the timeline but that score zero — kept explicit

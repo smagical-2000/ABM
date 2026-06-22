@@ -1,8 +1,9 @@
-"""Salesforce client — READ ONLY.
+"""Salesforce client — read feeds + one deliberate write.
 
 Pulls CRM engagement (booked meetings + open/won opportunities) for the engagement
-phase. Read-only by design: only the OAuth token POST and GET /query (SOQL SELECT).
-We never create / update / delete in Salesforce, and every SOQL is a SELECT.
+phase. Every read is a SOQL SELECT. The ONE write is `create_lead` — used only by the
+LinkedIn TOFU ad-engagement flow to create a Lead (replicating the old Zapier step);
+it is never called by any sync. `lead_exists` backs the dedup check before that write.
 
 Auth: OAuth 2.0 **Client Credentials Flow** — no user password. The External Client
 App "ABM Engagement Sync" runs as a fixed integration user (ops@); we exchange
@@ -172,11 +173,42 @@ class SalesforceClient:
             "FROM Opportunity WHERE IsClosed = false OR IsWon = true "
             "ORDER BY CreatedDate DESC")
 
+    # ── write (LinkedIn TOFU flow only) ─────────────────────────────────
+
+    def lead_exists(self, email: str) -> bool:
+        """True if a Lead with this email already exists — the dedup gate before
+        create_lead, so the hourly run never double-creates the same person."""
+        e = (email or "").strip()
+        if not e:
+            return False
+        safe = e.replace("\\", r"\\").replace("'", r"\'")
+        return next(self.query(
+            f"SELECT Id FROM Lead WHERE Email = '{safe}' LIMIT 1"), None) is not None
+
+    def create_lead(self, fields: dict, *, assignment_rules: bool = True) -> dict:
+        """Create a Salesforce Lead. WRITE. Returns the API result {id, success, errors}.
+
+        `assignment_rules=True` sends the `Sforce-Auto-Assign` header — the Zapier
+        "Use Assignment Rules: true" toggle. The caller builds `fields` via
+        linkedin_ads.build_lead_payload (LastName + Company required)."""
+        self._ensure_auth()
+        url = f"{self._instance}/services/data/{self._api}/sobjects/Lead"
+        headers = {"Authorization": f"Bearer {self._token}",
+                   "Content-Type": "application/json"}
+        if assignment_rules:
+            headers["Sforce-Auto-Assign"] = "true"
+        resp = self._send("POST", url, json=fields, headers=headers)
+        resp.raise_for_status()
+        return resp.json()
+
     # ── transport ───────────────────────────────────────────────────────
 
     def _send(self, method: str, url: str, *, params: dict | None = None,
-              data: dict | None = None, headers: dict | None = None) -> httpx.Response:
+              data: dict | None = None, json: dict | None = None,
+              headers: dict | None = None) -> httpx.Response:
         if self._http is not None:
-            return self._http.request(method, url, params=params, data=data, headers=headers)
+            return self._http.request(method, url, params=params, data=data,
+                                      json=json, headers=headers)
         with httpx.Client(timeout=self._timeout) as client:
-            return client.request(method, url, params=params, data=data, headers=headers)
+            return client.request(method, url, params=params, data=data,
+                                  json=json, headers=headers)

@@ -968,6 +968,51 @@ def create_app() -> FastAPI:
         _schedule_coro(app, _run())
         return {"started": True}
 
+    @app.post("/api/engagement/linkedin/run")
+    async def engagement_linkedin_run(dry_run: bool = True, max_contacts: int | None = None,
+                                      max_reactions: int = 50):
+        """LinkedIn TOFU ad-engagement: scrape post reactions -> drop staff -> ABM-only
+        -> Apollo work email -> dedup. When dry_run=false it also WRITES: SFDC Lead +
+        Reply.io campaign contact + `linkedin_tofu` heat. Awaits and returns the funnel
+        + would-be/created leads (bounded by max_contacts / max_reactions). Reads the
+        committed share_id->category CSV. Shares the one-at-a-time engagement lock."""
+        from auto_search.engagement import linkedin_ads, linkedin_ads_runner
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=503, detail="engagement store not available")
+        if getattr(app.state, "engagement_running", False):
+            return {"started": False, "busy": True}
+        csv_path = os.getenv("LINKEDIN_TOFU_CSV") or os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "engagement", "linkedin_tofu_shares.csv")
+        try:
+            with open(csv_path) as f:
+                share_categories = linkedin_ads.load_share_categories(f.read())
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"share CSV load failed: {e}") from e
+        if not share_categories:
+            raise HTTPException(status_code=400, detail="no usable share_ids in the CSV")
+
+        sfdc = reply = None
+        try:
+            from auto_search.engagement.sfdc_client import SalesforceClient
+            sfdc = SalesforceClient()                  # dedup read (+ create when writing)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("SFDC client unavailable: %s", e)
+        if not dry_run:
+            from auto_search.engagement.replyio_client import ReplyioClient
+            reply = ReplyioClient()
+
+        app.state.engagement_running = True
+        try:
+            return await linkedin_ads_runner.run(
+                share_categories=share_categories, engagement_repo=repo,
+                scoring_repo=app.state.scoring_repo, discovery_repo=app.state.repo,
+                sfdc_client=sfdc, replyio_client=reply,
+                max_reactions=max_reactions, max_contacts=max_contacts, dry_run=dry_run)
+        finally:
+            app.state.engagement_running = False
+
     @app.get("/api/abm/summary")
     def abm_summary():
         """Target-list size + breakdown, and how many rows are indexed live."""

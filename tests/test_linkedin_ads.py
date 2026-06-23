@@ -271,3 +271,25 @@ async def test_enrich_failure_is_isolated(patched, monkeypatch):
                            replyio_client=_FakeReply(), dry_run=True)
     assert out["stats"].get("enrich_failed") == 1
     assert out["stats"]["scanned"] == 5      # run still completed every candidate
+
+
+async def test_max_leads_caps_output(patched, monkeypatch):
+    """max_leads stops after that many leads — the safety cap for the live spot-check."""
+    async def fetch_two(post_url, *, max_items=50, client=None):
+        return [{"name": "One A", "linkedin_url": "li/1", "profile_id": "p1", "position": "VP", "reaction_type": "LIKE"},
+                {"name": "Two B", "linkedin_url": "li/2", "profile_id": "p2", "position": "VP", "reaction_type": "LIKE"}]
+
+    async def enrich_two(url, *, client=None):
+        return {"full_name": "X Y", "company": "ABM Health", "company_domain": "abmco.com", "linkedin_url": url}
+
+    async def match_two(*, linkedin_url=None, first_name=None, last_name=None,
+                        domain=None, reveal_email=True, reveal_phone=False):
+        return {"email": f"x{linkedin_url}@abmco.com", "title": "VP", "phone": None}
+
+    monkeypatch.setattr(runner.social_apify, "fetch_post_reactions", fetch_two)
+    monkeypatch.setattr(runner.social_apify, "enrich", enrich_two)
+    monkeypatch.setattr(runner.apollo, "match_contact", match_two)
+    out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=None,
+                           scoring_repo=None, discovery_repo=None, sfdc_client=_FakeSFDC(),
+                           replyio_client=_FakeReply(), dry_run=True, max_leads=1)
+    assert out["stats"]["would_create"] == 1   # capped at 1, not 2

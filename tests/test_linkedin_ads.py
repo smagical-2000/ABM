@@ -273,6 +273,30 @@ async def test_enrich_failure_is_isolated(patched, monkeypatch):
     assert out["stats"]["scanned"] == 5      # run still completed every candidate
 
 
+async def test_replyio_409_is_not_a_failure(patched, monkeypatch):
+    """A Reply.io 409 (contact already in another sequence) is expected, not a failure;
+    the SFDC Lead + heat still land."""
+    monkeypatch.setattr(runner, "cross_and_persist", lambda **kw: (1, 1))
+
+    class Reply409:
+        def __init__(self):
+            self.calls = 0
+
+        async def add_to_campaign(self, **kw):
+            self.calls += 1
+            return {"status": 409, "detail": "already in another sequence"}
+
+    reply = Reply409()
+    out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=object(),
+                           scoring_repo=None, discovery_repo=None,
+                           sfdc_client=_FakeSFDC(existing={"eve@abmco.com"}),
+                           replyio_client=reply, dry_run=False)
+    assert out["stats"].get("sfdc_created") == 1
+    assert out["stats"].get("replyio_already_sequenced") == 1
+    assert out["stats"].get("replyio_failed") is None     # 409 is not counted as a failure
+    assert reply.calls == 1
+
+
 async def test_max_leads_caps_output(patched, monkeypatch):
     """max_leads stops after that many leads — the safety cap for the live spot-check."""
     async def fetch_two(post_url, *, max_items=50, client=None):

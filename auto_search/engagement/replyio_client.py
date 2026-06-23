@@ -152,6 +152,10 @@ class ReplyioClient:
             if (resp.status_code == 429 or resp.status_code >= 500) and attempt < _MAX_RETRIES:
                 await asyncio.sleep(_retry_after(resp, attempt))
                 continue
+            if resp.status_code == 409:
+                # Reply.io dedups by email: the contact already exists / is in another
+                # sequence. Expected, not an error — the person is already in outreach.
+                return {"status": 409, "detail": resp.text[:200]}
             resp.raise_for_status()
             try:
                 return resp.json()

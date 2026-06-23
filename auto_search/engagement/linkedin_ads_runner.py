@@ -211,10 +211,13 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
 
         try:
             if replyio_client is not None and campaign_id:
-                await replyio_client.add_to_campaign(
+                res = await replyio_client.add_to_campaign(
                     campaign_id=campaign_id, email=email, first_name=first,
                     last_name=last, company=company, title=title, phone=phone)
-                stats["replyio_added"] += 1
+                if isinstance(res, dict) and res.get("status") == 409:
+                    stats["replyio_already_sequenced"] += 1   # in another sequence; left as-is
+                else:
+                    stats["replyio_added"] += 1
         except Exception as e:  # noqa: BLE001 — lead already created; campaign add is best-effort
             logger.warning("reply.io add failed for %s: %s", email, e)
             stats["replyio_failed"] += 1

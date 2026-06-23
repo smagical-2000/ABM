@@ -91,9 +91,11 @@ async def _scrape(share_categories: dict[str, str], *, max_reactions: int) -> li
 async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo,
               discovery_repo, sfdc_client=None, replyio_client=None,
               max_reactions: int = 50, max_contacts: int | None = None,
-              dry_run: bool = True, now: str | None = None) -> dict:
+              max_leads: int | None = None, dry_run: bool = True,
+              now: str | None = None) -> dict:
     """Run the pipeline. Returns {dry_run, stats, results}. Never raises per-contact —
-    one failure is counted and skipped so the batch always completes."""
+    one failure is counted and skipped so the batch always completes. `max_leads` stops
+    after that many leads are created/would-be-created (e.g. 1 for the live spot-check)."""
     now = now or datetime.now(UTC).isoformat()
     index = build_index(scoring_repo, discovery_repo)        # ABM / scored cross
 
@@ -113,6 +115,7 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
     results: list[dict] = []
     contact_rows: list[dict] = []
     event_rows: list[dict] = []
+    leads = 0                                   # for the max_leads cap
 
     for r in candidates:
         stats["scanned"] += 1
@@ -186,6 +189,9 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
         if dry_run:
             stats["would_create"] += 1
             results.append(outcome)
+            leads += 1
+            if max_leads and leads >= max_leads:
+                break
             continue
 
         # ── writes: SFDC first (system of record). Heat + Reply.io only if it lands,
@@ -216,6 +222,9 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
         contact_rows.append(_contact_row(r, enr, email, domain, company, title))
         event_rows.append(_event_row(r, outcome, now))
         results.append(outcome)
+        leads += 1
+        if max_leads and leads >= max_leads:
+            break
 
     if not dry_run and contact_rows:
         matched, new_events = cross_and_persist(

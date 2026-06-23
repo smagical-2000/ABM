@@ -970,7 +970,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/engagement/linkedin/run")
     async def engagement_linkedin_run(dry_run: bool = True, max_contacts: int | None = None,
-                                      max_reactions: int = 50):
+                                      max_leads: int | None = None, max_reactions: int = 50):
         """LinkedIn TOFU ad-engagement: scrape post reactions -> drop staff -> ABM-only
         -> Apollo work email -> dedup. When dry_run=false it also WRITES: SFDC Lead +
         Reply.io campaign contact + `linkedin_tofu` heat. Awaits and returns the funnel
@@ -1008,8 +1008,8 @@ def create_app() -> FastAPI:
             return await linkedin_ads_runner.run(
                 share_categories=share_categories, engagement_repo=repo,
                 scoring_repo=app.state.scoring_repo, discovery_repo=app.state.repo,
-                sfdc_client=sfdc, replyio_client=reply,
-                max_reactions=max_reactions, max_contacts=max_contacts, dry_run=dry_run)
+                sfdc_client=sfdc, replyio_client=reply, max_reactions=max_reactions,
+                max_contacts=max_contacts, max_leads=max_leads, dry_run=dry_run)
         finally:
             app.state.engagement_running = False
 

@@ -31,6 +31,7 @@ _KIND = {
     "podcast_lead": "Podcast",
     "tradeshow": "Tradeshow",
     "low_intent_lead": "TOFU content",
+    "linkedin_tofu": "LinkedIn ad",
 }
 
 

@@ -38,6 +38,8 @@ const _CSS = `
 :root{--font-sans:'Inter',system-ui,-apple-system,sans-serif;--zinc-50:#fafafa;}
 @keyframes _spin{to{transform:rotate(360deg)}}
 .spin{animation:_spin .8s linear infinite;transform-origin:center}
+@keyframes _pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.pulse{animation:_pulse 1.1s ease-in-out infinite}
 @keyframes _draw{to{stroke-dashoffset:0}}
 @keyframes _slide{from{transform:translateX(18px);opacity:.5}to{transform:none;opacity:1}}
 @keyframes _fade{from{opacity:0}to{opacity:1}}
@@ -492,6 +494,7 @@ function EngagementView({ pushToast }){
   const [activating,setActivating]=useState(null);
   const [segFilter,setSegFilter]=useState('all');
   const [syncing,setSyncing]=useState(false);
+  const [running,setRunning]=useState(false);   // server-side: a sync is in progress
   // Auto-activate: when on, every Hot account is activated once (enriched + posted
   // to Slack), deduped via localStorage so it never re-posts. Mirrors auto-score.
   const [autoActivate,setAutoActivate]=useState(()=>localStorage.getItem('autoActivateEnabled')==='1');
@@ -502,16 +505,35 @@ function EngagementView({ pushToast }){
     return Promise.all([window.API.engagement(),window.API.engagementInbox()]).then(([eng,inb])=>{
       setAccounts((eng.accounts||[]).map(mapAccount));
       setLastSync(eng.last_sync||null);
+      setRunning(!!eng.running);
       setInbox((inb.events||[]).map(mapInbox));
       setLoading(false);
     });
   }
   useEffect(()=>{ load().catch(e=>{ setLoading(false); pushToast&&pushToast(`Couldn't load engagement: ${e.message}`,'danger'); }); },[]);
 
+  // Poll the server's `running` flag so the UI reflects the ACTUAL background sync
+  // (it runs all sources and can take a couple minutes), then refresh once it ends.
+  const pollRef=useRef(false);
+  function pollSyncStatus(){
+    if(pollRef.current) return; pollRef.current=true;
+    let tries=0;
+    const tick=()=>{
+      window.API.engagement().then(eng=>{
+        setRunning(!!eng.running); setLastSync(eng.last_sync||null);
+        if(eng.running && tries++<60){ setTimeout(tick,8000); }
+        else { pollRef.current=false; load().then(()=>pushToast&&pushToast('Sync complete','success')); }
+      }).catch(()=>{ pollRef.current=false; });
+    };
+    setTimeout(tick,6000);
+  }
+  // If a sync is already running when the page loads (someone else started it), track it.
+  useEffect(()=>{ if(running) pollSyncStatus(); },[running]);  // eslint-disable-line
+
   function openAccount(a){ setOpen(a); setDetail(null);
     window.API.engagementAccount(a.id).then(d=>setDetail(mapDetail(d))).catch(()=>setDetail({contacts:[],events:[]})); }
-  function sync(){ setSyncing(true); pushToast&&pushToast('Syncing all engagement sources (email, Salesforce, podcast, LinkedIn ads)…','muted');
-    window.API.syncEngagement().then(()=>setTimeout(()=>load().finally(()=>{ setSyncing(false); pushToast&&pushToast('Sync running in the background — refresh in a minute for LinkedIn results','success'); }),5000))
+  function sync(){ setSyncing(true); pushToast&&pushToast('Syncing all sources (email, Salesforce, podcast, LinkedIn ads)…','muted');
+    window.API.syncEngagement().then(()=>{ setRunning(true); setSyncing(false); pollSyncStatus(); })
       .catch(e=>{ setSyncing(false); pushToast&&pushToast(`Sync failed: ${e.message}`,'danger'); }); }
   function handleActivate(a){ setActivating(null); setOpen(null);
     pushToast&&pushToast(`Enriching ${a.name} + posting to Slack…`,'muted');
@@ -569,7 +591,7 @@ function EngagementView({ pushToast }){
         <div style={{display:'flex',alignItems:'flex-end',justifyContent:'space-between',gap:16,marginBottom:22}}>
           <div>
             <h1 style={{margin:0,fontSize:24,fontWeight:600,letterSpacing:'-.02em',color:'#18181b'}}>Engagement</h1>
-            <p style={{margin:'5px 0 0',fontSize:14,color:'#71717a',maxWidth:640}}>Buyer intent across email, podcast, Salesforce &amp; LinkedIn ads — matched to your accounts, ranked by heat.{lastSync&&lastSync.last_synced_at?` Synced ${relTime(lastSync.last_synced_at)}.`:''}</p>
+            <p style={{margin:'5px 0 0',fontSize:14,color:'#71717a',maxWidth:640}}>Buyer intent across email, podcast, Salesforce &amp; LinkedIn ads — matched to your accounts, ranked by heat.</p>
           </div>
           <div style={{display:'flex',alignItems:'center',gap:12}}>
             <label title="Auto-route: Hot → AE (enrich + Slack), Warm → SDR (Slack only)"
@@ -579,12 +601,20 @@ function EngagementView({ pushToast }){
               </span>
               Auto-route
             </label>
+            {/* Live sync status: amber pulse while a background sync runs, else last-completed time */}
+            {(running||syncing)
+              ? <span title="A sync is running in the background (all sources)" style={{display:'inline-flex',alignItems:'center',gap:6,fontSize:12.5,fontWeight:600,color:'#b45309',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:999,padding:'5px 11px'}}>
+                  <span className="pulse" style={{width:7,height:7,borderRadius:'50%',background:'#f59e0b',display:'inline-block'}}/>Syncing all sources…
+                </span>
+              : <span title={lastSync&&lastSync.last_synced_at?`Last completed ${new Date(lastSync.last_synced_at).toLocaleString()}`:'No sync has run yet'} style={{display:'inline-flex',alignItems:'center',gap:6,fontSize:12.5,color:'#71717a'}}>
+                  <Icon name="check" size={13} style={{color:lastSync&&lastSync.last_synced_at?'#10b981':'#d4d4d8'}}/>{lastSync&&lastSync.last_synced_at?`Last synced ${relTime(lastSync.last_synced_at)}`:'Never synced'}
+                </span>}
             <button onClick={()=>{window.location.href='/api/engagement/export.csv';}}
               style={{display:'inline-flex',alignItems:'center',gap:6,borderRadius:8,background:'#fff',border:'1px solid #e4e4e7',padding:'8px 14px',fontFamily:'var(--font-sans)',fontSize:13,fontWeight:600,color:'#3f3f46',cursor:'pointer'}}>
               <Icon name="ext" size={15}/>Export CSV
             </button>
-            <button onClick={sync} disabled={syncing} title="Pull every engagement source: Reply.io email, Salesforce leads/meetings, podcast, and LinkedIn TOFU ad reactions" style={{display:'inline-flex',alignItems:'center',gap:7,borderRadius:8,background:'#4f46e5',border:'none',padding:'8px 14px',fontFamily:'var(--font-sans)',fontSize:13,fontWeight:600,color:'#fff',cursor:'pointer',boxShadow:'0 1px 2px rgba(24,24,27,.05)',opacity:syncing?.6:1}}>
-              <Icon name="refresh" size={15} className={syncing?'spin':''}/>{syncing?'Syncing…':'Sync all'}
+            <button onClick={sync} disabled={syncing||running} title="Pull every engagement source: Reply.io email, Salesforce leads/meetings, podcast, and LinkedIn TOFU ad reactions" style={{display:'inline-flex',alignItems:'center',gap:7,borderRadius:8,background:'#4f46e5',border:'none',padding:'8px 14px',fontFamily:'var(--font-sans)',fontSize:13,fontWeight:600,color:'#fff',cursor:'pointer',boxShadow:'0 1px 2px rgba(24,24,27,.05)',opacity:(syncing||running)?.6:1}}>
+              <Icon name="refresh" size={15} className={(syncing||running)?'spin':''}/>{(syncing||running)?'Syncing…':'Sync all'}
             </button>
           </div>
         </div>

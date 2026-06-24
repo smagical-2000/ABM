@@ -991,8 +991,74 @@ def create_app() -> FastAPI:
         return {"posted": True, "account_id": account_id, "contacts": dms,
                 "routed_to": owner}
 
+    async def _linkedin_tofu(*, dry_run: bool, max_contacts: int | None = None,
+                             max_leads: int | None = None, max_reactions: int = 50) -> dict:
+        """Load the share CSV, build the sinks (Airtable + Reply.io, live runs only),
+        and run the LinkedIn TOFU ad-engagement flow. Raises on misconfig — the caller
+        decides whether that's fatal (standalone endpoint) or a skipped leg (full sync)."""
+        from auto_search.engagement import linkedin_ads, linkedin_ads_runner
+        csv_path = os.getenv("LINKEDIN_TOFU_CSV") or os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "engagement", "linkedin_tofu_shares.csv")
+        with open(csv_path) as f:
+            share_categories = linkedin_ads.load_share_categories(f.read())
+        if not share_categories:
+            raise RuntimeError("no usable share_ids in the LinkedIn TOFU CSV")
+        airtable = reply = None
+        if not dry_run:
+            from auto_search.engagement.airtable_client import AirtableClient
+            from auto_search.engagement.replyio_client import ReplyioClient
+            airtable = AirtableClient()                 # the sink (upsert on Email)
+            reply = ReplyioClient()
+        return await linkedin_ads_runner.run(
+            share_categories=share_categories, engagement_repo=app.state.engagement_repo,
+            scoring_repo=app.state.scoring_repo, discovery_repo=app.state.repo,
+            airtable_client=airtable, replyio_client=reply, max_reactions=max_reactions,
+            max_contacts=max_contacts, max_leads=max_leads, dry_run=dry_run)
+
+    async def _sync_all_sources(*, since: str, max_contacts: int | None) -> None:
+        """Pull EVERY engagement source in one pass, best-effort. A failing leg is
+        logged and skipped so the rest still run (mirrors the daily cron's all-legs
+        policy); each leg is idempotent. Order: Reply.io → SFDC → podcast → LinkedIn."""
+        repo, scoring, discovery = (app.state.engagement_repo, app.state.scoring_repo,
+                                    app.state.repo)
+        ok: list[str] = []
+        try:    # 1. Reply.io email activity
+            await engagement_sync_mod.run_sync(
+                engagement_repo=repo, scoring_repo=scoring, discovery_repo=discovery,
+                since=since, max_contacts=max_contacts)
+            ok.append("replyio")
+        except Exception:  # noqa: BLE001 — one source must not sink the others
+            logger.exception("full sync leg failed: replyio")
+        try:    # 2. Salesforce leads + booked meetings (blocking client → thread)
+            await asyncio.to_thread(
+                engagement_sync_mod.run_sfdc_sync, engagement_repo=repo,
+                scoring_repo=scoring, discovery_repo=discovery, since=since)
+            ok.append("sfdc")
+        except Exception:  # noqa: BLE001
+            logger.exception("full sync leg failed: sfdc")
+        if os.getenv("PODCAST_CSV_URL"):    # 3. Podcast leads (no-op without the URL)
+            try:
+                await asyncio.to_thread(
+                    engagement_sync_mod.run_podcast_url_sync, engagement_repo=repo,
+                    scoring_repo=scoring, discovery_repo=discovery,
+                    url=os.getenv("PODCAST_CSV_URL"))
+                ok.append("podcast")
+            except Exception:  # noqa: BLE001
+                logger.exception("full sync leg failed: podcast")
+        try:    # 4. LinkedIn TOFU ad reactions → Airtable + Reply.io + heat (live write)
+            await _linkedin_tofu(dry_run=False)
+            ok.append("linkedin_tofu")
+        except Exception:  # noqa: BLE001 — e.g. Airtable not configured; skip, don't fail
+            logger.exception("full sync leg failed: linkedin_tofu")
+        logger.info("engagement full sync done — legs ok: %s", ok)
+
     @app.post("/api/engagement/sync")
     def engagement_sync(since: str = "2026-01-01", max_contacts: int | None = None):
+        """Sync ALL engagement sources in one pass: Reply.io email, Salesforce
+        leads/meetings, podcast leads, and LinkedIn TOFU ad reactions. Best-effort
+        (a failing source is logged and skipped, the rest still run), idempotent, one
+        sync at a time. Returns immediately; the pull runs in the background."""
         repo = getattr(app.state, "engagement_repo", None)
         if not repo:
             raise HTTPException(status_code=503, detail="engagement store not available")
@@ -1002,11 +1068,7 @@ def create_app() -> FastAPI:
 
         async def _run() -> None:
             try:
-                await engagement_sync_mod.run_sync(
-                    engagement_repo=repo, scoring_repo=app.state.scoring_repo,
-                    discovery_repo=app.state.repo, since=since, max_contacts=max_contacts)
-            except Exception:  # noqa: BLE001 — never crash the loop
-                logger.exception("engagement sync failed")
+                await _sync_all_sources(since=since, max_contacts=max_contacts)
             finally:
                 app.state.engagement_running = False
 
@@ -1044,42 +1106,21 @@ def create_app() -> FastAPI:
     @app.post("/api/engagement/linkedin/run")
     async def engagement_linkedin_run(dry_run: bool = True, max_contacts: int | None = None,
                                       max_leads: int | None = None, max_reactions: int = 50):
-        """LinkedIn TOFU ad-engagement: scrape post reactions -> drop staff -> ABM-only
-        -> Apollo work email -> dedup. When dry_run=false it also WRITES: Airtable upsert
-        + Reply.io campaign contact + `linkedin_tofu` heat. Awaits and returns the funnel
-        + would-be/created leads (bounded by max_contacts / max_reactions). Reads the
-        committed share_id->category CSV. Shares the one-at-a-time engagement lock."""
-        from auto_search.engagement import linkedin_ads, linkedin_ads_runner
+        """LinkedIn TOFU ad-engagement, standalone (the main /sync also runs this leg).
+        Scrape post reactions -> drop staff -> ABM-only -> Apollo work email -> dedup.
+        dry_run=false also WRITES: Airtable upsert + Reply.io contact + `linkedin_tofu`
+        heat. Awaits and returns the funnel. Shares the one-at-a-time engagement lock."""
         repo = getattr(app.state, "engagement_repo", None)
         if not repo:
             raise HTTPException(status_code=503, detail="engagement store not available")
         if getattr(app.state, "engagement_running", False):
             return {"started": False, "busy": True}
-        csv_path = os.getenv("LINKEDIN_TOFU_CSV") or os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
-            "engagement", "linkedin_tofu_shares.csv")
-        try:
-            with open(csv_path) as f:
-                share_categories = linkedin_ads.load_share_categories(f.read())
-        except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"share CSV load failed: {e}") from e
-        if not share_categories:
-            raise HTTPException(status_code=400, detail="no usable share_ids in the CSV")
-
-        airtable = reply = None
-        if not dry_run:
-            from auto_search.engagement.airtable_client import AirtableClient
-            from auto_search.engagement.replyio_client import ReplyioClient
-            airtable = AirtableClient()                 # the sink (upsert on Email)
-            reply = ReplyioClient()
-
         app.state.engagement_running = True
         try:
-            return await linkedin_ads_runner.run(
-                share_categories=share_categories, engagement_repo=repo,
-                scoring_repo=app.state.scoring_repo, discovery_repo=app.state.repo,
-                airtable_client=airtable, replyio_client=reply, max_reactions=max_reactions,
-                max_contacts=max_contacts, max_leads=max_leads, dry_run=dry_run)
+            return await _linkedin_tofu(dry_run=dry_run, max_contacts=max_contacts,
+                                        max_leads=max_leads, max_reactions=max_reactions)
+        except (OSError, RuntimeError) as e:
+            raise HTTPException(status_code=500, detail=f"LinkedIn TOFU run failed: {e}") from e
         finally:
             app.state.engagement_running = False
 

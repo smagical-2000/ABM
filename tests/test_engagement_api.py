@@ -20,10 +20,17 @@ async def _noop_sync(**_kwargs):
     return {}
 
 
+def _noop_sync_blocking(**_kwargs):
+    return {}
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.delenv("BASIC_AUTH_USER", raising=False)
     monkeypatch.delenv("BASIC_AUTH_PASS", raising=False)
+    # The consolidated /sync runs EVERY source in the background; stub them all so a
+    # test that triggers it never makes a real SFDC/Apify/Reply.io call.
+    monkeypatch.delenv("PODCAST_CSV_URL", raising=False)
     monkeypatch.setattr(_app, "get_repository",
                         lambda: JsonFileRepository(tmp_path / "d.json"))
     monkeypatch.setattr(_app, "get_scoring_repository",
@@ -41,6 +48,10 @@ def client(tmp_path, monkeypatch):
                    "account_id": "acc_x", "occurred_at": "2026-06-11T00:00:00+00:00"})
     monkeypatch.setattr(_app, "get_engagement_repository", lambda: eng)
     monkeypatch.setattr(_app.engagement_sync_mod, "run_sync", _noop_sync)
+    monkeypatch.setattr(_app.engagement_sync_mod, "run_sfdc_sync", _noop_sync_blocking)
+    monkeypatch.setattr(_app.engagement_sync_mod, "run_podcast_url_sync", _noop_sync_blocking)
+    import auto_search.engagement.linkedin_ads_runner as _li
+    monkeypatch.setattr(_li, "run", _noop_sync)
 
     from auto_search.api.app import create_app
     with TestClient(create_app()) as c:
@@ -204,3 +215,43 @@ def test_export_csv_has_header_and_rows(client):
 def test_sync_endpoint_starts_background(client):
     res = client.post("/api/engagement/sync").json()
     assert res["started"] is True
+
+
+def test_sync_runs_all_sources_best_effort(client, monkeypatch):
+    """The one Sync button pulls EVERY source in one pass — Reply.io, SFDC, podcast,
+    LinkedIn TOFU — and a failing leg never skips the rest (best-effort)."""
+    import time
+
+    called: list[str] = []
+
+    async def rec_replyio(**_k):
+        called.append("replyio")
+        raise RuntimeError("boom")          # first leg fails — rest must still run
+
+    def rec_sfdc(**_k):
+        called.append("sfdc")
+        return {}
+
+    def rec_podcast(**_k):
+        called.append("podcast")
+        return {}
+
+    async def rec_linkedin(**_k):
+        called.append("linkedin")
+        return {"stats": {}}
+
+    monkeypatch.setenv("PODCAST_CSV_URL", "https://example.test/pod.csv")
+    monkeypatch.setattr(_app.engagement_sync_mod, "run_sync", rec_replyio)
+    monkeypatch.setattr(_app.engagement_sync_mod, "run_sfdc_sync", rec_sfdc)
+    monkeypatch.setattr(_app.engagement_sync_mod, "run_podcast_url_sync", rec_podcast)
+    import auto_search.engagement.linkedin_ads_runner as _li
+    monkeypatch.setattr(_li, "run", rec_linkedin)
+
+    assert client.post("/api/engagement/sync").json()["started"] is True
+    # drain the background job (it flips engagement_running off in its finally)
+    for _ in range(100):
+        if not client.app.state.engagement_running:
+            break
+        time.sleep(0.05)
+    assert client.app.state.engagement_running is False
+    assert set(called) == {"replyio", "sfdc", "podcast", "linkedin"}

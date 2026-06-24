@@ -108,6 +108,15 @@
       "root_cause": "_classify emitted the human framework LABEL ('Health System') but resolve_ae / SPECIALTY_AE are keyed by the raw key ('health_system'); the specialty lookup always missed. Unit tests passed the raw key directly, masking it.",
       "guard": "tests/test_engagement_notify.py::test_resolve_ae_uses_raw_framework_key_not_label",
       "lesson": "Never route/look-up on a display label. Carry the raw key (framework_key) for lookups and reserve the label for rendering; test the integration path, not just the pure function with ideal inputs."
+    },
+    {
+      "id": "consolidated-sync-fires-real-io-in-tests",
+      "date": "2026-06-24",
+      "area": "auto_search/api/app.py _sync_all_sources (the one Sync button)",
+      "symptom": "Folding every source (Reply.io, SFDC, podcast, LinkedIn TOFU) into POST /api/engagement/sync meant the background job could fire real SFDC/Apify/Reply.io calls during tests, since the sync handler schedules the coro on the live lifespan loop — only run_sync was stubbed.",
+      "root_cause": "The shared client fixture stubbed run_sync but not run_sfdc_sync / run_podcast_url_sync / linkedin_ads_runner.run, and the new orchestrator calls all of them in the background.",
+      "guard": "tests/test_engagement_api.py::test_sync_runs_all_sources_best_effort",
+      "lesson": "When a background job grows new legs, stub EVERY leg in the fixture (no leg makes real network I/O in tests) and assert best-effort: a leg raising must not skip the rest."
     }
   ]
 }

@@ -140,19 +140,8 @@ class SalesforceClient:
             "WHERE LeadSource LIKE '%| TOFU' "
             f"AND CreatedDate >= {since}T00:00:00Z ORDER BY CreatedDate DESC")
 
-    def iter_sales_accepted_opportunities(self, *, since: str = SINCE_DEFAULT) -> Iterator[dict]:
-        """Sales Accepted Opportunities — Opportunity.Qualified_Meeting__c = true (the
-        org's "Sales Accepted Opportunity?" flag), created on/after `since` (YYYY-MM-DD).
-        Account-level BOFU signal (10 pts): a deal sales has accepted as qualified.
-        Closed-lost is NOT excluded — it was a sales-accepted opportunity at the time."""
-        if not _DATE_RE.match(since):       # interpolated into SOQL — keep it a bare date
-            raise ValueError(f"since must be YYYY-MM-DD, got {since!r}")
-        yield from self.query(
-            "SELECT Id, Name, StageName, IsClosed, IsWon, Amount, AccountId, "
-            "Account.Name, Account.Website, CreatedDate, CloseDate, "
-            "SQL_Create_Date__c, Qualification_Call_Date__c FROM Opportunity "
-            f"WHERE Qualified_Meeting__c = true AND CreatedDate >= {since}T00:00:00Z "
-            "ORDER BY CreatedDate DESC")
+    # iter_sales_accepted_opportunities was removed in the 2026-06 review — SAO is
+    # retired (replaced by meeting_booked / iter_meetings below; see DEPRECATED_KINDS).
 
     def iter_meetings(self, *, days: int = 180) -> Iterator[dict]:
         """Booked meetings (Event Type='Meeting') created in the last `days`, with

@@ -963,46 +963,52 @@ def create_app() -> FastAPI:
             claimed = repo.claim_activation(account_id)
             if not claimed and not force:
                 return {"posted": False, "already_activated": True, "account_id": account_id}
-        account = _engaged_one(account_id, events, contacts)
-        # SDR intel brief — reuse the scored account's already-stored research
-        # (discovery triggers + Claude dossier). Free, instant, no live call. It's
-        # a non-critical garnish, so a DB hiccup here must never block activation.
-        research: dict = {}
+        # Everything after the claim runs under one guard: if ANY step fails (not just
+        # the Slack post), release the claim so the account isn't left stuck
+        # "activated" with no post — a retry can then re-activate it.
         try:
-            scored = (app.state.scoring_repo.get(account_id)
-                      if hasattr(app.state.scoring_repo, "get") else None)
-            research = engagement_notify.summarize_research(scored)
-        except Exception:  # noqa: BLE001 — intel is optional; activation must not 500
-            logger.exception("intel brief failed for %s", account_id)
-        tier = account.get("tier") or "—"
-        is_hot = tier == "Hot"
-        is_warm = tier == "Warm"
-        # Enrich (paid) — only Hot activations spend enrichment credits.
-        # Warm/Some get notified but NOT enriched (saves Apollo/FullEnrich spend).
-        # A {"test": true} post never spends credits.
-        dms: list[dict] = []
-        if is_hot and account.get("domain") and not is_test:
-            from auto_search.engagement import enrichment
+            account = _engaged_one(account_id, events, contacts)
+            # SDR intel brief — reuse the scored account's already-stored research
+            # (discovery triggers + Claude dossier). Free, instant, no live call. It's
+            # a non-critical garnish, so a DB hiccup here must never block activation.
+            research: dict = {}
             try:
-                dms = await enrichment.enrich_account(account["domain"],
-                                                      company=account.get("name"))
-            except Exception:  # noqa: BLE001 — never block the activation post
-                logger.exception("activation enrichment failed for %s", account_id)
-        app_url = os.getenv("ENGAGEMENT_APP_URL")
-        # Tier-based routing:
-        #   Hot  → AE tagged, enriched contacts, 2 DMs
-        #   Warm → SDR tagged, no enrichment, no DMs
-        ae = engagement_notify.resolve_ae(account) if is_hot else None
-        sdr_mention = engagement_notify.resolve_sdr(account) if is_warm else None
-        owner = ae or sdr_mention
-        ok = await asyncio.to_thread(
-            engagement_notify.activate_account, account, events,
-            dms=dms, research=research, app_url=app_url, ae=owner,
-            dm_limit=(2 if is_hot else 0), test=is_test)
-        if not ok:
-            if claimed:   # release the claim we just made so a retry can re-activate
+                scored = (app.state.scoring_repo.get(account_id)
+                          if hasattr(app.state.scoring_repo, "get") else None)
+                research = engagement_notify.summarize_research(scored)
+            except Exception:  # noqa: BLE001 — intel is optional; activation must not 500
+                logger.exception("intel brief failed for %s", account_id)
+            tier = account.get("tier") or "—"
+            is_hot = tier == "Hot"
+            is_warm = tier == "Warm"
+            # Enrich (paid) — only Hot activations spend enrichment credits.
+            # Warm/Some get notified but NOT enriched (saves Apollo/FullEnrich spend).
+            # A {"test": true} post never spends credits.
+            dms: list[dict] = []
+            if is_hot and account.get("domain") and not is_test:
+                from auto_search.engagement import enrichment
+                try:
+                    dms = await enrichment.enrich_account(account["domain"],
+                                                          company=account.get("name"))
+                except Exception:  # noqa: BLE001 — never block the activation post
+                    logger.exception("activation enrichment failed for %s", account_id)
+            app_url = os.getenv("ENGAGEMENT_APP_URL")
+            # Tier-based routing:
+            #   Hot  → AE tagged, enriched contacts, 2 DMs
+            #   Warm → SDR tagged, no enrichment, no DMs
+            ae = engagement_notify.resolve_ae(account) if is_hot else None
+            sdr_mention = engagement_notify.resolve_sdr(account) if is_warm else None
+            owner = ae or sdr_mention
+            ok = await asyncio.to_thread(
+                engagement_notify.activate_account, account, events,
+                dms=dms, research=research, app_url=app_url, ae=owner,
+                dm_limit=(2 if is_hot else 0), test=is_test)
+            if not ok:
+                raise HTTPException(status_code=502, detail="Slack post failed (check webhook)")
+        except Exception:
+            if claimed:   # release so the failed account can be retried, not stuck "activated"
                 repo.release_activation(account_id)
-            raise HTTPException(status_code=502, detail="Slack post failed (check webhook)")
+            raise
         return {"posted": True, "account_id": account_id, "contacts": dms,
                 "routed_to": owner, "reactivated": bool(force and not claimed)}
 
@@ -1052,17 +1058,20 @@ def create_app() -> FastAPI:
             ok.append("sfdc")
         except Exception:  # noqa: BLE001
             logger.exception("full sync leg failed: sfdc")
-        if os.getenv("PODCAST_CSV_URL"):    # 3. Podcast leads (no-op without the URL)
+        podcast_url = os.getenv("PODCAST_CSV_URL")
+        if podcast_url:    # 3. Podcast leads (no-op without the URL)
             try:
                 await asyncio.to_thread(
                     engagement_sync_mod.run_podcast_url_sync, engagement_repo=repo,
-                    scoring_repo=scoring, discovery_repo=discovery,
-                    url=os.getenv("PODCAST_CSV_URL"))
+                    scoring_repo=scoring, discovery_repo=discovery, url=podcast_url)
                 ok.append("podcast")
             except Exception:  # noqa: BLE001
                 logger.exception("full sync leg failed: podcast")
         try:    # 4. LinkedIn TOFU ad reactions → Airtable + Reply.io + heat (live write)
-            await _linkedin_tofu(dry_run=False)
+            # Honor the caller's max_contacts so a manual "Sync all?max_contacts=N" caps
+            # the paid Apollo-enrich/write here too (not just the Reply.io leg); steady
+            # state is already bounded by the runner's already-processed dedup.
+            await _linkedin_tofu(dry_run=False, max_contacts=max_contacts)
             ok.append("linkedin_tofu")
         except Exception:  # noqa: BLE001 — e.g. Airtable not configured; skip, don't fail
             logger.exception("full sync leg failed: linkedin_tofu")

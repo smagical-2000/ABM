@@ -78,10 +78,15 @@ class AirtableClient:
         """First record id matching ALL merge fields, or None. Read-only."""
         import urllib.parse
 
-        def esc(v: object) -> str:
-            return str(v).replace("\\", "\\\\").replace("'", "\\'")
+        def lit(v: object) -> str:
+            # Airtable formula string literal: wrap in DOUBLE quotes, escaping only \ and ".
+            # An apostrophe is literal inside a double-quoted string (Airtable does NOT honor
+            # \' inside a single-quoted literal), so a value like "o'brien@x.com" matches
+            # correctly instead of producing a malformed formula → a missed match → a dup.
+            s = str(v).replace("\\", "\\\\").replace('"', '\\"')
+            return f'"{s}"'
 
-        clauses = [f"{{{k}}}='{esc(fields.get(k, ''))}'" for k in merge_on]
+        clauses = [f"{{{k}}}={lit(fields.get(k, ''))}" for k in merge_on]
         formula = clauses[0] if len(clauses) == 1 else "AND(" + ",".join(clauses) + ")"
         qs = urllib.parse.urlencode({"filterByFormula": formula, "maxRecords": "1",
                                      "fields[]": merge_on[0]})

@@ -27,6 +27,18 @@ def _event(ext, kind, points, *, account_id="acc_x", contact="1",
             "contact_ext": contact, "account_id": account_id, "occurred_at": at}
 
 
+def test_claim_activation_is_atomic_and_releasable(tmp_path):
+    """Server-side activation dedup: the first claim wins, a second loses (so two reps
+    fire it once); release undoes a claim so a failed post can retry."""
+    repo = _repo(tmp_path)
+    assert repo.claim_activation("acc_x") is True      # first rep wins
+    assert repo.claim_activation("acc_x") is False     # second rep loses (already activated)
+    assert repo.is_activated("acc_x") is True
+    repo.release_activation("acc_x")                   # e.g. the Slack post failed
+    assert repo.is_activated("acc_x") is False
+    assert repo.claim_activation("acc_x") is True      # can re-claim after release
+
+
 def test_deprecated_sao_excluded_from_heat_and_drawer(tmp_path):
     """Retired SAO events stay in storage (audit) but must NOT count toward heat,
     appear in the drawer (events_for_account), the inbox (recent_events), or momentum

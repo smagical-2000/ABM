@@ -940,7 +940,12 @@ def create_app() -> FastAPI:
         via Apollo + FullEnrich) and post a full sales packet (intent story + heat +
         contacts) to the Slack engagement channel. Enrichment runs ONLY here (on
         activation), so credits are spent only on accounts a rep chose to action.
-        Body may pass {"test": true} to mark the message as a wiring test."""
+        Body: {"test": true} marks a wiring test (always posts, never deduped);
+        {"force": true} deliberately re-activates an already-activated account.
+
+        Multi-user safe: a non-test activation atomically CLAIMS the account first,
+        so two reps (or the auto-route loop across browsers) clicking Activate fire
+        it exactly once — the loser gets {"already_activated": true} with no spend."""
         repo = getattr(app.state, "engagement_repo", None)
         if not repo:
             raise HTTPException(status_code=503, detail="engagement store not available")
@@ -950,6 +955,14 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="account not found")
         body = await _json_body(request)
         is_test = bool(body.get("test"))
+        force = bool(body.get("force"))
+        # Server-side dedup: claim before any paid/visible work. The winner proceeds;
+        # everyone else short-circuits. `force` re-activates on purpose; `test` is exempt.
+        claimed = False
+        if not is_test:
+            claimed = repo.claim_activation(account_id)
+            if not claimed and not force:
+                return {"posted": False, "already_activated": True, "account_id": account_id}
         account = _engaged_one(account_id, events, contacts)
         # SDR intel brief — reuse the scored account's already-stored research
         # (discovery triggers + Claude dossier). Free, instant, no live call. It's
@@ -987,9 +1000,11 @@ def create_app() -> FastAPI:
             dms=dms, research=research, app_url=app_url, ae=owner,
             dm_limit=(2 if is_hot else 0), test=is_test)
         if not ok:
+            if claimed:   # release the claim we just made so a retry can re-activate
+                repo.release_activation(account_id)
             raise HTTPException(status_code=502, detail="Slack post failed (check webhook)")
         return {"posted": True, "account_id": account_id, "contacts": dms,
-                "routed_to": owner}
+                "routed_to": owner, "reactivated": bool(force and not claimed)}
 
     async def _linkedin_tofu(*, dry_run: bool, max_contacts: int | None = None,
                              max_leads: int | None = None, max_reactions: int = 50) -> dict:

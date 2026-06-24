@@ -516,6 +516,7 @@ function EngagementView({ pushToast }){
   function handleActivate(a){ setActivating(null); setOpen(null);
     pushToast&&pushToast(`Enriching ${a.name} + posting to Slack…`,'muted');
     window.API.activateEngagement(a.id).then(r=>{
+      if(r&&r.already_activated){ pushToast&&pushToast(`${a.name} was already activated — not re-posted`,'muted'); return; }
       const n=(r&&r.contacts||[]).filter(p=>p.email||p.phone).length;
       pushToast&&pushToast(`Activated ${a.name} — posted to Slack${n?` with ${n} contact${n===1?'':'s'}`:''}`,'success');
     }).catch(e=>pushToast&&pushToast(`Activate failed: ${e.message}`,'danger')); }

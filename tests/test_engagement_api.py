@@ -202,6 +202,51 @@ def test_warm_activation_routes_to_sdr_no_enrichment(client, monkeypatch):
     assert activate_kwargs["dm_limit"] == 0
 
 
+def test_activate_dedups_across_users(client, monkeypatch):
+    """Two reps activating the same account → it posts to Slack ONCE; the second gets
+    already_activated with no spend. `force` deliberately re-activates."""
+    from auto_search.engagement import notify
+
+    posts = []
+    monkeypatch.setattr(notify, "activate_account",
+                        lambda *a, **k: (posts.append(1) or True))
+
+    r1 = client.post("/api/engagement/acc_x/activate", json={}).json()
+    assert r1["posted"] is True
+
+    r2 = client.post("/api/engagement/acc_x/activate", json={}).json()   # another rep
+    assert r2 == {"posted": False, "already_activated": True, "account_id": "acc_x"}
+    assert len(posts) == 1                       # posted exactly once
+
+    r3 = client.post("/api/engagement/acc_x/activate", json={"force": True}).json()
+    assert r3["posted"] is True and r3["reactivated"] is True
+    assert len(posts) == 2                       # force re-posts
+
+
+def test_activate_releases_claim_on_slack_failure(client, monkeypatch):
+    """If the Slack post fails after claiming, the claim is released so a retry works
+    (no account left stuck 'activated' but never posted)."""
+    from auto_search.engagement import notify
+
+    monkeypatch.setattr(notify, "activate_account", lambda *a, **k: False)   # Slack down
+    r = client.post("/api/engagement/acc_x/activate", json={})
+    assert r.status_code == 502
+    assert client.app.state.engagement_repo.is_activated("acc_x") is False   # released
+
+
+def test_test_activation_is_never_deduped(client, monkeypatch):
+    """A {"test": true} wiring post always fires and never claims — so it can be
+    repeated and never blocks a real activation."""
+    from auto_search.engagement import notify
+    posts = []
+    monkeypatch.setattr(notify, "activate_account",
+                        lambda *a, **k: (posts.append(1) or True))
+    client.post("/api/engagement/acc_x/activate", json={"test": True})
+    client.post("/api/engagement/acc_x/activate", json={"test": True})
+    assert len(posts) == 2                       # both test posts fire
+    assert client.app.state.engagement_repo.is_activated("acc_x") is False   # never claimed
+
+
 def test_export_csv_has_header_and_rows(client):
     r = client.get("/api/engagement/export.csv")
     assert r.status_code == 200

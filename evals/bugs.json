@@ -126,6 +126,15 @@
       "root_cause": "Dropping a signal at the INGEST layer (sync) doesn't remove already-stored events. Heat is summed in the engaged_accounts SQL view from stored points, so retired-but-stored kinds keep counting until excluded at the READ layer.",
       "guard": "tests/test_engagement_repository.py::test_deprecated_sao_excluded_from_heat_and_drawer",
       "lesson": "Retiring a signal needs a READ-layer exclusion (DEPRECATED_KINDS), not just stopping ingest. Apply it everywhere heat/events are read — the SQL view (re-applied via ensure_schema on deploy), both repos' events/series/recent, plus the UI/Slack label maps — so stored history stays for audit but never counts or shows."
+    },
+    {
+      "id": "activation-dedup-client-side-only",
+      "date": "2026-06-24",
+      "area": "engagement activation (POST /api/engagement/{id}/activate)",
+      "symptom": "Before a multi-AE/SDR rollout: the 'already activated' dedup lived only in the browser (localStorage), so two reps (or the auto-route loop across browsers/reloads) could activate the SAME Hot account → it posted to Slack twice and double-spent enrichment. Same root cause as the FullEnrich credit incident.",
+      "root_cause": "Per-browser dedup is per-user, not global, and the in-process run-locks don't cover per-account activation. No server-side record of what was already activated.",
+      "guard": "tests/test_engagement_api.py::test_activate_dedups_across_users",
+      "lesson": "Dedup that guards spend/external posts must be SERVER-SIDE and race-safe: claim the resource atomically (INSERT … ON CONFLICT DO NOTHING) BEFORE any paid/visible work, short-circuit the loser, and release the claim if the work fails so it can retry. Client-side dedup is a convenience, never the authority."
     }
   ]
 }

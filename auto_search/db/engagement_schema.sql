@@ -126,6 +126,18 @@ CREATE TABLE IF NOT EXISTS engagement_sync_state (
 ALTER TABLE engagement_sync_state ALTER COLUMN stats DROP NOT NULL;
 
 
+-- ── ACTIVATION LEDGER (server-side dedup for multi-user) ──────────────────────
+-- One row per account that has been activated (enriched + posted to Slack). The
+-- activate endpoint CLAIMS this row atomically before doing any paid/visible work,
+-- so two reps clicking Activate on the same account (or the auto-route loop racing
+-- across browsers) fire it exactly once. account_id is the same soft text reference
+-- used everywhere else. A deliberate re-activation passes force=true (upserts the time).
+CREATE TABLE IF NOT EXISTS engagement_activations (
+    account_id   TEXT PRIMARY KEY,
+    activated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+
 -- ── ENGAGED-ACCOUNTS rollup (derived at read time) ───────────────────────────
 -- score = SUM(points): because events are one-per-contact-per-kind, this already
 -- counts each contact's click(+1)/reply(+6)/meeting(+10) at most once. Rates come

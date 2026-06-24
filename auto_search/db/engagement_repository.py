@@ -85,6 +85,21 @@ class EngagementRepository(Protocol):
         """Most recent meaningful touches across all accounts (the Inbox feed)."""
         ...
 
+    def claim_activation(self, account_id: str, *, at: str | None = None) -> bool:
+        """Atomically claim an account for activation. Returns True if THIS call
+        claimed it (first activation), False if it was already activated — so two
+        reps (or the auto-route loop) clicking Activate fire it exactly once.
+        Idempotent + race-safe (single INSERT … ON CONFLICT DO NOTHING)."""
+        ...
+
+    def is_activated(self, account_id: str) -> bool:
+        """True if the account has already been activated."""
+        ...
+
+    def release_activation(self, account_id: str) -> None:
+        """Undo a claim (e.g. the Slack post failed after claiming) so it can retry."""
+        ...
+
     def get_sync_state(self, source: str = SOURCE_REPLYIO) -> dict | None: ...
 
     def set_sync_state(self, source: str = SOURCE_REPLYIO, *, status: str | None = None,
@@ -304,6 +319,21 @@ class EngagementJsonRepository:
                       key=lambda e: e.get("occurred_at") or "", reverse=True)
         return rows[:limit]
 
+    def claim_activation(self, account_id, *, at=None) -> bool:
+        acts = self._store.setdefault("activations", {})
+        if account_id in acts:
+            return False                       # already activated — this call loses the race
+        acts[account_id] = at or _now()
+        self._flush()
+        return True
+
+    def is_activated(self, account_id) -> bool:
+        return account_id in self._store.get("activations", {})
+
+    def release_activation(self, account_id) -> None:
+        if self._store.get("activations", {}).pop(account_id, None) is not None:
+            self._flush()
+
     def get_sync_state(self, source=SOURCE_REPLYIO) -> dict | None:
         return self._store["sync"].get(source)
 
@@ -361,7 +391,7 @@ class EngagementJsonRepository:
 
 
 def _empty_store() -> dict:
-    return {"raw": [], "contacts": {}, "events": {}, "sync": {}}
+    return {"raw": [], "contacts": {}, "events": {}, "sync": {}, "activations": {}}
 
 
 # ── Postgres ──────────────────────────────────────────────────────────
@@ -513,6 +543,31 @@ class EngagementPostgresRepository:
                 (limit,),
             ).fetchall()
         return [_norm(dict(r)) for r in rows]
+
+    def claim_activation(self, account_id, *, at=None) -> bool:
+        # Atomic claim: INSERT … ON CONFLICT DO NOTHING returns the row only when it
+        # was newly inserted, so concurrent activates resolve to exactly one winner.
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "INSERT INTO engagement_activations (account_id, activated_at) "
+                "VALUES (%s, COALESCE(%s::timestamptz, now())) "
+                "ON CONFLICT (account_id) DO NOTHING RETURNING account_id",
+                (account_id, at),
+            ).fetchone()
+        return row is not None
+
+    def is_activated(self, account_id) -> bool:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM engagement_activations WHERE account_id = %s",
+                (account_id,),
+            ).fetchone()
+        return row is not None
+
+    def release_activation(self, account_id) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM engagement_activations WHERE account_id = %s", (account_id,))
 
     def get_sync_state(self, source=SOURCE_REPLYIO) -> dict | None:
         with self._pool.connection() as conn:

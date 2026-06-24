@@ -1,7 +1,8 @@
 """Hourly LinkedIn TOFU ad-engagement run — the entry point a Railway cron calls.
 
 Scrape reactions on Magical's sponsored posts -> ABM-only -> Apollo email -> dedup
--> create SFDC Lead + Reply.io campaign contact + record `linkedin_tofu` heat.
+-> upsert into the "LinkedIn <> Airtable" table + Reply.io campaign contact + record
+`linkedin_tofu` heat. (SFDC creation is handled downstream by the Airtable automation.)
 
 DISABLED BY DEFAULT. A live run is a no-op unless LINKEDIN_TOFU_CRON_ENABLED=1, so
 the cron service can be created/scheduled but will not write a thing until you flip
@@ -9,7 +10,7 @@ that env var on (after confirming the manual run looks right). `--dry-run` alway
 runs (no writes) regardless of the flag, for testing the wiring.
 
 Needs DATABASE_URL, APIFY_API_KEY, APOLLO_API_KEY, REPLYIO_API_KEY,
-SFDC_CLIENT_ID/SECRET/LOGIN_URL in the env.
+AIRTABLE_API_KEY, AIRTABLE_BASE_ID, AIRTABLE_LINKEDIN_TABLE in the env.
 
 Run:
     python scripts/run_linkedin_tofu.py --dry-run                  # safe, no writes
@@ -64,14 +65,11 @@ def main() -> int:
         logger.error("no usable share_ids in %s", csv_path)
         return 1
 
-    sfdc = reply = None
-    try:
-        from auto_search.engagement.sfdc_client import SalesforceClient
-        sfdc = SalesforceClient()
-    except Exception:  # noqa: BLE001 — dedup just won't run without SFDC creds
-        logger.warning("SFDC client unavailable (no dedup/create)")
+    airtable = reply = None
     if not args.dry_run:
+        from auto_search.engagement.airtable_client import AirtableClient
         from auto_search.engagement.replyio_client import ReplyioClient
+        airtable = AirtableClient()
         reply = ReplyioClient()
 
     engagement_repo = get_engagement_repository()
@@ -80,7 +78,7 @@ def main() -> int:
         summary = asyncio.run(linkedin_ads_runner.run(
             share_categories=share_categories, engagement_repo=engagement_repo,
             scoring_repo=get_scoring_repository(), discovery_repo=get_repository(),
-            sfdc_client=sfdc, replyio_client=reply, max_reactions=args.max_reactions,
+            airtable_client=airtable, replyio_client=reply, max_reactions=args.max_reactions,
             max_contacts=args.max_contacts, max_leads=args.max_leads, dry_run=args.dry_run))
     except Exception:  # noqa: BLE001 — cron leg: log + signal failure, don't traceback-crash
         logger.exception("[run_linkedin_tofu] run failed")

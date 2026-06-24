@@ -10,7 +10,7 @@ dashboard's score bars and tier badges can never drift from what the scorer
 actually used.
 
 Three frameworks:
-  health_system  27 pts, 6 dimensions (NPR-led, "small is good")
+  health_system  30 pts, 6 dimensions (NPR-led, "small is good")
   specialty      30 pts, 3 dimensions (firmographic / technographic / intent)
   payer          30 pts, 3 dimensions (firmographic / technographic / intent)
 """
@@ -75,14 +75,14 @@ _PASSTHROUGH_PILLARS = (
 _HEALTH_SYSTEM = Framework(
     key="health_system",
     label="Health System",
-    version="hs-2026.2",
-    max_total=27,
+    version="hs-2026.3",
+    max_total=30,
     intro=("Score a US health system as an ABM target. ICP modeled on Beacon "
            "Health. Prioritize $2B net patient revenue and under — small is good."),
     auto_tier_out="npr",
     dimensions=(
-        Dimension("npr", "Net Patient Revenue", 10, textwrap.dedent("""
-            $1.0B-$2.0B = 10; $500M-$999M = 8; $200M-$499M = 6; under $200M = 4;
+        Dimension("npr", "Net Patient Revenue", 12, textwrap.dedent("""
+            $1.0B-$2.0B = 12; $500M-$999M = 10; $200M-$499M = 7; under $200M = 5;
             $2.01B-$2.5B = 4; $2.51B-$3.5B = 2; over $3.5B = 0 (auto Tier 4).
             Sub-$2B is the sweet spot.""").strip()),
         Dimension("emr", "EMR Compatibility", 5, textwrap.dedent("""
@@ -103,14 +103,14 @@ _HEALTH_SYSTEM = Framework(
             (Palantir, UiPath, Notable, etc.); has a digital-transformation
             initiative, a recent CDO/VP Innovation hire, or a stated AI strategy.
             """).strip()),
-        Dimension("leadership", "Leadership Changes", 1,
-                  "New CIO, CFO, COO, or CEO in the last 12 months = 1; else 0."),
+        Dimension("leadership", "Leadership Changes", 2,
+                  "New CIO, CFO, COO, or CEO in the last 12 months = 2; else 0."),
     ),
     bands=(
-        Band("high", "Tier 1", 22),       # 22-27 immediate ABM pursuit
-        Band("medium", "Tier 2", 16),      # 16-21 active targeted outreach
-        Band("low", "Tier 3", 10),         # 10-15 monitor for triggers
-        Band("out", "Tier 4", 0),          # <10 or NPR > $3.5B deprioritize
+        Band("high", "Tier 1", 26),       # 26-30 immediate ABM pursuit
+        Band("medium", "Tier 2", 20),      # 20-25 active targeted outreach
+        Band("low", "Tier 3", 12),         # 12-19 monitor for triggers
+        Band("out", "Tier 4", 0),          # 0-11 or NPR > $3.5B deprioritize
     ),
     pillars=(
         Pillar("firmographic", "Firmographic", ("npr",)),
@@ -142,9 +142,10 @@ _SPECIALTY = Framework(
             """).strip()),
     ),
     bands=(
-        Band("high", "High Fit", 24),
-        Band("medium", "Medium Fit", 18),
-        Band("low", "Low Fit", 0),
+        Band("high", "High Fit", 26),     # 26-30
+        Band("medium", "Medium Fit", 20),  # 20-25
+        Band("low", "Low Fit", 12),        # 12-19
+        Band("out", "No Fit", 0),          # 0-11
     ),
     pillars=_PASSTHROUGH_PILLARS,
 )
@@ -171,9 +172,10 @@ _PAYER = Framework(
             cost, member-services volume, CMS interoperability deadlines.""").strip()),
     ),
     bands=(
-        Band("high", "Tier 1", 22),
-        Band("medium", "Tier 2", 18),
-        Band("low", "Tier 3", 0),
+        Band("high", "Tier 1", 26),       # 26-30
+        Band("medium", "Tier 2", 20),      # 20-25
+        Band("low", "Tier 3", 12),         # 12-19
+        Band("out", "Tier 4", 0),          # 0-11
     ),
     pillars=_PASSTHROUGH_PILLARS,
 )

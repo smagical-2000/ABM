@@ -55,15 +55,15 @@ const HEAT = {
 };
 const tierOf = (s)=> s>=21?'Hot':s>=12?'Warm':s>=6?'Some':'Lower';
 const KIND = {
-  high_intent_lead:{ label:'High-intent lead', dot:'#f43f5e', weight:10, big:true },
+  high_intent_lead:{ label:'BOFU', dot:'#f43f5e', weight:10, big:true },
   sales_accepted_opportunity:{ label:'Sales accepted opp', dot:'#e11d48', weight:10, big:true },
   opportunity:     { label:'Opportunity',       dot:'#f43f5e', weight:10, big:true },
   meeting_booked:  { label:'Meeting booked',     dot:'#6366f1', weight:10, big:true },
   tradeshow:       { label:'Tradeshow',          dot:'#f97316', weight:10, big:true },
   podcast_lead:    { label:'Podcast',            dot:'#7c3aed', weight:4 },
   reply:           { label:'Reply',              dot:'#10b981', weight:6 },
-  low_intent_lead: { label:'TOFU content',       dot:'#94a3b8', weight:2 },
-  linkedin_tofu:   { label:'LinkedIn ad',        dot:'#0a66c2', weight:2 },
+  low_intent_lead: { label:'TOFU lead (form)',   dot:'#94a3b8', weight:6 },
+  linkedin_tofu:   { label:'TOFU lead (LinkedIn ad)', dot:'#0a66c2', weight:6 },
   click:           { label:'Click',              dot:'#0ea5e9', weight:1 },
 };
 const kindOf = (k)=> KIND[k] || { label:k||'Touch', dot:'#d4d4d8', weight:1 };

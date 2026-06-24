@@ -4,19 +4,22 @@ Per post: scrape people who REACTED (Apify `harvestapi~linkedin-post-reactions`)
 tag each reactor with the post's share_id/category -> dedupe people -> enrich profile
 to company+domain (Apify freshdata via social.apify.enrich) -> drop Magical's own
 staff (social.filters.is_magical) -> ABM-only gate (engagement.cross) -> Apollo work
-email (scoring.apollo.match_contact) -> dedupe (already a lead?) -> WRITE: SFDC create
-Lead, then Reply.io add-to-campaign -> record `linkedin_tofu` heat (2 pts) with the
-SFDC Lead id.
+email (scoring.apollo.match_contact) -> WRITE: Airtable upsert (the "LinkedIn <>
+Airtable" table; downstream automation takes it from there), then Reply.io
+add-to-campaign -> record `linkedin_tofu` heat (6 pts) with the Airtable record id.
 
-`dry_run=True` (default) does EVERYTHING EXCEPT the writes (SFDC, Reply.io, heat
-persist), so we can watch a full run produce the would-be leads with nothing created.
+We push to Airtable, NOT Salesforce (per the 2026-06 change): SFDC creation is handled
+by the user's Airtable automation. Reply.io and the heat capture are kept.
+
+`dry_run=True` (default) does EVERYTHING EXCEPT the writes (Airtable, Reply.io, heat
+persist), so we can watch a full run produce the would-be rows with nothing written.
 
 Idempotency (survives hourly re-runs):
-  - profile-id gate: a person we already turned into a lead is skipped BEFORE any paid
-    step (we load their engagement contacts at run start). Only a SUCCESSFUL create
-    persists the contact, so a failed run retries next hour rather than zombie-scoring.
-  - SFDC email gate: `lead_exists` also catches people loaded into SFDC outside this
-    flow (e.g. the reviewer's manual imports).
+  - profile-id gate: a person we already pushed is skipped BEFORE any paid step (we
+    load their engagement contacts at run start). Only a SUCCESSFUL push persists the
+    contact, so a failed run retries next hour rather than zombie-scoring.
+  - Airtable upsert merges on Email, so even a person not in our store (e.g. an
+    external import) updates their row instead of duplicating it.
 
 Cost is bounded by `max_reactions` (per post) + `max_contacts` (people per run);
 enrichment + Apollo run only for not-yet-processed people, ABM survivors get the writes.
@@ -24,7 +27,6 @@ enrichment + Apollo run only for not-yet-processed people, ABM survivors get the
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections import Counter
 from datetime import UTC, datetime
@@ -89,7 +91,7 @@ async def _scrape(share_categories: dict[str, str], *, max_reactions: int) -> li
 
 
 async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo,
-              discovery_repo, sfdc_client=None, replyio_client=None,
+              discovery_repo, airtable_client=None, replyio_client=None,
               max_reactions: int = 50, max_contacts: int | None = None,
               max_leads: int | None = None, dry_run: bool = True,
               now: str | None = None) -> dict:
@@ -162,20 +164,8 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
         phone = ap.get("phone")
         title = ap.get("title") or enr.get("job_title") or r.get("position")
         if not email:
-            stats["no_email"] += 1          # Reply.io + dedup need an email
+            stats["no_email"] += 1          # Reply.io + Airtable upsert key need an email
             continue
-
-        # SFDC email dedup (catches people loaded outside this flow). A read failure
-        # skips the person to be safe rather than risk a duplicate.
-        if sfdc_client is not None:
-            try:
-                if await asyncio.to_thread(sfdc_client.lead_exists, email):
-                    stats["dupe_skipped"] += 1
-                    continue
-            except Exception as e:  # noqa: BLE001
-                logger.warning("lead_exists failed for %s: %s", email, e)
-                stats["dedup_failed"] += 1
-                continue
 
         company = company or m.name
         campaign_id = la.campaign_for(r["category"])
@@ -183,7 +173,7 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
             "name": display, "email": email, "phone": phone, "title": title,
             "company": company, "domain": domain, "category": r["category"],
             "campaign_id": campaign_id, "account_id": m.account_id,
-            "share_id": r["share_id"], "sfdc_lead_id": None,
+            "share_id": r["share_id"], "airtable_id": None,
         }
 
         if dry_run:
@@ -194,18 +184,19 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
                 break
             continue
 
-        # ── writes: SFDC first (system of record). Heat + Reply.io only if it lands,
-        #    so a failed create never zombie-scores an account or pushes outreach. ──
+        # ── writes: Airtable first (the sink). Heat + Reply.io only if it lands, so a
+        #    failed push never zombie-scores an account or pushes outreach. Airtable
+        #    upserts on Email, so a re-run updates the row instead of duplicating. ──
         try:
-            payload = la.build_lead_payload(
-                last_name=last or display, company=company, first_name=first,
-                title=title, phone=phone, email=email)
-            res = await asyncio.to_thread(sfdc_client.create_lead, payload)
-            outcome["sfdc_lead_id"] = res.get("id")
-            stats["sfdc_created"] += 1
+            fields = la.build_airtable_fields(
+                email=email, company=company, first_name=first, last_name=last,
+                title=title, phone=phone, linkedin_url=enriched_url)
+            res = await airtable_client.upsert(fields, merge_on=["Email"])
+            outcome["airtable_id"] = airtable_client.record_id(res)
+            stats["airtable_upserted"] += 1
         except Exception as e:  # noqa: BLE001
-            logger.warning("sfdc create_lead failed for %s: %s", email, e)
-            stats["sfdc_failed"] += 1
+            logger.warning("airtable upsert failed for %s: %s", email, e)
+            stats["airtable_failed"] += 1
             results.append(outcome)
             continue
 
@@ -263,7 +254,7 @@ def _event_row(r: dict, outcome: dict, now: str) -> dict:
         "occurred_at": now,
         "raw": {"share_id": r.get("share_id"), "category": r.get("category"),
                 "reaction_type": r.get("reaction_type"), "linkedin_url": r.get("linkedin_url"),
-                "sfdc_lead_id": outcome.get("sfdc_lead_id")},
+                "airtable_id": outcome.get("airtable_id")},
     }
 
 

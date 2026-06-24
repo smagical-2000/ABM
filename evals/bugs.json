@@ -80,7 +80,34 @@
       "symptom": "Engagement sync 500'd. POST /v3/reporting/emails with a from/to that carried a timezone offset ('2026-05-15T00:00:00+00:00') returned 500 Internal Server Error; date-only ('2026-05-15') and Z-suffixed datetimes returned 200.",
       "root_cause": "datetime.isoformat() emits a '+00:00' offset, which Reply.io's report endpoint cannot parse. The reporting window is day-granular, so a bare date is the right shape.",
       "guard": "tests/test_engagement_replyio_client.py::test_reporting_window_is_date_only_not_offset_datetime",
-      "lesson": "Send the reporting from/to as a bare 'YYYY-MM-DD' date. Verify connectors against the LIVE API, not just mocks — a mock happily accepts the bad format; only the real endpoint reveals the 500."
+      "lesson": "Send the reporting from/to as a bare 'YYYY-MM-DD' date. Verify connectors against the LIVE API, not just mocks \u2014 a mock happily accepts the bad format; only the real endpoint reveals the 500."
+    },
+    {
+      "id": "retier-missed-nested-tier-object",
+      "date": "2026-06-24",
+      "area": "auto_search/api/app.py _retier",
+      "symptom": "After bumping the Health System rubric to 30 pts, the Scored board re-resolved the flat tier keys + denominator but the tier BADGE the UI renders (the nested `tier` object) stayed stale: the ring showed X/30 while the badge still said the old Tier 1.",
+      "root_cause": "_retier rewrote tier_band/tier_label/max_total but not the nested tier:{band,label} object the UI actually reads via `a.tier || tierFor(...)`.",
+      "guard": "tests/test_api.py::test_scored_list_retiers_to_current_rubric",
+      "lesson": "When you re-resolve a denormalized value, rewrite EVERY representation the readers use (flat keys AND the nested object). Grep the UI for the field it actually reads; a test that only checks the JSON flat key passes while the screen is wrong."
+    },
+    {
+      "id": "engagement-fit-tier-stale-after-rubric-change",
+      "date": "2026-06-24",
+      "area": "auto_search/api/app.py _classify (engagement read path)",
+      "symptom": "The Slack AE card + Activity view showed the stale stored fit tier after the rubric change, disagreeing with the Scored board.",
+      "root_cause": "_classify trusted the stored tier_label; the re-tier fix was applied only to the scored-list endpoint, not the engagement read path (a half-fix).",
+      "guard": "tests/test_engagement_api.py::test_engagement_fit_tier_reresolved_to_current_rubric",
+      "lesson": "A re-resolution must cover ALL read surfaces. Centralize it in one shared helper (_resolve_scored_band) and call it at every seam, not just the one you first noticed."
+    },
+    {
+      "id": "ae-routing-framework-label-vs-key",
+      "date": "2026-06-24",
+      "area": "auto_search/api/app.py _classify + auto_search/engagement/notify.py resolve_ae",
+      "symptom": "The Hot-account AE Slack lead line never fired; resolve_ae returned None for every account, so the whole AE-tag feature was dead on the real path.",
+      "root_cause": "_classify emitted the human framework LABEL ('Health System') but resolve_ae / SPECIALTY_AE are keyed by the raw key ('health_system'); the specialty lookup always missed. Unit tests passed the raw key directly, masking it.",
+      "guard": "tests/test_engagement_notify.py::test_resolve_ae_uses_raw_framework_key_not_label",
+      "lesson": "Never route/look-up on a display label. Carry the raw key (framework_key) for lookups and reserve the label for rendering; test the integration path, not just the pure function with ideal inputs."
     }
   ]
 }

@@ -18,14 +18,14 @@ from dataclasses import dataclass
 POINTS: dict[str, int] = {
     "click": 1,             # email click
     "reply": 6,             # email reply  (≈ TOFU lead)
-    "meeting_booked": 10,   # meeting agreed / booked
+    "meeting_booked": 10,   # SFDC booked meeting (Event Type=Meeting) — agreed/booked
     "podcast_lead": 4,      # podcast listen/download lead (ICP Yes/Maybe)
-    "opportunity": 10,      # SFDC open/won opportunity (≈ BOFU — active deal)
-    "sales_accepted_opportunity": 10,  # SFDC SAO (Qualified_Meeting__c=true ≈ BOFU)
-    "high_intent_lead": 10, # SFDC high-intent inbound lead (contact/sales form ≈ BOFU)
+    "opportunity": 10,      # SFDC open/won opportunity (NOT captured today — see sync.py)
+    "sales_accepted_opportunity": 10,  # SFDC SAO (deprecated — replaced by meeting_booked)
+    "high_intent_lead": 10, # SFDC high-intent inbound lead (contact/sales form = BOFU)
     "tradeshow": 10,        # SFDC tradeshow lead that booked a meeting (Status=Qualified)
-    "low_intent_lead": 2,   # SFDC TOFU content download (LeadSource '… | TOFU') — low intent
-    "linkedin_tofu": 2,     # like/comment on a Magical TOFU LinkedIn ad — low intent (≈ TOFU content)
+    "low_intent_lead": 6,   # SFDC TOFU lead — filled in a TOFU form (LeadSource '… | TOFU')
+    "linkedin_tofu": 6,     # reaction on a Magical TOFU LinkedIn ad → Airtable (TOFU engagement)
 }
 
 # Touches we record for rates + the timeline but that score zero — kept explicit

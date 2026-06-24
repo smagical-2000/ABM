@@ -60,7 +60,7 @@ from auto_search.runtime import is_production
 from auto_search.scoring import budget as budget_guard
 from auto_search.scoring import imports as csv_imports
 from auto_search.scoring import spend_guard
-from auto_search.scoring.frameworks import all_frameworks_public
+from auto_search.scoring.frameworks import FRAMEWORKS, all_frameworks_public, resolve_tier
 from auto_search.scoring.service import ScoringService
 from auto_search.services import DiscoveryStats, PanelCompany, ReviewService
 from auto_search.social import (
@@ -309,14 +309,21 @@ _MAGICAL_TARGET = {
 
 
 def _seed_social_targets(repo) -> None:
-    """Ensure Magical's own account is in the monitored list (idempotent)."""
+    """Ensure Magical's own account + the known competitors are monitored (idempotent).
+    Competitors feed both the social poll and the competitor news monitor; more can
+    be added in-platform via POST /api/social/targets."""
     if not hasattr(repo, "upsert_social_target"):
         return
     try:
+        from auto_search.news.competitors import COMPETITORS
         existing = {normalize_linkedin_url(t.get("linkedin_url"))
                     for t in repo.social_targets()}
-        if normalize_linkedin_url(_MAGICAL_TARGET["linkedin_url"]) not in existing:
-            repo.upsert_social_target(dict(_MAGICAL_TARGET))
+        seeds = [_MAGICAL_TARGET] + [
+            {"linkedin_url": c["linkedin_url"], "label": c.get("label"),
+             "kind": "competitor", "active": True} for c in COMPETITORS]
+        for seed in seeds:
+            if normalize_linkedin_url(seed["linkedin_url"]) not in existing:
+                repo.upsert_social_target(dict(seed))
     except Exception:  # noqa: BLE001 — seeding must never block startup
         logger.exception("social target seed failed")
 
@@ -503,7 +510,7 @@ def create_app() -> FastAPI:
             if c.review_status == "pending":
                 ttl_action, ttl_days = lifecycle.next_transition(
                     icp_status=c.icp_status, tier=it.tier,
-                    last_signal_at=priority.last_signal_at(sigs),
+                    signals=sigs,
                     entered_review_at=c.entered_review_at)
             out.append(c.model_copy(update={
                 "qualify_cost_usd": cost if cost is not None
@@ -532,8 +539,32 @@ def create_app() -> FastAPI:
         for row in rows:
             match = (match_one(index, name=row.get("name"), domain=row.get("domain"))
                      if row.get("source") == "discovery" else None)
-            out.append({**row, "abm_match": match.model_dump() if match else None})
+            out.append(_retier({**row, "abm_match": match.model_dump() if match else None}))
         return out
+
+    def _resolve_scored_band(scored: dict):
+        """The Band a scored row resolves to under TODAY's rubric (so a rubric change
+        renders consistently without a re-score). None when the framework is unknown or
+        the total is missing. `scored['framework']` is the raw key (health_system/…)."""
+        fw = FRAMEWORKS.get((scored or {}).get("framework"))
+        if fw is None or (scored or {}).get("total") is None:
+            return None
+        return resolve_tier(fw, scored["total"], (scored or {}).get("dimensions"))
+
+    def _retier(row: dict) -> dict:
+        """Re-resolve the tier + max_total against the CURRENT framework so accounts
+        scored under an older rubric (e.g. HS 27->30 and the new bands) render
+        consistently without a re-score. Rewrites BOTH the flat keys AND the nested
+        `tier` object the UI actually reads. The stored `total` is unchanged (a true
+        re-score may nudge it for HS, where a dimension max moved). No-op when
+        unresolvable."""
+        band = _resolve_scored_band(row)
+        if band is None:
+            return row
+        fw = FRAMEWORKS[row["framework"]]
+        return {**row, "tier_band": band.band, "tier_label": band.label,
+                "tier": {"band": band.band, "label": band.label},
+                "max_total": fw.max_total}
 
     # ── reads ──────────────────────────────────────────────────────────
 
@@ -640,6 +671,29 @@ def create_app() -> FastAPI:
         _schedule_coro(app, _run())
         return {"started": True}
 
+    @app.post("/api/news/competitors/run")
+    def news_competitors_run():
+        """Scan the monitored competitors for distress / negative press and store
+        the hits as news_items (topic 'Competitor: <name>') with the fast-follower
+        play. Free (Google News RSS); shares the news_running lock."""
+        if getattr(app.state, "news_running", False):
+            return {"started": False, "busy": True}
+        app.state.news_running = True
+
+        async def _run() -> None:
+            from auto_search.news import competitors
+            try:
+                summary = await competitors.run_competitor_news(app.state.repo)
+                app.state.last_competitor_news = {
+                    **summary, "at": datetime.now(UTC).isoformat()}
+            except Exception:  # noqa: BLE001 — never crash the loop
+                logger.exception("competitor news run failed")
+            finally:
+                app.state.news_running = False
+
+        _schedule_coro(app, _run())
+        return {"started": True}
+
     # ── engagement (Reply.io heat) ──────────────────────────────────────────────
 
     # ABM-import artifacts that are sheet/tab names, not classifications — Unclassified.
@@ -667,9 +721,15 @@ def create_app() -> FastAPI:
         fw = (scored or {}).get("framework")
         fw_label = _FRAMEWORK_LABEL.get(fw, fw) if fw else None
         seg = _clean_segment((scored or {}).get("segment") or (abm or {}).get("segment"))
+        # Re-resolve the fit tier against today's rubric (don't trust the stored label,
+        # which is stale after a band change) — keeps the Slack card / Activity view in
+        # step with the Scored board.
+        band = _resolve_scored_band(scored)
+        fit_tier = band.label if band is not None else (scored or {}).get("tier_label")
         return {
             "framework": fw_label,
-            "fit_tier": (scored or {}).get("tier_label"),
+            "framework_key": fw,        # raw key (health_system/…) for AE routing
+            "fit_tier": fit_tier,
             # display class: scored framework label (clean) over a raw lowercase segment
             "segment": fw_label or seg,
         }
@@ -708,9 +768,10 @@ def create_app() -> FastAPI:
         return out
 
     # touches that don't, on their own, make an account worth resurfacing on the
-    # Activity view — a click or a TOFU download isn't "they moved" (mirrors the lean
-    # bar the user/Galyna asked for: a real worklist, not noise).
-    _ACTIVITY_NOISE = frozenset({"click", "low_intent_lead"})
+    # Activity view — an email click isn't "they moved" (mirrors the lean bar the
+    # user/Galyna asked for: a real worklist, not noise). A TOFU form lead now
+    # scores 6 (a real lead), so it surfaces like the other meaningful touches.
+    _ACTIVITY_NOISE = frozenset({"click"})
 
     def _recent_touch_by_account(repo, *, days: int = 14) -> dict[str, dict]:
         """account_id -> the most significant MEANINGFUL touch in the last `days`
@@ -911,9 +972,14 @@ def create_app() -> FastAPI:
             except Exception:  # noqa: BLE001 — never block the activation post
                 logger.exception("activation enrichment failed for %s", account_id)
         app_url = os.getenv("ENGAGEMENT_APP_URL")
+        # Hot accounts tag the AE (owner / specialty fallback) and lead with the
+        # call-to-action + 2 decision-makers; other tiers post the plain card.
+        is_hot = (account.get("tier") == "Hot")
+        ae = engagement_notify.resolve_ae(account) if is_hot else None
         ok = await asyncio.to_thread(
             engagement_notify.activate_account, account, events,
-            dms=dms, research=research, app_url=app_url, test=is_test)
+            dms=dms, research=research, app_url=app_url, ae=ae,
+            dm_limit=(2 if is_hot else 5), test=is_test)
         if not ok:
             raise HTTPException(status_code=502, detail="Slack post failed (check webhook)")
         return {"posted": True, "account_id": account_id, "contacts": dms}
@@ -972,8 +1038,8 @@ def create_app() -> FastAPI:
     async def engagement_linkedin_run(dry_run: bool = True, max_contacts: int | None = None,
                                       max_leads: int | None = None, max_reactions: int = 50):
         """LinkedIn TOFU ad-engagement: scrape post reactions -> drop staff -> ABM-only
-        -> Apollo work email -> dedup. When dry_run=false it also WRITES: SFDC Lead +
-        Reply.io campaign contact + `linkedin_tofu` heat. Awaits and returns the funnel
+        -> Apollo work email -> dedup. When dry_run=false it also WRITES: Airtable upsert
+        + Reply.io campaign contact + `linkedin_tofu` heat. Awaits and returns the funnel
         + would-be/created leads (bounded by max_contacts / max_reactions). Reads the
         committed share_id->category CSV. Shares the one-at-a-time engagement lock."""
         from auto_search.engagement import linkedin_ads, linkedin_ads_runner
@@ -993,14 +1059,11 @@ def create_app() -> FastAPI:
         if not share_categories:
             raise HTTPException(status_code=400, detail="no usable share_ids in the CSV")
 
-        sfdc = reply = None
-        try:
-            from auto_search.engagement.sfdc_client import SalesforceClient
-            sfdc = SalesforceClient()                  # dedup read (+ create when writing)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("SFDC client unavailable: %s", e)
+        airtable = reply = None
         if not dry_run:
+            from auto_search.engagement.airtable_client import AirtableClient
             from auto_search.engagement.replyio_client import ReplyioClient
+            airtable = AirtableClient()                 # the sink (upsert on Email)
             reply = ReplyioClient()
 
         app.state.engagement_running = True
@@ -1008,7 +1071,7 @@ def create_app() -> FastAPI:
             return await linkedin_ads_runner.run(
                 share_categories=share_categories, engagement_repo=repo,
                 scoring_repo=app.state.scoring_repo, discovery_repo=app.state.repo,
-                sfdc_client=sfdc, replyio_client=reply, max_reactions=max_reactions,
+                airtable_client=airtable, replyio_client=reply, max_reactions=max_reactions,
                 max_contacts=max_contacts, max_leads=max_leads, dry_run=dry_run)
         finally:
             app.state.engagement_running = False

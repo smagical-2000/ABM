@@ -27,10 +27,25 @@ class TestFrameworks:
 
     def test_tier_bands(self):
         hs = FRAMEWORKS["health_system"]
-        assert resolve_tier(hs, 25).label == "Tier 1"   # 22-27
-        assert resolve_tier(hs, 16).label == "Tier 2"   # 16-21
-        assert resolve_tier(hs, 11).label == "Tier 3"   # 10-15 (matches MUSC 11/27)
-        assert resolve_tier(hs, 9).label == "Tier 4"    # < 10
+        assert resolve_tier(hs, 28).label == "Tier 1"   # 26-30
+        assert resolve_tier(hs, 22).label == "Tier 2"   # 20-25
+        assert resolve_tier(hs, 15).label == "Tier 3"   # 12-19
+        assert resolve_tier(hs, 9).label == "Tier 4"    # 0-11
+
+    def test_dimension_maxes_sum_to_max_total(self):
+        # Guards against a dimension tweak silently desyncing bands / UI score bars.
+        for fw in FRAMEWORKS.values():
+            assert sum(d.max for d in fw.dimensions) == fw.max_total, fw.key
+
+    def test_specialty_payer_bands(self):
+        # Galyna's review spec: all three frameworks share 26+/20-25/12-19/0-11.
+        for key in ("specialty", "payer"):
+            fw = FRAMEWORKS[key]
+            assert fw.max_total == 30
+            assert resolve_tier(fw, 27).band == "high"    # 26-30
+            assert resolve_tier(fw, 22).band == "medium"   # 20-25
+            assert resolve_tier(fw, 15).band == "low"      # 12-19
+            assert resolve_tier(fw, 5).band == "out"       # 0-11
 
     def test_health_system_auto_tier_4_when_npr_zero(self):
         hs = FRAMEWORKS["health_system"]
@@ -40,7 +55,7 @@ class TestFrameworks:
     def test_public_shape(self):
         pub = frameworks.all_frameworks_public()
         assert set(pub) == {"health_system", "specialty", "payer"}
-        assert pub["health_system"]["max_total"] == 27
+        assert pub["health_system"]["max_total"] == 30
         assert len(pub["health_system"]["dimensions"]) == 6
         assert pub["specialty"]["max_total"] == 30
 
@@ -98,7 +113,7 @@ async def test_score_account_parses_clamps_and_tiers(monkeypatch):
                   firmographics={"Net Patient Revenue": "$1.4B"})
     res = await engine.score_account(acc)
 
-    assert res.framework == "health_system" and res.max_total == 27
+    assert res.framework == "health_system" and res.max_total == 30
     assert {d.key for d in res.dimensions} == {
         "npr", "emr", "competitor", "pain", "ai_readiness", "leadership"}
     ai = next(d for d in res.dimensions if d.key == "ai_readiness")
@@ -173,26 +188,26 @@ def test_apply_qa_corrections_updates_total_and_tier():
     hs = FRAMEWORKS["health_system"]
     score = ScoreResult(
         account_id="rv", framework="health_system", framework_version="v",
-        max_total=27, total=24, tier_band="high", tier_label="Tier 1",
+        max_total=30, total=28, tier_band="high", tier_label="Tier 1",
         dimensions=[
-            Dimension(key="npr", label="Net Patient Revenue", score=10, max=10),
+            Dimension(key="npr", label="Net Patient Revenue", score=12, max=12),
             Dimension(key="emr", label="EMR", score=5, max=5),
             Dimension(key="competitor", label="Competitor", score=4, max=4),
-            Dimension(key="pain", label="Pain", score=3, max=5),
+            Dimension(key="pain", label="Pain", score=5, max=5),
             Dimension(key="ai_readiness", label="AI", score=1, max=2),
-            Dimension(key="leadership", label="Leadership", score=1, max=1),
+            Dimension(key="leadership", label="Leadership", score=1, max=2),
         ],
     )
     qa = QAResult(status="discrepancy", corrections=[
-        QACorrection(dimension="npr", claimed="10/10", found="far smaller", corrected_score=3),
+        QACorrection(dimension="npr", claimed="12/12", found="far smaller", corrected_score=5),
     ])
     apply_qa_corrections(score, qa, hs)
-    assert qa.applied is True and qa.analyst_total == 24
-    assert score.total == 17                       # 24 - 7
-    assert score.tier_label == "Tier 2"            # 17 lands in 16-21
+    assert qa.applied is True and qa.analyst_total == 28
+    assert score.total == 21                       # 28 - 7
+    assert score.tier_label == "Tier 2"            # 21 lands in 20-25
     assert qa.tier_changing is True
-    assert next(d for d in qa.analyst_dimensions if d.key == "npr").score == 10  # snapshot kept
-    assert next(d for d in score.dimensions if d.key == "npr").score == 3        # official corrected
+    assert next(d for d in qa.analyst_dimensions if d.key == "npr").score == 12  # snapshot kept
+    assert next(d for d in score.dimensions if d.key == "npr").score == 5        # official corrected
 
 
 def test_correction_without_corrected_score_does_not_change_total():
@@ -266,11 +281,11 @@ class TestImports:
 async def _fake_hs_score(account, prior=None):
     return ScoreResult(
         account_id=account.account_id, framework="health_system",
-        framework_version="hs-2026.2", max_total=27, total=0,
+        framework_version="hs-2026.3", max_total=30, total=0,
         tier_band="x", tier_label="x", recommendation="ok",
         dimensions=[Dimension(key=k, label=k, score=s, max=m) for k, s, m in [
-            ("npr", 10, 10), ("emr", 5, 5), ("competitor", 3, 4),
-            ("pain", 4, 5), ("ai_readiness", 1, 2), ("leadership", 1, 1)]],
+            ("npr", 12, 12), ("emr", 5, 5), ("competitor", 4, 4),
+            ("pain", 5, 5), ("ai_readiness", 1, 2), ("leadership", 1, 2)]],
     ).clamp()
 
 
@@ -296,7 +311,7 @@ async def test_service_enqueue_score_persist(monkeypatch, tmp_path):
     monkeypatch.setattr(svc_mod.qa, "qa_account", fake_qa)
 
     scored = await svc.run_scoring("acc_beaconhealth")
-    assert scored["state"] == "scored" and scored["total"] == 24
+    assert scored["state"] == "scored" and scored["total"] == 28
     assert scored["cost_usd"] == 0.012                 # QA cost recorded
     assert scored["tier"]["label"] == "Tier 1"        # re-resolved at save time
     assert len(scored["dimensions"]) == 6 and scored["qa"]["status"] == "verified"
@@ -477,7 +492,7 @@ async def test_service_qa_depth_by_tier(monkeypatch, tmp_path):
         async def _s(account, prior=None):
             return ScoreResult(
                 account_id=account.account_id, framework="health_system",
-                framework_version="v", max_total=27, total=0,
+                framework_version="v", max_total=30, total=0,
                 tier_band="x", tier_label="x",
                 dimensions=[Dimension(key=k, label=k, score=s, max=m)
                             for k, s, m in dims]).clamp()
@@ -489,12 +504,12 @@ async def test_service_qa_depth_by_tier(monkeypatch, tmp_path):
         monkeypatch.setattr(svc_mod.engine, "score_account", hs_score(dims))
         return await svc.run_scoring("acc_" + key)
 
-    hi = await score_one("hi", [("npr", 10, 10), ("emr", 5, 5), ("competitor", 4, 4),
-                                ("pain", 5, 5), ("ai_readiness", 2, 2), ("leadership", 1, 1)])   # 27 high
-    med = await score_one("med", [("npr", 10, 10), ("emr", 5, 5), ("competitor", 1, 4),
-                                  ("pain", 1, 5), ("ai_readiness", 1, 2), ("leadership", 0, 1)])  # 18 medium
-    lo = await score_one("lo", [("npr", 10, 10), ("emr", 0, 5), ("competitor", 1, 4),
-                                ("pain", 1, 5), ("ai_readiness", 0, 2), ("leadership", 0, 1)])    # 12 low
+    hi = await score_one("hi", [("npr", 12, 12), ("emr", 5, 5), ("competitor", 4, 4),
+                                ("pain", 5, 5), ("ai_readiness", 2, 2), ("leadership", 2, 2)])   # 30 high
+    med = await score_one("med", [("npr", 12, 12), ("emr", 5, 5), ("competitor", 2, 4),
+                                  ("pain", 2, 5), ("ai_readiness", 1, 2), ("leadership", 0, 2)])  # 22 medium
+    lo = await score_one("lo", [("npr", 12, 12), ("emr", 1, 5), ("competitor", 1, 4),
+                                ("pain", 1, 5), ("ai_readiness", 0, 2), ("leadership", 0, 2)])    # 15 low
 
     assert depths == ["full", "light"]                 # low never calls QA
     assert hi["qa"]["status"] == "verified"

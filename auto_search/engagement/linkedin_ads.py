@@ -4,14 +4,14 @@ People who like (v1) or comment (later) on Magical's sponsored LinkedIn posts ar
 TOFU engagement signal. Each post is tagged with a category (the user maintains a
 `share_id -> category` CSV); the category drives three things:
 
-  1. the heat KIND + points recorded in the engagement table (linkedin_tofu = 2),
+  1. the heat KIND + points recorded in the engagement table (linkedin_tofu = 6, TOFU lead),
   2. the Reply.io campaign the contact is pushed into,
   3. the segment we file the account under.
 
 This module is the single source of truth for those mappings + the small pure
-helpers (category normalization, the CSV loader, the Salesforce Lead payload that
-mirrors the Zapier "Create Lead" step). All I/O — Apify scrape, enrichment, Apollo,
-Reply.io create, SFDC create — lives in the runner, so this stays trivially testable.
+helpers (category normalization, the CSV loader, the Airtable row the contact is
+pushed into). All I/O — Apify scrape, enrichment, Apollo, Reply.io create, Airtable
+upsert — lives in the runner, so this stays trivially testable.
 """
 
 from __future__ import annotations
@@ -110,31 +110,34 @@ def load_share_categories(csv_text: str) -> dict[str, str]:
     return out
 
 
-def build_lead_payload(*, last_name: str, company: str, first_name: str | None = None,
-                       title: str | None = None, phone: str | None = None,
-                       email: str | None = None) -> dict:
-    """Build the Salesforce Lead create body — mirrors the Zapier "Create Lead" step.
+# Airtable column headers in the "LinkedIn <> Airtable" table (base AIRTABLE_BASE_ID).
+# UTM_* are constant for this flow, mirroring the existing TOFU rows in that table.
+_UTM_SOURCE = "linkedin"
+_UTM_MEDIUM = "paid-social"
 
-    Only the fields Zapier populates are set (everything else stays empty / SFDC
-    default). LastName + Company are required by Salesforce. The "Use Assignment
-    Rules: true" toggle is the `Sforce-Auto-Assign: true` request header, applied by
-    the client, not a body field.
+
+def build_airtable_fields(*, email: str, company: str, first_name: str | None = None,
+                          last_name: str | None = None, title: str | None = None,
+                          phone: str | None = None, linkedin_url: str | None = None) -> dict:
+    """Build the Airtable row for the "LinkedIn <> Airtable" table.
+
+    Maps an extracted reactor onto the table's columns. Email is the upsert merge key
+    so it must be present and non-empty. Only non-empty optionals are written (so we
+    never overwrite an existing cell with a blank). UTM_* match the existing TOFU rows.
     """
-    if not (last_name and last_name.strip()):
-        raise ValueError("Salesforce Lead requires a non-empty LastName")
+    if not (email and email.strip()):
+        raise ValueError("Airtable row requires a non-empty Email (the upsert key)")
     if not (company and company.strip()):
-        raise ValueError("Salesforce Lead requires a non-empty Company")
-    body: dict[str, str] = {
-        "LastName": last_name.strip(),
-        "Company": company.strip(),
-        "UTM_Campaign__c": UTM_CAMPAIGN,
+        raise ValueError("Airtable row requires a non-empty Company Name")
+    fields: dict[str, str] = {
+        "Email": email.strip(),
+        "Company Name": company.strip(),
+        "UTM Source": _UTM_SOURCE,
+        "UTM Medium": _UTM_MEDIUM,
+        "UTM Campaign": UTM_CAMPAIGN,
     }
-    if first_name and first_name.strip():
-        body["FirstName"] = first_name.strip()
-    if title and title.strip():
-        body["Title"] = title.strip()
-    if phone and phone.strip():
-        body["Phone"] = phone.strip()
-    if email and email.strip():
-        body["Email"] = email.strip()
-    return body
+    for key, val in (("First Name", first_name), ("Last Name", last_name),
+                     ("Title", title), ("Phone", phone), ("LinkedIn URL", linkedin_url)):
+        if val and str(val).strip():
+            fields[key] = str(val).strip()
+    return fields

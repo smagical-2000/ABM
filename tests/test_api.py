@@ -379,6 +379,30 @@ def _max_out_budget(repo):
         cost_usd=200.0, scored_at=datetime.now(UTC).isoformat()))
 
 
+def test_scored_list_retiers_to_current_rubric(client):
+    """A health-system account scored under the OLD rubric (max 27, Tier 1 at 22)
+    is re-resolved to the CURRENT rubric (max 30, Tier 1 at 26) on read — so existing
+    accounts never show a stale denominator/tier after a rubric change, no re-score."""
+    from datetime import UTC, datetime
+
+    from auto_search.scoring.models import Account, Dimension, ScoreResult
+
+    repo = client.app.state.scoring_repo
+    repo.upsert_account(Account(account_id="acc_hs", name="Old HS", segment="health_system",
+                                framework="health_system", source="discovery"), state="queued")
+    repo.save_score("acc_hs", ScoreResult(
+        account_id="acc_hs", framework="health_system", framework_version="hs-2026.2",
+        dimensions=[Dimension(key="npr", label="NPR", score=8, max=10)],
+        total=24, max_total=27, tier_band="high", tier_label="Tier 1",   # OLD resolution
+        cost_usd=0.1, scored_at=datetime.now(UTC).isoformat()))
+
+    row = {r["account_id"]: r for r in client.get("/api/scored").json()}["acc_hs"]
+    assert row["max_total"] == 30            # denominator matches today's 30-pt rubric
+    assert row["tier_label"] == "Tier 2"     # 24 falls in the new 20-25 band (was Tier 1)
+    # the NESTED tier object is what the UI actually renders — it must agree (C1 guard)
+    assert row["tier"]["label"] == "Tier 2" and row["tier"]["band"] == "medium"
+
+
 class TestBudgetEnforcement:
     """The budget is a rule the server obeys, not just a dashboard number."""
 

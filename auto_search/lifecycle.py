@@ -54,6 +54,27 @@ def watch_ttl_days() -> int:
         return 7
 
 
+# Per-signal Watch TTL (days): a signal's useful life depends on its type. A hire
+# goes stale fast; a leadership change keeps a buying window open for ~a month; M&A
+# / funding / distress signals stay relevant for months. Galyna's review spec
+# (2026-06): hiring 7, CXO changes 30, M&A / shutdown 30+. Hiring (and anything
+# unlisted) uses the env-tunable base watch_ttl_days() (7); the entries below are
+# the longer-lived overrides. A lead stays on Watch until its LONGEST-lived signal
+# expires (see _watch_due), so a fresh M&A keeps it even after its hire cooled.
+_SIGNAL_TTL_DAYS: dict[str, int] = {
+    "leadership_change": 30,   # new exec — buying window stays open ~a month
+    "acquisition": 45,         # M&A — integration plays unfold over months
+    "funding_round": 45,       # fresh capital — spend window stays open
+    "layoff": 45,              # distress / shutdown — RCM-efficiency play persists
+}
+
+
+def ttl_days_for_signal(signal_type: str | None) -> int:
+    """Watch TTL for one signal type, in days. Hiring + unlisted types use the
+    env-tunable base watch_ttl_days(); leadership / M&A / funding / layoff override."""
+    return _SIGNAL_TTL_DAYS.get(signal_type or "", watch_ttl_days())
+
+
 def review_ttl_days() -> int:
     try:
         return max(1, int(os.getenv("DISCOVERY_REVIEW_TTL_DAYS", "7")))
@@ -111,15 +132,31 @@ def _days_until(due: datetime, now: datetime) -> int:
     return math.ceil(secs / 86400) if secs > 0 else 0
 
 
+def _watch_due(signals: list[dict] | None, now: datetime) -> datetime | None:
+    """When a Watch lead drops to Needs-review: the LATEST per-signal expiry,
+    i.e. max over signals of (observed_at + that signal type's TTL). A lead lives
+    until its longest-lived signal goes stale, so a 20-day-old M&A (45d TTL) keeps
+    it even after a 10-day-old hire (7d TTL) has cooled. None = no dated signal."""
+    due: datetime | None = None
+    for s in signals or []:
+        seen = _parse_dt(s.get("observed_at"))
+        if seen is None:
+            continue
+        expiry = seen + timedelta(days=ttl_days_for_signal(s.get("signal_type")))
+        if due is None or expiry > due:
+            due = expiry
+    return due
+
+
 def next_transition(*, icp_status: str | None, tier: str | None,
-                    last_signal_at: datetime | None = None,
+                    signals: list[dict] | None = None,
                     entered_review_at: str | None = None,
                     now: datetime | None = None) -> tuple[str | None, int | None]:
     """The lead's next AUTOMATIC move, for the panel's TTL badge. Lives here so the
     badge can never drift from sweep() — it mirrors the exact same cutoffs:
 
         ("review", n)  a qualified Watch lead drops to Needs review in n days
-                       (signal-age clock: last_signal + WATCH_TTL)
+                       (per-signal clock: latest of observed_at + that type's TTL)
         ("reject", n)  a Needs-review lead auto-rejects in n days
                        (time-in-review clock: entered_review_at + REVIEW_TTL)
         (None, None)   Hot (in-market — never decays), or no clock to show
@@ -130,8 +167,10 @@ def next_transition(*, icp_status: str | None, tier: str | None,
     if tier == "hot":
         return None, None                      # in-market — the sweep never moves it
     now = now or datetime.now(UTC)
-    if icp_status == "qualified" and last_signal_at is not None:
-        return "review", _days_until(last_signal_at + timedelta(days=watch_ttl_days()), now)
+    if icp_status == "qualified":
+        due = _watch_due(signals, now)
+        if due is not None:
+            return "review", _days_until(due, now)
     if icp_status == "needs_review":
         entered = _parse_dt(entered_review_at)
         if entered is not None:
@@ -157,11 +196,12 @@ def sweep(repo, *, now: datetime | None = None, abm_index=None) -> SweepResult:
     """Run one decay/re-heat pass over the discovery repo. Idempotent + safe to
     re-run. Pass `abm_index` so the sweep's Hot matches the panel's Hot."""
     now = now or datetime.now(UTC)
-    watch_cut = now - timedelta(days=watch_ttl_days())
     review_cut = now - timedelta(days=review_ttl_days())
     res = SweepResult()
 
     # Watch -> Needs review: a still-pending qualified lead whose signals went cold.
+    # "Cold" is per-signal now: the lead survives until its longest-lived signal
+    # expires (hire 7d, leadership 30d, M&A/funding/layoff 45d) — see _watch_due.
     for row in repo.panel(statuses=("qualified",)):
         if not _is_pending(row):
             continue
@@ -169,8 +209,8 @@ def sweep(repo, *, now: datetime | None = None, abm_index=None) -> SweepResult:
         if priority.intent(sigs, now=now,
                            abm_confirmed=_abm_confirmed(abm_index, row)).tier == "hot":
             continue                                  # hot stays — it's in-market
-        last = priority.last_signal_at(sigs)
-        if last is None or last >= watch_cut:
+        due = _watch_due(sigs, now)
+        if due is None or due > now:
             continue                                  # still fresh — give it time
         key = row.get("normalized_name")
         if key and repo.enter_needs_review(key) is not None:

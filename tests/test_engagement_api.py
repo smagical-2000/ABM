@@ -68,6 +68,28 @@ def test_get_unknown_account_404(client):
     assert client.get("/api/engagement/nope").status_code == 404
 
 
+def test_engagement_fit_tier_reresolved_to_current_rubric(client):
+    """The Slack card / Activity view must show the fit tier under TODAY's rubric, not
+    the stale stored label (H1 guard), and surface the raw framework_key for AE routing
+    (H2 guard)."""
+    from datetime import UTC, datetime
+
+    from auto_search.scoring.models import Account, Dimension, ScoreResult
+
+    repo = client.app.state.scoring_repo
+    repo.upsert_account(Account(account_id="acc_x", name="Acme", segment="health_system",
+                                framework="health_system", source="discovery"), state="queued")
+    repo.save_score("acc_x", ScoreResult(
+        account_id="acc_x", framework="health_system", framework_version="hs-2026.2",
+        dimensions=[Dimension(key="npr", label="NPR", score=8, max=10)],
+        total=24, max_total=27, tier_band="high", tier_label="Tier 1",   # OLD resolution
+        cost_usd=0.1, scored_at=datetime.now(UTC).isoformat()))
+
+    a = {x["account_id"]: x for x in client.get("/api/engagement").json()["accounts"]}["acc_x"]
+    assert a["fit_tier"] == "Tier 2"               # re-resolved (was stored Tier 1)
+    assert a["framework_key"] == "health_system"   # raw key for AE routing
+
+
 def test_recent_field_picks_meaningful_touch_excludes_noise(tmp_path, monkeypatch):
     """The Activity tab's `recent` field: the most significant MEANINGFUL touch in the
     last 14 days — meeting/lead/SAO over a click, click-only never surfaces, and old

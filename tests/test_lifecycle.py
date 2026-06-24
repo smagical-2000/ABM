@@ -210,6 +210,16 @@ def test_watch_ttl_is_env_tunable(monkeypatch):
     assert lifecycle.sweep(repo, now=NOW).demoted == 1
 
 
+def test_sweep_keeps_aged_ma_signal_longer_than_a_hire():
+    # Per-signal TTL: a lone M&A (not hot on its own) 10 days old stays on Watch
+    # because acquisitions carry a 45d TTL ...
+    acq = {"signal_type": "acquisition", "observed_at": _old(10), "payload": {}}
+    assert lifecycle.sweep(FakeRepo([_row("ma", signals=[acq])]), now=NOW).demoted == 0
+    # ... whereas the same-age hire (7d TTL) ages out to Needs review.
+    assert lifecycle.sweep(
+        FakeRepo([_row("hire", signals=[_job("Biller", days=10)])]), now=NOW).demoted == 1
+
+
 def test_review_ttl_is_env_tunable(monkeypatch):
     monkeypatch.setenv("DISCOVERY_REVIEW_TTL_DAYS", "3")
     # entered 5 days ago: kept under the default 7, rejected under a 3-day review TTL
@@ -228,10 +238,18 @@ def test_next_transition_hot_is_safe():
 
 
 def test_next_transition_watch_counts_down_to_review():
-    # Watch lead, freshest signal 2d old, WATCH_TTL 7 → drops to review in 5d.
-    last = NOW - timedelta(days=2)
+    # Watch lead, a hire 2d old, base TTL 7 → drops to review in 5d.
     assert lifecycle.next_transition(icp_status="qualified", tier="watch",
-                                     last_signal_at=last, now=NOW) == ("review", 5)
+                                     signals=[_job("Biller", days=2)], now=NOW) == ("review", 5)
+
+
+def test_next_transition_uses_longest_lived_signal():
+    # A 20-day-old M&A (45d TTL) keeps the lead even after a 10-day-old hire (7d)
+    # cooled: the badge counts down to the M&A expiry (45-20 = 25d), not the hire.
+    acq = {"signal_type": "acquisition", "observed_at": _old(20), "payload": {}}
+    assert lifecycle.next_transition(
+        icp_status="qualified", tier="watch",
+        signals=[_job("Biller", days=10), acq], now=NOW) == ("review", 25)
 
 
 def test_next_transition_review_counts_down_to_reject():
@@ -249,6 +267,6 @@ def test_next_transition_overdue_is_zero_not_negative():
 def test_next_transition_none_without_a_clock():
     # Qualified but no signal yet, and review with no entry stamp → nothing to show.
     assert lifecycle.next_transition(icp_status="qualified", tier="watch",
-                                     last_signal_at=None, now=NOW) == (None, None)
+                                     signals=None, now=NOW) == (None, None)
     assert lifecycle.next_transition(icp_status="needs_review", tier="watch",
                                      entered_review_at=None, now=NOW) == (None, None)

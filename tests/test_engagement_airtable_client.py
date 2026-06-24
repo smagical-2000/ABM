@@ -67,6 +67,28 @@ async def test_upsert_creates_when_no_match():
 
 
 @pytest.mark.asyncio
+async def test_upsert_escapes_apostrophe_in_merge_value():
+    """A merge value with an apostrophe must produce a VALID Airtable formula (double-
+    quoted literal), not a malformed single-quoted one — else the lookup misses and a
+    duplicate is created. Guards the 2026-06 quote-escaping fix."""
+    seen = {}
+
+    def handler(req):
+        if req.method == "GET":
+            seen["formula"] = req.url.params.get("filterByFormula")
+            return httpx.Response(200, json={"records": [{"id": "recQ"}]})
+        return httpx.Response(200, json={"records": [{"id": "recQ"}]})
+
+    client, http = _client(handler)
+    try:
+        await client.upsert({"Email": "o'brien@x.com", "Company Name": "X"}, merge_on=["Email"])
+    finally:
+        await http.aclose()
+    # double-quoted literal keeps the apostrophe literal; no stray backslash-escape
+    assert seen["formula"] == '{Email}="o\'brien@x.com"'
+
+
+@pytest.mark.asyncio
 async def test_upsert_tolerates_duplicate_rows():
     """The bug guard: when the table already has DUPLICATE rows for the email (e.g. from
     a Clay workflow), upsert must still succeed — it updates the first match, never 422s."""

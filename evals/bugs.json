@@ -144,6 +144,24 @@
       "root_cause": "upsert used Airtable's native performUpsert with fieldsToMergeOn=[Email], which returns HTTP 422 when MORE THAN ONE existing row matches the merge key. A second writer (Clay) had created duplicate Email rows, so the merge could not resolve to one record.",
       "guard": "tests/test_engagement_airtable_client.py::test_upsert_tolerates_duplicate_rows",
       "lesson": "Don't rely on a vendor's merge-on-key upsert when another system also writes the table — it assumes ≤1 match. Do an explicit find-then-update-first-or-create (dup-tolerant), which never 422s and never adds another duplicate. When a 4xx says 'unprocessable', capture the response BODY — 422 means data/semantics rejected, distinct from 401/403 auth."
+    },
+    {
+      "id": "activation-claim-leak-on-pre-post-exception",
+      "date": "2026-06-24",
+      "area": "auto_search/api/app.py engagement_activate (server-side dedup)",
+      "symptom": "An account could get stuck permanently 'already_activated' with no Slack post: claim_activation() inserted the ledger row, but if _engaged_one()/enrichment/resolve threw BEFORE the Slack post, the claim was never released (release only ran on the Slack-failed path). Every future click then returned already_activated with no spend and no post; only force=true could recover it.",
+      "root_cause": "The atomic claim was taken before a block of work that wasn't all under a try/except that releases on failure — only the explicit Slack-post-failed branch released. Any earlier exception leaked the claim.",
+      "guard": "tests/test_engagement_api.py::test_activate_releases_claim_on_slack_failure",
+      "lesson": "When you CLAIM a resource before doing work, the ENTIRE work block (not just the last step) must run under a guard that releases the claim on ANY failure. A claim-before-work pattern needs claim → try/except-release → succeed."
+    },
+    {
+      "id": "airtable-formula-apostrophe-escaping",
+      "date": "2026-06-24",
+      "area": "auto_search/engagement/airtable_client.py _find_id (filterByFormula)",
+      "symptom": "A merge value containing an apostrophe (e.g. o'brien@x.com) built a malformed Airtable formula — the dup-tolerant upsert's lookup would miss the existing row and CREATE a duplicate, defeating the dedup it exists to provide.",
+      "root_cause": "The formula wrapped the value in single quotes and SQL-style-escaped embedded quotes (\\'), which Airtable's formula grammar does not honor.",
+      "guard": "tests/test_engagement_airtable_client.py::test_upsert_escapes_apostrophe_in_merge_value",
+      "lesson": "Each query language has its own string-literal escaping — don't assume SQL rules. Airtable formulas: wrap the literal in DOUBLE quotes and escape only \\ and \"; an apostrophe is then literal. Match the target grammar, not a familiar one."
     }
   ]
 }

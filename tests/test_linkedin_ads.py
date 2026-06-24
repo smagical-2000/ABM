@@ -1,4 +1,9 @@
-"""LinkedIn TOFU ad-engagement — pure config + the orchestrator (mocked I/O)."""
+"""LinkedIn TOFU ad-engagement — pure config + the orchestrator (mocked I/O).
+
+The flow pushes to Airtable (the "LinkedIn <> Airtable" table) + Reply.io and records
+`linkedin_tofu` heat. It does NOT touch Salesforce (downstream Airtable automation
+handles that). Dedup is the profile-id gate + Airtable's upsert-on-Email.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +18,7 @@ from auto_search.engagement.cross import AccountMatch
 
 
 def test_heat_kind_registered():
-    assert scoring.points_for("linkedin_tofu") == 2
+    assert scoring.points_for("linkedin_tofu") == 6
 
 
 def test_category_normalization_and_aliases():
@@ -52,19 +57,22 @@ def test_load_share_categories_requires_columns():
         la.load_share_categories("foo,bar\n1,2\n")
 
 
-def test_build_lead_payload_happy_and_required():
-    p = la.build_lead_payload(last_name="Abm", first_name="Anna", title="VP RCM",
-                              company="ABM Health", phone="+15551112222",
-                              email="anna@abmco.com")
-    assert p == {"LastName": "Abm", "Company": "ABM Health",
-                 "UTM_Campaign__c": "TOFU Engagement Campaign", "FirstName": "Anna",
-                 "Title": "VP RCM", "Phone": "+15551112222", "Email": "anna@abmco.com"}
+def test_build_airtable_fields_happy_and_required():
+    f = la.build_airtable_fields(email="anna@abmco.com", company="ABM Health",
+                                 first_name="Anna", last_name="Abm", title="VP RCM",
+                                 phone="+15551112222", linkedin_url="li/anna2")
+    assert f == {"Email": "anna@abmco.com", "Company Name": "ABM Health",
+                 "UTM Source": "linkedin", "UTM Medium": "paid-social",
+                 "UTM Campaign": "TOFU Engagement Campaign", "First Name": "Anna",
+                 "Last Name": "Abm", "Title": "VP RCM", "Phone": "+15551112222",
+                 "LinkedIn URL": "li/anna2"}
     # optional fields omitted when blank
-    p2 = la.build_lead_payload(last_name="X", company="Y")
-    assert set(p2) == {"LastName", "Company", "UTM_Campaign__c"}
-    for bad in (dict(last_name="", company="Y"), dict(last_name="X", company="  ")):
+    f2 = la.build_airtable_fields(email="x@y.com", company="Y")
+    assert set(f2) == {"Email", "Company Name", "UTM Source", "UTM Medium", "UTM Campaign"}
+    # Email (the upsert key) + Company Name are required
+    for bad in (dict(email="", company="Y"), dict(email="x@y.com", company="  ")):
         with pytest.raises(ValueError):
-            la.build_lead_payload(**bad)
+            la.build_airtable_fields(**bad)
 
 
 def test_post_url():
@@ -97,17 +105,21 @@ class _FakeIndex:
         return None
 
 
-class _FakeSFDC:
-    def __init__(self, existing=()):
-        self.existing = set(existing)
-        self.created: list[dict] = []
+class _FakeAirtable:
+    def __init__(self, fail=False):
+        self.upserts: list[dict] = []
+        self._fail = fail
 
-    def lead_exists(self, email):
-        return email in self.existing
+    async def upsert(self, fields, *, merge_on):
+        if self._fail:
+            raise RuntimeError("airtable 422 unprocessable")
+        self.upserts.append({"fields": fields, "merge_on": merge_on})
+        return {"records": [{"id": "recTEST", "fields": fields}]}
 
-    def create_lead(self, fields, *, assignment_rules=True):
-        self.created.append(fields)
-        return {"id": "00Q_TEST", "success": True}
+    @staticmethod
+    def record_id(resp):
+        recs = (resp or {}).get("records") or []
+        return recs[0].get("id") if recs else None
 
 
 class _FakeReply:
@@ -141,43 +153,47 @@ def patched(monkeypatch):
 async def test_dry_run_makes_no_writes(patched, monkeypatch):
     crossed = []
     monkeypatch.setattr(runner, "cross_and_persist", lambda **kw: crossed.append(kw) or (0, 0))
-    sfdc, reply = _FakeSFDC(existing={"eve@abmco.com"}), _FakeReply()
+    air, reply = _FakeAirtable(), _FakeReply()
 
     out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=None,
                            scoring_repo=None, discovery_repo=None,
-                           sfdc_client=sfdc, replyio_client=reply, dry_run=True)
+                           airtable_client=air, replyio_client=reply, dry_run=True)
 
+    # Anna + Eve are ABM with email; Mag dropped, Carl not-ABM, Dana no-email.
+    # (No SFDC dedup any more, so Eve is no longer skipped.)
     assert out["stats"] == {"scanned": 5, "dropped_magical": 1, "not_abm": 1,
-                            "no_email": 1, "dupe_skipped": 1, "would_create": 1}
+                            "no_email": 1, "would_create": 2}
     # the dry-run guarantee: nothing written anywhere
-    assert sfdc.created == [] and reply.added == [] and crossed == []
+    assert air.upserts == [] and reply.added == [] and crossed == []
     assert out["results"][0]["email"] == "anna@abmco.com"
     assert out["results"][0]["campaign_id"] == 1709709
 
 
-async def test_live_run_creates_one_lead_and_records_heat(patched, monkeypatch):
+async def test_live_run_upserts_and_records_heat(patched, monkeypatch):
     crossed = []
     monkeypatch.setattr(runner, "cross_and_persist",
-                        lambda **kw: crossed.append(kw) or (1, 1))
-    sfdc, reply = _FakeSFDC(existing={"eve@abmco.com"}), _FakeReply()
+                        lambda **kw: crossed.append(kw) or (2, 2))
+    air, reply = _FakeAirtable(), _FakeReply()
 
     out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=object(),
                            scoring_repo=None, discovery_repo=None,
-                           sfdc_client=sfdc, replyio_client=reply, dry_run=False)
+                           airtable_client=air, replyio_client=reply, dry_run=False)
 
-    # exactly one lead + one reply.io contact (Anna); Eve deduped, others filtered
-    assert len(sfdc.created) == 1
-    assert sfdc.created[0]["LastName"] == "Abm"
-    assert sfdc.created[0]["Company"] == "ABM Health"
-    assert sfdc.created[0]["Email"] == "anna@abmco.com"
-    assert sfdc.created[0]["UTM_Campaign__c"] == "TOFU Engagement Campaign"
-    assert len(reply.added) == 1 and reply.added[0]["campaign_id"] == 1709709
-    assert out["results"][0]["sfdc_lead_id"] == "00Q_TEST"
-    # heat recorded once, as a linkedin_tofu event worth 2
+    # two ABM reactors with email (Anna, Eve) → two Airtable upserts + two Reply.io adds
+    assert len(air.upserts) == 2
+    anna = air.upserts[0]["fields"]
+    assert anna["First Name"] == "Anna" and anna["Last Name"] == "Abm"
+    assert anna["Email"] == "anna@abmco.com" and anna["Company Name"] == "ABM Health"
+    assert anna["UTM Campaign"] == "TOFU Engagement Campaign"
+    assert anna["LinkedIn URL"] == "li/anna2"          # enriched URL
+    assert air.upserts[0]["merge_on"] == ["Email"]     # idempotent on email
+    assert len(reply.added) == 2 and reply.added[0]["campaign_id"] == 1709709
+    assert out["results"][0]["airtable_id"] == "recTEST"
+    # heat recorded once for the batch, as linkedin_tofu events worth 6 (TOFU lead)
     assert len(crossed) == 1
     ev = crossed[0]["event_rows"]
-    assert len(ev) == 1 and ev[0]["kind"] == "linkedin_tofu" and ev[0]["points"] == 2
-    assert ev[0]["raw"]["sfdc_lead_id"] == "00Q_TEST"
+    assert len(ev) == 2 and ev[0]["kind"] == "linkedin_tofu" and ev[0]["points"] == 6
+    assert ev[0]["raw"]["airtable_id"] == "recTEST"
     assert ev[0]["raw"]["category"] == "Ortho"
 
 
@@ -185,7 +201,8 @@ async def test_person_who_likes_two_posts_counts_once(patched, monkeypatch):
     monkeypatch.setattr(runner, "cross_and_persist", lambda **kw: (0, 0))
     out = await runner.run(share_categories={"111": "Ortho", "222": "Payers"},
                            engagement_repo=None, scoring_repo=None, discovery_repo=None,
-                           sfdc_client=_FakeSFDC(), replyio_client=_FakeReply(), dry_run=True)
+                           airtable_client=_FakeAirtable(), replyio_client=_FakeReply(),
+                           dry_run=True)
     # same 5 reactors returned for both posts → deduped to 5 scanned, not 10
     assert out["stats"]["scanned"] == 5
 
@@ -193,27 +210,23 @@ async def test_person_who_likes_two_posts_counts_once(patched, monkeypatch):
 # ── regression guards for the deep-QA findings ─────────────────────────
 
 
-async def test_failed_sfdc_create_records_no_heat(patched, monkeypatch):
-    """C1: a Lead create that throws must not push to Reply.io or record heat."""
+async def test_failed_airtable_upsert_records_no_heat(patched, monkeypatch):
+    """C1: an Airtable push that throws must not push to Reply.io or record heat."""
     crossed = []
     monkeypatch.setattr(runner, "cross_and_persist", lambda **kw: crossed.append(kw) or (1, 1))
-
-    class RaisingSFDC(_FakeSFDC):
-        def create_lead(self, fields, *, assignment_rules=True):
-            raise RuntimeError("SFDC 400 duplicate rule")
-
     reply = _FakeReply()
+
     out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=object(),
                            scoring_repo=None, discovery_repo=None,
-                           sfdc_client=RaisingSFDC(existing={"eve@abmco.com"}),
+                           airtable_client=_FakeAirtable(fail=True),
                            replyio_client=reply, dry_run=False)
-    assert out["stats"].get("sfdc_failed") == 1
-    assert reply.added == []          # no campaign push when the lead didn't land
-    assert crossed == []              # no heat persisted for a lead that failed
+    assert out["stats"].get("airtable_failed") == 2   # both ABM leads (Anna, Eve) fail
+    assert reply.added == []          # no campaign push when the row didn't land
+    assert crossed == []              # no heat persisted for a push that failed
 
 
 async def test_already_processed_profile_skipped_before_spend(patched, monkeypatch):
-    """C2: a person already turned into a lead is skipped before the paid enrich."""
+    """C2: a person already pushed is skipped before the paid enrich."""
     enrich_calls: list[str] = []
     base = runner.social_apify.enrich
 
@@ -224,11 +237,12 @@ async def test_already_processed_profile_skipped_before_spend(patched, monkeypat
 
     class Repo:
         def contacts(self):
-            return [{"external_id": "linkedin:pa"}]   # Anna (pid pa) already a lead
+            return [{"external_id": "linkedin:pa"}]   # Anna (pid pa) already pushed
 
     out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=Repo(),
                            scoring_repo=None, discovery_repo=None,
-                           sfdc_client=_FakeSFDC(), replyio_client=_FakeReply(), dry_run=True)
+                           airtable_client=_FakeAirtable(), replyio_client=_FakeReply(),
+                           dry_run=True)
     assert out["stats"].get("already_processed") == 1
     assert "li/anna" not in enrich_calls    # skipped before paying to enrich
     assert all(o["email"] != "anna@abmco.com" for o in out["results"])
@@ -253,7 +267,8 @@ async def test_website_url_domain_normalizes_for_abm(patched, monkeypatch):
     monkeypatch.setattr(runner.apollo, "match_contact", match_url)
     out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=None,
                            scoring_repo=None, discovery_repo=None,
-                           sfdc_client=_FakeSFDC(), replyio_client=_FakeReply(), dry_run=True)
+                           airtable_client=_FakeAirtable(), replyio_client=_FakeReply(),
+                           dry_run=True)
     assert out["stats"].get("would_create") == 1
     assert out["results"][0]["domain"] == "abmco.com"
 
@@ -267,16 +282,16 @@ async def test_enrich_failure_is_isolated(patched, monkeypatch):
     monkeypatch.setattr(runner.social_apify, "enrich", flaky_enrich)
     out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=None,
                            scoring_repo=None, discovery_repo=None,
-                           sfdc_client=_FakeSFDC(existing={"eve@abmco.com"}),
-                           replyio_client=_FakeReply(), dry_run=True)
+                           airtable_client=_FakeAirtable(), replyio_client=_FakeReply(),
+                           dry_run=True)
     assert out["stats"].get("enrich_failed") == 1
     assert out["stats"]["scanned"] == 5      # run still completed every candidate
 
 
 async def test_replyio_409_is_not_a_failure(patched, monkeypatch):
     """A Reply.io 409 (contact already in another sequence) is expected, not a failure;
-    the SFDC Lead + heat still land."""
-    monkeypatch.setattr(runner, "cross_and_persist", lambda **kw: (1, 1))
+    the Airtable upsert + heat still land."""
+    monkeypatch.setattr(runner, "cross_and_persist", lambda **kw: (2, 2))
 
     class Reply409:
         def __init__(self):
@@ -289,12 +304,12 @@ async def test_replyio_409_is_not_a_failure(patched, monkeypatch):
     reply = Reply409()
     out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=object(),
                            scoring_repo=None, discovery_repo=None,
-                           sfdc_client=_FakeSFDC(existing={"eve@abmco.com"}),
-                           replyio_client=reply, dry_run=False)
-    assert out["stats"].get("sfdc_created") == 1
-    assert out["stats"].get("replyio_already_sequenced") == 1
+                           airtable_client=_FakeAirtable(), replyio_client=reply,
+                           dry_run=False)
+    assert out["stats"].get("airtable_upserted") == 2
+    assert out["stats"].get("replyio_already_sequenced") == 2
     assert out["stats"].get("replyio_failed") is None     # 409 is not counted as a failure
-    assert reply.calls == 1
+    assert reply.calls == 2
 
 
 async def test_max_leads_caps_output(patched, monkeypatch):
@@ -314,6 +329,7 @@ async def test_max_leads_caps_output(patched, monkeypatch):
     monkeypatch.setattr(runner.social_apify, "enrich", enrich_two)
     monkeypatch.setattr(runner.apollo, "match_contact", match_two)
     out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=None,
-                           scoring_repo=None, discovery_repo=None, sfdc_client=_FakeSFDC(),
-                           replyio_client=_FakeReply(), dry_run=True, max_leads=1)
+                           scoring_repo=None, discovery_repo=None,
+                           airtable_client=_FakeAirtable(), replyio_client=_FakeReply(),
+                           dry_run=True, max_leads=1)
     assert out["stats"]["would_create"] == 1   # capped at 1, not 2

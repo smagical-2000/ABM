@@ -216,11 +216,11 @@ def test_run_podcast_url_sync_fetches_parses_and_crosses(tmp_path):
 
 
 class _FakeSfdcClient:
-    def __init__(self, leads, tradeshow=None, low_intent=None, sao=None):
+    def __init__(self, leads, tradeshow=None, low_intent=None, meetings=None):
         self._leads = leads
         self._ts = tradeshow or []
         self._lo = low_intent or []
-        self._sao = sao or []
+        self._meetings = meetings or []
 
     def iter_high_intent_leads(self, *, since="2026-01-01"):
         yield from self._leads
@@ -231,8 +231,8 @@ class _FakeSfdcClient:
     def iter_low_intent_leads(self, *, since="2026-01-01"):
         yield from self._lo
 
-    def iter_sales_accepted_opportunities(self, *, since="2026-01-01"):
-        yield from self._sao
+    def iter_meetings(self, *, days=180):
+        yield from self._meetings
 
 
 def _sfdc_leads():
@@ -295,46 +295,47 @@ def test_run_sfdc_sync_includes_low_intent_tofu(tmp_path):
         client=_FakeSfdcClient(_sfdc_leads(), low_intent=low), now="2026-06-14T00:00:00Z")
     assert stats["low_intent_leads"] == 1
     e = next(ev for ev in repo.events_for_account("abm_newporthealthcare") if ev["kind"] == "low_intent_lead")
-    assert e["points"] == 2 and e["channel"] == "content"
-    # Newport: 1 high-intent lead (10) + 1 TOFU content (2) = 12
+    assert e["points"] == 6 and e["channel"] == "content"
+    # Newport: 1 high-intent lead (10) + 1 TOFU form lead (6) = 16
     accts = {a["account_id"]: a for a in repo.engaged_accounts()}
-    assert accts["abm_newporthealthcare"]["score"] == 12
+    assert accts["abm_newporthealthcare"]["score"] == 16
 
 
-def test_run_sfdc_sync_includes_sales_accepted_opportunities(tmp_path):
-    repo = EngagementJsonRepository(path=str(tmp_path / "sfsao.json"))
-    sao = [{"Id": "0061", "Name": "CHRISTUS Deal", "StageName": "Discovery",
-            "IsClosed": False, "IsWon": False, "Amount": 90000.0,
-            "AccountId": "001CH", "Account": {"Name": "CHRISTUS Health",
-                                              "Website": "https://www.christushealth.org/"},
-            "CreatedDate": "2026-05-01T00:00:00.000+0000"}]
+def test_run_sfdc_sync_includes_meetings(tmp_path):
+    repo = EngagementJsonRepository(path=str(tmp_path / "sfmtg.json"))
+    meetings = [{"Id": "00U1", "Subject": "Intro call", "Type": "Meeting",
+                 "AccountId": "001CH", "Account": {"Name": "CHRISTUS Health",
+                                                   "Website": "https://www.christushealth.org/"},
+                 "StartDateTime": "2026-05-01T00:00:00.000+0000",
+                 "CreatedDate": "2026-05-01T00:00:00.000+0000"}]
     stats = sync_mod.run_sfdc_sync(
         engagement_repo=repo, scoring_repo=_FakeScoring(), discovery_repo=_FakeDiscovery(),
-        client=_FakeSfdcClient(_sfdc_leads(), sao=sao), now="2026-06-14T00:00:00Z")
-    assert stats["sales_accepted_opportunities"] == 1
+        client=_FakeSfdcClient(_sfdc_leads(), meetings=meetings), now="2026-06-14T00:00:00Z")
+    assert stats["meetings"] == 1
     e = next(ev for ev in repo.events_for_account("acc_christus")
-             if ev["kind"] == "sales_accepted_opportunity")
-    assert e["points"] == 10 and e["channel"] == "crm"
-    assert e["external_id"] == "crm:sales_accepted_opportunity:acct:001CH"
-    # CHRISTUS: 1 high-intent lead (10) + 1 SAO (10) = 20
+             if ev["kind"] == "meeting_booked")
+    assert e["points"] == 10 and e["channel"] == "meeting"
+    assert e["external_id"] == "meeting:meeting_booked:acct:001CH"
+    # CHRISTUS: 1 high-intent lead (10) + 1 booked meeting (10) = 20
     accts = {a["account_id"]: a for a in repo.engaged_accounts()}
     assert accts["acc_christus"]["score"] == 20
 
 
 def test_run_sfdc_sync_is_idempotent(tmp_path):
     repo = EngagementJsonRepository(path=str(tmp_path / "sf2.json"))
-    # include an SAO so idempotency is proven end-to-end across both id namespaces
-    sao = [{"Id": "0061", "Name": "CHRISTUS Deal", "StageName": "Discovery",
-            "IsClosed": False, "IsWon": False, "AccountId": "001CH",
-            "Account": {"Name": "CHRISTUS Health", "Website": "https://www.christushealth.org/"},
-            "CreatedDate": "2026-05-01T00:00:00.000+0000"}]
+    # include a booked meeting so idempotency is proven across both id namespaces
+    meetings = [{"Id": "00U1", "Subject": "Intro call", "Type": "Meeting",
+                 "AccountId": "001CH", "Account": {"Name": "CHRISTUS Health",
+                                                   "Website": "https://www.christushealth.org/"},
+                 "StartDateTime": "2026-05-01T00:00:00.000+0000",
+                 "CreatedDate": "2026-05-01T00:00:00.000+0000"}]
     first = sync_mod.run_sfdc_sync(
         engagement_repo=repo, scoring_repo=_FakeScoring(), discovery_repo=_FakeDiscovery(),
-        client=_FakeSfdcClient(_sfdc_leads(), sao=sao), now="2026-06-14T00:00:00Z")
+        client=_FakeSfdcClient(_sfdc_leads(), meetings=meetings), now="2026-06-14T00:00:00Z")
     second = sync_mod.run_sfdc_sync(
         engagement_repo=repo, scoring_repo=_FakeScoring(), discovery_repo=_FakeDiscovery(),
-        client=_FakeSfdcClient(_sfdc_leads(), sao=sao), now="2026-06-14T00:00:00Z")
-    # 2 matched leads + 1 SAO persist (unmatched aren't stored); re-sync adds nothing
+        client=_FakeSfdcClient(_sfdc_leads(), meetings=meetings), now="2026-06-14T00:00:00Z")
+    # 2 matched leads + 1 meeting persist (unmatched aren't stored); re-sync adds nothing
     assert first["new_events"] == 3 and second["new_events"] == 0
 
 

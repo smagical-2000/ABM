@@ -84,18 +84,21 @@ def _parse(xml_text: str, topic: str, now: str) -> list[NewsItem]:
     return items
 
 
-async def fetch_all(*, max_per_query: int = 15, timeout: float = 20.0) -> list[NewsItem]:
-    """Pull every topic query, deduped by URL across topics. Resilient: one
-    failing query doesn't sink the rest."""
+async def fetch_queries(queries: dict[str, str], *, max_per_query: int = 15,
+                        recency: str | None = None, timeout: float = 20.0) -> list[NewsItem]:
+    """Pull an arbitrary {topic: query} map from Google News RSS, deduped by URL.
+    Resilient: one failing query doesn't sink the rest. `recency` overrides the
+    default `when:` window (e.g. a tighter window for competitor distress)."""
     now = datetime.now(UTC).isoformat()
+    when = recency or _RECENCY
     out: list[NewsItem] = []
     seen: set[str] = set()
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True,
                                  headers={"User-Agent": _UA}) as client:
-        for topic, query in QUERIES.items():
+        for topic, query in queries.items():
             try:
                 resp = await client.get(
-                    _GOOGLE_NEWS, params={"q": f"{query} when:{_RECENCY}", **_PARAMS})
+                    _GOOGLE_NEWS, params={"q": f"{query} when:{when}", **_PARAMS})
                 resp.raise_for_status()
             except Exception as e:  # noqa: BLE001 — one query must not kill the pull
                 logger.warning("news fetch failed for %s: %s", topic, e)
@@ -105,5 +108,10 @@ async def fetch_all(*, max_per_query: int = 15, timeout: float = 20.0) -> list[N
                     continue
                 seen.add(item.url)
                 out.append(item)
-    logger.info("news: fetched %d unique headlines across %d topics", len(out), len(QUERIES))
+    logger.info("news: fetched %d unique headlines across %d queries", len(out), len(queries))
     return out
+
+
+async def fetch_all(*, max_per_query: int = 15, timeout: float = 20.0) -> list[NewsItem]:
+    """Pull every industry topic query (QUERIES), deduped by URL across topics."""
+    return await fetch_queries(QUERIES, max_per_query=max_per_query, timeout=timeout)

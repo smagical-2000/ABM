@@ -54,7 +54,7 @@ def test_card_signals_are_counts_no_emoji_no_timeline():
     # signals = per-kind counts only; no per-touch rows, no emoji
     card = notify.build_card(_acct(), _events())
     blob = json.dumps(card, ensure_ascii=False)
-    assert "*Signals:* High-intent lead 1 · Podcast 1 · Click 1" in blob
+    assert "*Signals:* BOFU 1 · Podcast 1 · Click 1" in blob
     assert "Recent touches" not in blob               # no per-touch spam
     for emoji in ("🔥", "📝", "👆", "🎙️", "🤝", "🎪"):
         assert emoji not in blob                       # professional, emoji-free
@@ -92,6 +92,52 @@ def test_scheme_less_app_url_adds_no_button():
     # Slack rejects scheme-less button URLs (invalid_blocks) — guard against it
     card = notify.build_card(_acct(), _events(), app_url="example.com/eng")
     assert "Open in console" not in json.dumps(card, ensure_ascii=False)
+
+
+# ── AE routing (Hot account → owner) ────────────────────────────────────────
+
+def test_resolve_ae_owner_with_slack_id_pings():
+    ae = notify.resolve_ae(_acct(framework="health_system"), owner_name="Alykhan Jina",
+                           ids={"Alykhan Jina": "U01"}, by_specialty={})
+    assert ae == "<@U01>"
+
+
+def test_resolve_ae_specialty_fallback_when_no_owner():
+    ae = notify.resolve_ae(_acct(framework="payer"), ids={"Manu Gupta": "U02"},
+                           by_specialty={"payer": "Manu Gupta"})
+    assert ae == "<@U02>"
+
+
+def test_resolve_ae_plain_name_when_no_slack_id():
+    ae = notify.resolve_ae(_acct(), owner_name="Aly J", ids={}, by_specialty={})
+    assert ae == "@Aly J"          # names them, does not ping
+
+
+def test_resolve_ae_none_when_unmapped():
+    assert notify.resolve_ae(_acct(framework="specialty"), ids={}, by_specialty={}) is None
+
+
+def test_resolve_ae_uses_raw_framework_key_not_label():
+    # The engaged-account dict carries the human label in `framework` ("Health System")
+    # and the raw key in `framework_key` — SPECIALTY_AE is keyed by the raw key. Resolve
+    # must use framework_key, or the AE lead line never fires (the H2 regression).
+    acct = {"framework": "Health System", "framework_key": "health_system"}
+    ae = notify.resolve_ae(acct, ids={"Alykhan Jina": "U01"},
+                           by_specialty={"health_system": "Alykhan Jina"})
+    assert ae == "<@U01>"
+
+
+def test_card_ae_lead_line_and_real_ping():
+    card = notify.build_card(_acct(name="Ochsner Health System"), _events(), ae="<@U01>")
+    blob = json.dumps(card, ensure_ascii=False)
+    assert "<@U01> your account *Ochsner Health System* — move to status Hot" in blob
+
+
+def test_card_dm_limit_caps_decision_makers():
+    dms = [{"name": f"P{i}", "title": "VP"} for i in range(5)]
+    card = notify.build_card(_acct(), _events(), dms=dms, dm_limit=2)
+    blob = json.dumps(card, ensure_ascii=False)
+    assert "P0" in blob and "P1" in blob and "P2" not in blob
     assert not any(b.get("type") == "actions" for b in card["blocks"])
 
 

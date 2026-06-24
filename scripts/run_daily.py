@@ -8,6 +8,8 @@
        inbound leads → cross to scored/ABM → heat (idempotent; matched-only)
     4. Podcast leads    (run_engagement_podcast.py)               — read-only published
        CSV → cross to scored/ABM → heat (idempotent; no-ops without PODCAST_CSV_URL)
+    5. Competitor news  (run_competitor_news.py)                  — Google News RSS
+       distress scan on monitored competitors → news_items (fast-follower play)
 
 All legs run every time (one leg's failure never skips the others); the process
 exits non-zero if ANY leg failed, so Railway flags the run. Folding them into one
@@ -34,9 +36,10 @@ def main() -> int:
     social_rc = _run("run_social.py", "--since-hours", "24", "--max-enrich", "100")
     sfdc_rc = _run("run_engagement_sfdc.py", "--since", "2026-01-01")
     podcast_rc = _run("run_engagement_podcast.py")
-    if discovery_rc or social_rc or sfdc_rc or podcast_rc:
+    competitor_rc = _run("run_competitor_news.py")
+    if discovery_rc or social_rc or sfdc_rc or podcast_rc or competitor_rc:
         print(f"\n[run_daily] FAILED — discovery={discovery_rc} social={social_rc} "
-              f"sfdc={sfdc_rc} podcast={podcast_rc}", flush=True)
+              f"sfdc={sfdc_rc} podcast={podcast_rc} competitor={competitor_rc}", flush=True)
         return 1
     print("\n[run_daily] all legs OK", flush=True)
     return 0

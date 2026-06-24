@@ -22,36 +22,42 @@ logger = logging.getLogger(__name__)
 
 # kind -> label (no emoji — the Slack card stays clean/professional)
 _KIND = {
-    "high_intent_lead": "High-intent lead",
-    "meeting_booked": "Meeting",
+    "high_intent_lead": "BOFU",
+    "meeting_booked": "Meeting booked",
     "sales_accepted_opportunity": "Sales accepted opp",
     "opportunity": "Opportunity",
     "reply": "Reply",
     "click": "Click",
     "podcast_lead": "Podcast",
     "tradeshow": "Tradeshow",
-    "low_intent_lead": "TOFU content",
-    "linkedin_tofu": "LinkedIn ad",
+    "low_intent_lead": "TOFU lead (form)",
+    "linkedin_tofu": "TOFU lead (LinkedIn ad)",
 }
 
 
 def build_card(account: dict, events: list[dict], *, dms: list[dict] | None = None,
                research: dict | None = None, app_url: str | None = None,
-               sdr: str | None = None, test: bool = False) -> dict:
+               sdr: str | None = None, ae: str | None = None, dm_limit: int = 5,
+               test: bool = False) -> dict:
     """Build the Slack message (Block Kit) for an activated account. PURE.
 
     `dms` are the enriched decision-makers (name/title/email/phone) — the sales
     packet rendered into the card. `research` is the SDR intel brief (why-now /
     triggers / news / opening angle) from `summarize_research` — reuses data we
-    already have, no extra cost. `sdr` is rendered as PLAIN TEXT (no @-mention →
-    no notification). `test` marks the message as a wiring test.
+    already have, no extra cost. `ae` is the resolved owner reference for the lead
+    line ("<@U…> your account X — move to status Hot"); pass a `<@id>` mention to
+    actually ping, or a plain "@Name" to name them without a notification. `sdr` is
+    rendered as PLAIN TEXT (no @-mention). `test` marks the message as a wiring test.
     """
     name = account.get("name") or account.get("account_id") or "Unknown account"
     tier = account.get("tier") or "—"
     score = account.get("score") or 0
     header = f"[TEST] {name} — {tier}" if test else f"{name} — {tier}"
 
-    bits = [f"*Heat:* {score} pts ({tier})"]
+    bits = []
+    if ae:   # lead line — the AE call to action, tagged when a Slack id is known
+        bits.append(f"{ae} your account *{name}* — move to status {tier}")
+    bits.append(f"*Heat:* {score} pts ({tier})")
     breakdown = _breakdown(events)
     if breakdown:
         bits.append(f"*Signals:* {breakdown}")
@@ -77,7 +83,7 @@ def build_card(account: dict, events: list[dict], *, dms: list[dict] | None = No
         blocks.append({"type": "section",
                        "text": {"type": "mrkdwn", "text": "*Account intel*\n" + intel}})
 
-    dm_lines = _dm_lines(dms)
+    dm_lines = _dm_lines(dms, limit=dm_limit)
     if dm_lines:
         blocks.append({"type": "section",
                        "text": {"type": "mrkdwn", "text": "*Decision-makers*\n" + dm_lines}})
@@ -112,13 +118,61 @@ def post_card(payload: dict, *, webhook: str | None = None,
 
 def activate_account(account: dict, events: list[dict], *, dms: list[dict] | None = None,
                      research: dict | None = None, app_url: str | None = None,
-                     sdr: str | None = None, test: bool = False,
-                     webhook: str | None = None, http: httpx.Client | None = None) -> bool:
+                     sdr: str | None = None, ae: str | None = None, dm_limit: int = 5,
+                     test: bool = False, webhook: str | None = None,
+                     http: httpx.Client | None = None) -> bool:
     """Build + post the activation card (with enriched decision-makers + intel brief).
     Returns True if Slack accepted it."""
     return post_card(build_card(account, events, dms=dms, research=research,
-                                app_url=app_url, sdr=sdr, test=test),
+                                app_url=app_url, sdr=sdr, ae=ae, dm_limit=dm_limit,
+                                test=test),
                      webhook=webhook, http=http)
+
+
+# ── AE routing (Hot account → owner) ─────────────────────────────────────────
+# Two operator-maintained maps, both env-driven so they change without a deploy:
+#   AE_SLACK_IDS   "Alykhan Jina=U01ABC;Manu Gupta=U02DEF"   (name -> Slack member id)
+#   SPECIALTY_AE   "health_system=Alykhan Jina;payer=Manu Gupta;specialty=…"
+# SFDC account owner (when known) wins over the specialty fallback. Without a Slack
+# id we render a PLAIN "@Name" (names them, does not ping) — fill AE_SLACK_IDS to ping.
+
+
+def _parse_pairs(raw: str | None) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for pair in (raw or "").split(";"):
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            if k.strip() and v.strip():
+                out[k.strip()] = v.strip()
+    return out
+
+
+def ae_slack_ids() -> dict[str, str]:
+    return _parse_pairs(os.getenv("AE_SLACK_IDS"))
+
+
+def specialty_ae() -> dict[str, str]:
+    return _parse_pairs(os.getenv("SPECIALTY_AE"))
+
+
+def resolve_ae(account: dict, *, owner_name: str | None = None,
+               ids: dict[str, str] | None = None,
+               by_specialty: dict[str, str] | None = None) -> str | None:
+    """Owner reference for the lead line, or None if we can't name one.
+
+    Prefer the SFDC account owner; else fall back to the AE assigned to the
+    account's framework (health_system / specialty / payer). Returns a `<@id>`
+    Slack mention when the id is known (a real ping), else a plain "@Name"."""
+    ids = ids or ae_slack_ids()
+    by_specialty = by_specialty if by_specialty is not None else specialty_ae()
+    # `framework_key` is the raw rubric key (health_system/specialty/payer); fall back to
+    # `framework` for callers that pass the raw key directly. SPECIALTY_AE is keyed by it.
+    fw_key = account.get("framework_key") or account.get("framework") or ""
+    name = (owner_name or "").strip() or by_specialty.get(fw_key)
+    if not name:
+        return None
+    sid = ids.get(name)
+    return f"<@{sid}>" if sid else f"@{name}"
 
 
 def _dm_lines(dms: list[dict] | None, *, limit: int = 5) -> str:

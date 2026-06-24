@@ -75,6 +75,7 @@ window.API = {
   engagementInbox: () => http('/api/engagement/inbox'),
   engagementAccount: (id) => http(`/api/engagement/${encodeURIComponent(id)}`),
   syncEngagement: () => http('/api/engagement/sync', { method: 'POST' }),
+  syncLinkedinTofu: (dryRun = false) => http(`/api/engagement/linkedin/run?dry_run=${dryRun}`, { method: 'POST' }),
   activateEngagement: (id) => http(`/api/engagement/${encodeURIComponent(id)}/activate`, { method: 'POST' }),
 
   // ── watch list: lone-standard-hire leads kept out of Discovery ──────────────

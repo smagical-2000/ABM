@@ -493,6 +493,7 @@ function EngagementView({ pushToast }){
   const [activating,setActivating]=useState(null);
   const [segFilter,setSegFilter]=useState('all');
   const [syncing,setSyncing]=useState(false);
+  const [syncingLi,setSyncingLi]=useState(false);
   // Auto-activate: when on, every Hot account is activated once (enriched + posted
   // to Slack), deduped via localStorage so it never re-posts. Mirrors auto-score.
   const [autoActivate,setAutoActivate]=useState(()=>localStorage.getItem('autoActivateEnabled')==='1');
@@ -514,6 +515,11 @@ function EngagementView({ pushToast }){
   function sync(){ setSyncing(true); pushToast&&pushToast('Syncing Reply.io engagement…','muted');
     window.API.syncEngagement().then(()=>setTimeout(()=>load().finally(()=>{ setSyncing(false); pushToast&&pushToast('Engagement synced','success'); }),4000))
       .catch(e=>{ setSyncing(false); pushToast&&pushToast(`Sync failed: ${e.message}`,'danger'); }); }
+  function syncLinkedin(){ setSyncingLi(true); pushToast&&pushToast('Scraping LinkedIn ad reactions…','muted');
+    window.API.syncLinkedinTofu().then(r=>{
+      const n=r&&r.stats?`${r.stats.leads_created||0} leads`:'done';
+      return load().finally(()=>{ setSyncingLi(false); pushToast&&pushToast(`LinkedIn TOFU synced — ${n}`,'success'); });
+    }).catch(e=>{ setSyncingLi(false); pushToast&&pushToast(`LinkedIn sync failed: ${e.message}`,'danger'); }); }
   function handleActivate(a){ setActivating(null); setOpen(null);
     pushToast&&pushToast(`Enriching ${a.name} + posting to Slack…`,'muted');
     window.API.activateEngagement(a.id).then(r=>{
@@ -579,7 +585,10 @@ function EngagementView({ pushToast }){
               style={{display:'inline-flex',alignItems:'center',gap:6,borderRadius:8,background:'#fff',border:'1px solid #e4e4e7',padding:'8px 14px',fontFamily:'var(--font-sans)',fontSize:13,fontWeight:600,color:'#3f3f46',cursor:'pointer'}}>
               <Icon name="ext" size={15}/>Export CSV
             </button>
-            <button onClick={sync} disabled={syncing} style={{display:'inline-flex',alignItems:'center',gap:7,borderRadius:8,background:'#4f46e5',border:'none',padding:'8px 14px',fontFamily:'var(--font-sans)',fontSize:13,fontWeight:600,color:'#fff',cursor:'pointer',boxShadow:'0 1px 2px rgba(24,24,27,.05)',opacity:syncing?.6:1}}>
+            <button onClick={syncLinkedin} disabled={syncingLi||syncing} style={{display:'inline-flex',alignItems:'center',gap:7,borderRadius:8,background:'#fff',border:'1px solid #4f46e5',padding:'8px 14px',fontFamily:'var(--font-sans)',fontSize:13,fontWeight:600,color:'#4f46e5',cursor:'pointer',opacity:syncingLi?.6:1}}>
+              <Icon name="refresh" size={15} className={syncingLi?'spin':''}/>{syncingLi?'Syncing LinkedIn…':'Sync LinkedIn'}
+            </button>
+            <button onClick={sync} disabled={syncing||syncingLi} style={{display:'inline-flex',alignItems:'center',gap:7,borderRadius:8,background:'#4f46e5',border:'none',padding:'8px 14px',fontFamily:'var(--font-sans)',fontSize:13,fontWeight:600,color:'#fff',cursor:'pointer',boxShadow:'0 1px 2px rgba(24,24,27,.05)',opacity:syncing?.6:1}}>
               <Icon name="refresh" size={15} className={syncing?'spin':''}/>{syncing?'Syncing…':'Sync'}
             </button>
           </div>

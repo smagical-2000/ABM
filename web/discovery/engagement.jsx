@@ -527,15 +527,19 @@ function EngagementView({ pushToast }){
       pushToast&&pushToast(`Activated ${a.name} — posted to Slack${n?` with ${n} contact${n===1?'':'s'}`:''}`,'success');
     }).catch(e=>pushToast&&pushToast(`Activate failed: ${e.message}`,'danger')); }
 
-  // Auto-activate Hot accounts (once each) when the toggle is on. Sequential so we
-  // don't hammer Slack/enrichment; deduped in localStorage so re-renders don't re-post.
+  // Auto-activate Hot + Warm accounts (once each) when the toggle is on.
+  // Hot → AE tagged + enrichment; Warm → SDR tagged, no enrichment.
+  // Sequential so we don't hammer Slack; deduped in localStorage.
   useEffect(()=>{
     if(!autoActivate || !accounts.length || autoRef.current) return;
     let done; try{ done=new Set(JSON.parse(localStorage.getItem('engagementActivated')||'[]')); }catch(_e){ done=new Set(); }
-    const todo=accounts.filter(a=>tierOf(a.score)==='Hot' && !done.has(a.id));
+    const routable=new Set(['Hot','Warm']);
+    const todo=accounts.filter(a=>routable.has(tierOf(a.score)) && !done.has(a.id));
     if(!todo.length) return;
     autoRef.current=true;
-    pushToast&&pushToast(`Auto-activating ${todo.length} Hot account${todo.length===1?'':'s'}…`,'muted');
+    const hot=todo.filter(a=>tierOf(a.score)==='Hot').length;
+    const warm=todo.filter(a=>tierOf(a.score)==='Warm').length;
+    pushToast&&pushToast(`Auto-routing: ${hot} Hot → AE, ${warm} Warm → SDR…`,'muted');
     (async()=>{
       for(const a of todo){
         try{
@@ -545,7 +549,7 @@ function EngagementView({ pushToast }){
         }catch(_e){ /* leave for the next cycle */ }
       }
       autoRef.current=false;
-      pushToast&&pushToast('Auto-activation complete','success');
+      pushToast&&pushToast('Auto-routing complete','success');
     })();
   },[accounts,autoActivate]);
 
@@ -574,12 +578,12 @@ function EngagementView({ pushToast }){
             <p style={{margin:'5px 0 0',fontSize:14,color:'#71717a',maxWidth:640}}>Buyer intent across email, podcast &amp; Salesforce — matched to your accounts, ranked by heat.{lastSync&&lastSync.last_synced_at?` Synced ${relTime(lastSync.last_synced_at)}.`:''}</p>
           </div>
           <div style={{display:'flex',alignItems:'center',gap:12}}>
-            <label title="Auto-activate every Hot account (enrich + post to Slack), once each"
+            <label title="Auto-route: Hot → AE (enrich + Slack), Warm → SDR (Slack only)"
               style={{display:'inline-flex',alignItems:'center',gap:7,fontSize:13,color:'#3f3f46',cursor:'pointer',userSelect:'none'}}>
               <span onClick={()=>setAutoActivate(v=>!v)} style={{position:'relative',width:34,height:20,borderRadius:999,background:autoActivate?'#10b981':'#e4e4e7',transition:'background .15s',flexShrink:0}}>
                 <span style={{position:'absolute',top:2,left:autoActivate?16:2,width:16,height:16,borderRadius:'50%',background:'#fff',boxShadow:'0 1px 2px rgba(0,0,0,.2)',transition:'left .15s'}}/>
               </span>
-              Auto-activate Hot
+              Auto-route
             </label>
             <button onClick={()=>{window.location.href='/api/engagement/export.csv';}}
               style={{display:'inline-flex',alignItems:'center',gap:6,borderRadius:8,background:'#fff',border:'1px solid #e4e4e7',padding:'8px 14px',fontFamily:'var(--font-sans)',fontSize:13,fontWeight:600,color:'#3f3f46',cursor:'pointer'}}>

@@ -129,9 +129,15 @@ def test_recent_field_picks_meaningful_touch_excludes_noise(tmp_path, monkeypatc
 
 def test_activate_test_mode_skips_enrichment_credit_safety(client, monkeypatch):
     """Credit-safety gate: a {"test": true} activation must NOT enrich (no Apollo/
-    FullEnrich spend); a real activation enriches once. Slack is stubbed out."""
+    FullEnrich spend); a real Hot activation enriches once. Slack is stubbed out."""
     from auto_search.db.scoring_repository import ScoringJsonRepository
     from auto_search.engagement import enrichment, notify
+
+    # Push acc_x to Hot (fixture has 16 = Warm; add a BOFU event → 26 = Hot)
+    repo = client.app.state.engagement_repo
+    repo.add_event({"external_id": "sfdc:bofu:1", "kind": "high_intent_lead",
+                    "channel": "sfdc", "points": 10, "contact_ext": "1",
+                    "account_id": "acc_x", "occurred_at": "2026-06-12T00:00:00+00:00"})
 
     calls = []
 
@@ -150,8 +156,39 @@ def test_activate_test_mode_skips_enrichment_credit_safety(client, monkeypatch):
     assert calls == []                       # test post spent zero enrichment credits
 
     r2 = client.post("/api/engagement/acc_x/activate", json={})
-    assert r2.status_code == 200 and calls == ["acme.com"]   # real activation enriched once
+    assert r2.status_code == 200 and calls == ["acme.com"]   # Hot activation enriched once
     assert r2.json()["contacts"][0]["email"] == "x@acme.com"
+
+
+def test_warm_activation_routes_to_sdr_no_enrichment(client, monkeypatch):
+    """Warm accounts route to the SDR (not AE) and skip enrichment (no credits spent)."""
+    from auto_search.engagement import enrichment, notify
+
+    enrich_calls = []
+
+    async def fake_enrich(domain, *, company=None):
+        enrich_calls.append(domain)
+        return [{"name": "X", "title": "VP", "email": "x@x.com", "phone": None}]
+
+    activate_kwargs = {}
+
+    def capture_activate(*_args, **kw):
+        activate_kwargs.update(kw)
+        return True
+
+    monkeypatch.setattr(enrichment, "enrich_account", fake_enrich)
+    monkeypatch.setattr(notify, "activate_account", capture_activate)
+    monkeypatch.setattr(notify, "resolve_sdr",
+                        lambda acct, **_kw: "@Ben Davies")
+    monkeypatch.setattr(notify, "resolve_ae", lambda acct, **_kw: None)
+
+    # The fixture seeds acc_x with reply(6) + meeting_booked(10) = 16 → Warm
+    r = client.post("/api/engagement/acc_x/activate", json={})
+    assert r.status_code == 200
+    assert r.json()["routed_to"] == "@Ben Davies"
+    assert enrich_calls == []          # Warm = no enrichment spend
+    assert activate_kwargs["ae"] == "@Ben Davies"
+    assert activate_kwargs["dm_limit"] == 0
 
 
 def test_export_csv_has_header_and_rows(client):

@@ -961,10 +961,14 @@ def create_app() -> FastAPI:
             research = engagement_notify.summarize_research(scored)
         except Exception:  # noqa: BLE001 — intel is optional; activation must not 500
             logger.exception("intel brief failed for %s", account_id)
-        # enrich (paid) — only on a real activation; a {"test": true} wiring post
-        # never spends credits. Degrades to [] on any failure.
+        tier = account.get("tier") or "—"
+        is_hot = tier == "Hot"
+        is_warm = tier == "Warm"
+        # Enrich (paid) — only Hot activations spend enrichment credits.
+        # Warm/Some get notified but NOT enriched (saves Apollo/FullEnrich spend).
+        # A {"test": true} post never spends credits.
         dms: list[dict] = []
-        if account.get("domain") and not is_test:
+        if is_hot and account.get("domain") and not is_test:
             from auto_search.engagement import enrichment
             try:
                 dms = await enrichment.enrich_account(account["domain"],
@@ -972,17 +976,20 @@ def create_app() -> FastAPI:
             except Exception:  # noqa: BLE001 — never block the activation post
                 logger.exception("activation enrichment failed for %s", account_id)
         app_url = os.getenv("ENGAGEMENT_APP_URL")
-        # Hot accounts tag the AE (owner / specialty fallback) and lead with the
-        # call-to-action + 2 decision-makers; other tiers post the plain card.
-        is_hot = (account.get("tier") == "Hot")
+        # Tier-based routing:
+        #   Hot  → AE tagged, enriched contacts, 2 DMs
+        #   Warm → SDR tagged, no enrichment, no DMs
         ae = engagement_notify.resolve_ae(account) if is_hot else None
+        sdr_mention = engagement_notify.resolve_sdr(account) if is_warm else None
+        owner = ae or sdr_mention
         ok = await asyncio.to_thread(
             engagement_notify.activate_account, account, events,
-            dms=dms, research=research, app_url=app_url, ae=ae,
-            dm_limit=(2 if is_hot else 5), test=is_test)
+            dms=dms, research=research, app_url=app_url, ae=owner,
+            dm_limit=(2 if is_hot else 0), test=is_test)
         if not ok:
             raise HTTPException(status_code=502, detail="Slack post failed (check webhook)")
-        return {"posted": True, "account_id": account_id, "contacts": dms}
+        return {"posted": True, "account_id": account_id, "contacts": dms,
+                "routed_to": owner}
 
     @app.post("/api/engagement/sync")
     def engagement_sync(since: str = "2026-01-01", max_contacts: int | None = None):

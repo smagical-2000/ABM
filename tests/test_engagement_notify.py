@@ -146,6 +146,40 @@ def test_post_card_no_webhook_returns_false(monkeypatch):
     assert notify.post_card({"text": "x"}) is False
 
 
+# ── SDR routing (Warm account → SDR) ────────────────────────────────────────
+
+def test_resolve_sdr_specialty_with_slack_id():
+    sdr = notify.resolve_sdr(_acct(framework_key="health_system"),
+                             ids={"Ben Davies": "U10"},
+                             by_specialty={"health_system": "Ben Davies"})
+    assert sdr == "<@U10>"
+
+
+def test_resolve_sdr_plain_name_when_no_slack_id():
+    sdr = notify.resolve_sdr(_acct(framework_key="payer"),
+                             ids={}, by_specialty={"payer": "Gabriel"})
+    assert sdr == "@Gabriel"
+
+
+def test_resolve_sdr_none_when_unmapped():
+    assert notify.resolve_sdr(_acct(framework_key="specialty"),
+                              ids={}, by_specialty={}) is None
+
+
+def test_resolve_sdr_uses_framework_key_not_label():
+    acct = {"framework": "Health System", "framework_key": "health_system"}
+    sdr = notify.resolve_sdr(acct, ids={"Ben Davies": "U10"},
+                             by_specialty={"health_system": "Ben Davies"})
+    assert sdr == "<@U10>"
+
+
+def test_card_sdr_lead_line_for_warm():
+    card = notify.build_card(_acct(name="Baptist Health", tier="Warm", score=14),
+                             _events(), ae="@Ben Davies")
+    blob = json.dumps(card, ensure_ascii=False)
+    assert "@Ben Davies your account *Baptist Health* — move to status Warm" in blob
+
+
 # ── SDR intel brief (deep-research Option 1) ─────────────────────────────────
 
 

@@ -175,6 +175,29 @@ def resolve_ae(account: dict, *, owner_name: str | None = None,
     return f"<@{sid}>" if sid else f"@{name}"
 
 
+def sdr_slack_ids() -> dict[str, str]:
+    return _parse_pairs(os.getenv("SDR_SLACK_IDS"))
+
+
+def specialty_sdr() -> dict[str, str]:
+    return _parse_pairs(os.getenv("SPECIALTY_SDR"))
+
+
+def resolve_sdr(account: dict, *, ids: dict[str, str] | None = None,
+                by_specialty: dict[str, str] | None = None) -> str | None:
+    """SDR reference for Warm/Some accounts, or None if we can't name one.
+
+    Same logic as `resolve_ae` but reads SPECIALTY_SDR + SDR_SLACK_IDS."""
+    ids = ids or sdr_slack_ids()
+    by_specialty = by_specialty if by_specialty is not None else specialty_sdr()
+    fw_key = account.get("framework_key") or account.get("framework") or ""
+    name = by_specialty.get(fw_key)
+    if not name:
+        return None
+    sid = ids.get(name)
+    return f"<@{sid}>" if sid else f"@{name}"
+
+
 def _dm_lines(dms: list[dict] | None, *, limit: int = 5) -> str:
     """Up to `limit` decision-makers: '• *Jane Doe* — VP Revenue Cycle\\n   jane@x.com · +1…'."""
     out = []

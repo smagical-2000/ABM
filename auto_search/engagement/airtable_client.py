@@ -1,9 +1,11 @@
 """Airtable client — the ONE write the LinkedIn TOFU flow makes.
 
-`upsert` creates-or-updates a row in a base/table, merging on a key field (Email)
-so an hourly re-run of the same person updates the row instead of duplicating it.
-Mirrors the Reply.io client's transport: async httpx, Bearer auth, retry/backoff on
-429 / 5xx (honoring Retry-After). No reads — this flow only pushes.
+`upsert` creates-or-updates a row in a base/table, matching on a key field (Email)
+so a re-run of the same person updates the row instead of duplicating it. It looks
+the row up first and updates the first match (or creates one) — dup-tolerant, because
+another tool (e.g. a Clay workflow) may have already left duplicate rows that would
+break Airtable's native merge-on-key upsert (422). Mirrors the Reply.io client's
+transport: async httpx, Bearer auth, retry/backoff on 429 / 5xx (honoring Retry-After).
 
 Base + table default to AIRTABLE_BASE_ID / AIRTABLE_LINKEDIN_TABLE; the token to
 AIRTABLE_API_KEY (a Personal Access Token with data.records:write). Use the table
@@ -57,18 +59,35 @@ class AirtableClient:
                 "Content-Type": "application/json"}
 
     async def upsert(self, fields: dict, *, merge_on: list[str]) -> dict:
-        """Create-or-update one row, merging on `merge_on` (e.g. ["Email"]). WRITE.
+        """Create-or-update one row, matching on `merge_on` (e.g. ["Email"]). WRITE.
 
-        PATCH the table with `performUpsert.fieldsToMergeOn` — Airtable matches on
-        those fields and updates the row if found, else creates it. `typecast` lets
-        Airtable coerce string values into the column types. Returns the API json
-        (records carry their `id` + whether they were created/updated)."""
-        body = {
-            "performUpsert": {"fieldsToMergeOn": list(merge_on)},
-            "records": [{"fields": fields}],
-            "typecast": True,
-        }
-        return await self._send("PATCH", body)
+        Dup-tolerant: looks the row up by the merge fields and UPDATES the first match
+        (PATCH by record id), else CREATES one. We deliberately do NOT use Airtable's
+        native `performUpsert` — it returns 422 when MORE THAN ONE existing row matches
+        the merge key, which happens whenever another tool (e.g. a Clay workflow) also
+        writes this table. Finding + updating the first match never 422s and never adds
+        another duplicate. `typecast` coerces strings into the column types."""
+        rec_id = await self._find_id(fields, merge_on)
+        if rec_id:
+            return await self._send("PATCH",
+                                    {"records": [{"id": rec_id, "fields": fields}],
+                                     "typecast": True})
+        return await self._send("POST", {"records": [{"fields": fields}], "typecast": True})
+
+    async def _find_id(self, fields: dict, merge_on: list[str]) -> str | None:
+        """First record id matching ALL merge fields, or None. Read-only."""
+        import urllib.parse
+
+        def esc(v: object) -> str:
+            return str(v).replace("\\", "\\\\").replace("'", "\\'")
+
+        clauses = [f"{{{k}}}='{esc(fields.get(k, ''))}'" for k in merge_on]
+        formula = clauses[0] if len(clauses) == 1 else "AND(" + ",".join(clauses) + ")"
+        qs = urllib.parse.urlencode({"filterByFormula": formula, "maxRecords": "1",
+                                     "fields[]": merge_on[0]})
+        data = await self._send("GET", url=f"{self._url}?{qs}")
+        recs = (data or {}).get("records") or []
+        return recs[0]["id"] if recs else None
 
     async def create(self, fields: dict) -> dict:
         """Create one row unconditionally (no merge key, e.g. an emailless row)."""
@@ -81,16 +100,19 @@ class AirtableClient:
         recs = (resp or {}).get("records") or []
         return recs[0].get("id") if recs else None
 
-    async def _send(self, method: str, body: dict) -> dict:
+    async def _send(self, method: str, body: dict | None = None, *,
+                    url: str | None = None) -> dict:
+        target = url or self._url
+        kwargs: dict = {"headers": self._headers}
+        if body is not None:
+            kwargs["json"] = body
         resp = None
         for attempt in range(1, _MAX_RETRIES + 1):
             if self._http is not None:
-                resp = await self._http.request(method, self._url, headers=self._headers,
-                                                json=body)
+                resp = await self._http.request(method, target, **kwargs)
             else:
                 async with httpx.AsyncClient(timeout=self._timeout) as client:
-                    resp = await client.request(method, self._url, headers=self._headers,
-                                                json=body)
+                    resp = await client.request(method, target, **kwargs)
             if (resp.status_code == 429 or resp.status_code >= 500) and attempt < _MAX_RETRIES:
                 wait = _retry_after(resp, attempt)
                 logger.warning("airtable %s -> %s; backoff %.2fs (try %d/%d)",

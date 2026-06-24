@@ -17,14 +17,16 @@ def _client(handler):
 
 
 @pytest.mark.asyncio
-async def test_upsert_request_shape_and_record_id():
-    captured = {}
+async def test_upsert_updates_existing_match_by_id():
+    """upsert finds the row by Email (GET) then UPDATES the first match by record id
+    (PATCH) — no performUpsert (which 422s on duplicate rows)."""
+    calls = []
 
     def handler(req: httpx.Request) -> httpx.Response:
-        captured["method"] = req.method
-        captured["path"] = req.url.path
-        captured["auth"] = req.headers["Authorization"]
-        captured["body"] = _json.loads(req.content)
+        calls.append(req)
+        if req.method == "GET":
+            assert "filterByFormula" in req.url.query.decode()
+            return httpx.Response(200, json={"records": [{"id": "recABC"}]})
         return httpx.Response(200, json={"records": [{"id": "recABC", "fields": {}}]})
 
     client, http = _client(handler)
@@ -33,13 +35,52 @@ async def test_upsert_request_shape_and_record_id():
                                   merge_on=["Email"])
     finally:
         await http.aclose()
-    assert captured["method"] == "PATCH"
-    assert captured["path"] == "/v0/appTEST/tblTEST"
-    assert captured["auth"] == "Bearer key-123"
-    assert captured["body"]["performUpsert"]["fieldsToMergeOn"] == ["Email"]
-    assert captured["body"]["records"][0]["fields"]["Email"] == "a@b.com"
-    assert captured["body"]["typecast"] is True
+    assert [c.method for c in calls] == ["GET", "PATCH"]
+    patch = _json.loads(calls[1].content)
+    assert "performUpsert" not in patch                 # never the brittle native upsert
+    assert patch["records"][0]["id"] == "recABC"        # update by id
+    assert patch["records"][0]["fields"]["Email"] == "a@b.com"
+    assert patch["typecast"] is True
+    assert calls[1].headers["Authorization"] == "Bearer key-123"
     assert AirtableClient.record_id(res) == "recABC"
+
+
+@pytest.mark.asyncio
+async def test_upsert_creates_when_no_match():
+    """No existing row → CREATE (POST)."""
+    calls = []
+
+    def handler(req):
+        calls.append(req)
+        if req.method == "GET":
+            return httpx.Response(200, json={"records": []})
+        return httpx.Response(200, json={"records": [{"id": "recNEW"}]})
+
+    client, http = _client(handler)
+    try:
+        res = await client.upsert({"Email": "z@b.com", "Company Name": "X"}, merge_on=["Email"])
+    finally:
+        await http.aclose()
+    assert [c.method for c in calls] == ["GET", "POST"]
+    assert "id" not in _json.loads(calls[1].content)["records"][0]   # create, no id
+    assert AirtableClient.record_id(res) == "recNEW"
+
+
+@pytest.mark.asyncio
+async def test_upsert_tolerates_duplicate_rows():
+    """The bug guard: when the table already has DUPLICATE rows for the email (e.g. from
+    a Clay workflow), upsert must still succeed — it updates the first match, never 422s."""
+    def handler(req):
+        if req.method == "GET":   # two rows match the email — would break performUpsert
+            return httpx.Response(200, json={"records": [{"id": "recDUP1"}, {"id": "recDUP2"}]})
+        return httpx.Response(200, json={"records": [{"id": "recDUP1", "fields": {}}]})
+
+    client, http = _client(handler)
+    try:
+        res = await client.upsert({"Email": "dup@b.com", "Company Name": "X"}, merge_on=["Email"])
+    finally:
+        await http.aclose()
+    assert AirtableClient.record_id(res) == "recDUP1"    # updated first dup, no 422
 
 
 @pytest.mark.asyncio
@@ -77,7 +118,7 @@ async def test_backoff_then_success_on_429(monkeypatch):
 
     client, http = _client(handler)
     try:
-        res = await client.upsert({"Email": "e@f.com"}, merge_on=["Email"])
+        res = await client.create({"Email": "e@f.com"})   # single POST → clean 429 path
     finally:
         await http.aclose()
     assert AirtableClient.record_id(res) == "recOK"

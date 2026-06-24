@@ -135,6 +135,15 @@
       "root_cause": "Per-browser dedup is per-user, not global, and the in-process run-locks don't cover per-account activation. No server-side record of what was already activated.",
       "guard": "tests/test_engagement_api.py::test_activate_dedups_across_users",
       "lesson": "Dedup that guards spend/external posts must be SERVER-SIDE and race-safe: claim the resource atomically (INSERT … ON CONFLICT DO NOTHING) BEFORE any paid/visible work, short-circuit the loser, and release the claim if the work fails so it can retry. Client-side dedup is a convenience, never the authority."
+    },
+    {
+      "id": "airtable-upsert-422-on-duplicate-rows",
+      "date": "2026-06-24",
+      "area": "auto_search/engagement/airtable_client.py upsert (LinkedIn TOFU → Airtable)",
+      "symptom": "Live LinkedIn TOFU runs reported airtable_failed and leads never landed in Airtable — every write 422'd. Not auth (key worked) and not bad columns (all field names matched). The table already had 2 rows per Email (a Clay workflow also writes it).",
+      "root_cause": "upsert used Airtable's native performUpsert with fieldsToMergeOn=[Email], which returns HTTP 422 when MORE THAN ONE existing row matches the merge key. A second writer (Clay) had created duplicate Email rows, so the merge could not resolve to one record.",
+      "guard": "tests/test_engagement_airtable_client.py::test_upsert_tolerates_duplicate_rows",
+      "lesson": "Don't rely on a vendor's merge-on-key upsert when another system also writes the table — it assumes ≤1 match. Do an explicit find-then-update-first-or-create (dup-tolerant), which never 422s and never adds another duplicate. When a 4xx says 'unprocessable', capture the response BODY — 422 means data/semantics rejected, distinct from 401/403 auth."
     }
   ]
 }

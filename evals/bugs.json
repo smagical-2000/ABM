@@ -117,6 +117,15 @@
       "root_cause": "The shared client fixture stubbed run_sync but not run_sfdc_sync / run_podcast_url_sync / linkedin_ads_runner.run, and the new orchestrator calls all of them in the background.",
       "guard": "tests/test_engagement_api.py::test_sync_runs_all_sources_best_effort",
       "lesson": "When a background job grows new legs, stub EVERY leg in the fixture (no leg makes real network I/O in tests) and assert best-effort: a leg raising must not skip the rest."
+    },
+    {
+      "id": "retired-sao-still-scored-and-shown",
+      "date": "2026-06-24",
+      "area": "engagement heat view + repos + UI/Slack labels (sales_accepted_opportunity)",
+      "symptom": "SAO was 'dropped' in the 2026-06 review (sync stopped pulling it), but 18 of the top 40 accounts still showed 'Sales accepted opp' (+10) in heat, drawer, momentum, and Slack — because historical SAO events stayed in storage with points baked in, and the heat SQL view + label maps still counted them.",
+      "root_cause": "Dropping a signal at the INGEST layer (sync) doesn't remove already-stored events. Heat is summed in the engaged_accounts SQL view from stored points, so retired-but-stored kinds keep counting until excluded at the READ layer.",
+      "guard": "tests/test_engagement_repository.py::test_deprecated_sao_excluded_from_heat_and_drawer",
+      "lesson": "Retiring a signal needs a READ-layer exclusion (DEPRECATED_KINDS), not just stopping ingest. Apply it everywhere heat/events are read — the SQL view (re-applied via ensure_schema on deploy), both repos' events/series/recent, plus the UI/Slack label maps — so stored history stays for audit but never counts or shows."
     }
   ]
 }

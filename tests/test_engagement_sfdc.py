@@ -108,13 +108,16 @@ def test_two_distinct_accounts_make_two_contacts():
 
 
 def test_sao_event_shape_and_points():
+    # parse_sao is retained for legacy/replay, but SAO is RETIRED (the live sync no
+    # longer pulls it). The kind/shape are unchanged; it now scores 0 and is excluded
+    # from heat/display downstream (see DEPRECATED_KINDS).
     contacts, events = sfdc.parse_sao([_opp()], now="2026-06-15T00:00:00+00:00")
     assert len(contacts) == 1 and len(events) == 1
     e = events[0]
     assert e["source"] == "sfdc"
     assert e["channel"] == "crm"
     assert e["kind"] == "sales_accepted_opportunity"
-    assert e["points"] == 10
+    assert e["points"] == 0
     assert e["external_id"] == "crm:sales_accepted_opportunity:acct:001ACME"
     assert e["contact_ext"] == "acct:001ACME"
     assert e["company"] == "Acme Health"
@@ -129,13 +132,14 @@ def test_sao_event_shape_and_points():
 
 
 def test_sao_dedups_per_account_scores_ten_once():
-    # two SAOs on ONE account -> 1 contact, 1 event scoring 10 (not 20)
+    # two SAOs on ONE account -> still 1 contact, 1 event (dedup intact). SAO is
+    # retired so it scores 0 now, but the per-account dedup behavior is unchanged.
     opps = [_opp(Id="0061", CreatedDate="2026-05-01T00:00:00.000+0000"),
             _opp(Id="0062", StageName="Discovery", CreatedDate="2026-06-01T00:00:00.000+0000")]
     contacts, events = sfdc.parse_sao(opps)
     assert len(contacts) == 1 and len(events) == 1
     e = events[0]
-    assert e["points"] == 10
+    assert e["points"] == 0
     assert e["raw"]["count"] == 2                              # audit trail keeps both
     assert sorted(e["raw"]["ids"]) == ["0061", "0062"]
     assert e["occurred_at"].startswith("2026-06-01")          # most recent

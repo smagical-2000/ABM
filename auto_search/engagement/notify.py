@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 _KIND = {
     "high_intent_lead": "BOFU",
     "meeting_booked": "Meeting booked",
-    "sales_accepted_opportunity": "Sales accepted opp",
     "opportunity": "Opportunity",
     "reply": "Reply",
     "click": "Click",

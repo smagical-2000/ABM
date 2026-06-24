@@ -27,6 +27,24 @@ def _event(ext, kind, points, *, account_id="acc_x", contact="1",
             "contact_ext": contact, "account_id": account_id, "occurred_at": at}
 
 
+def test_deprecated_sao_excluded_from_heat_and_drawer(tmp_path):
+    """Retired SAO events stay in storage (audit) but must NOT count toward heat,
+    appear in the drawer (events_for_account), the inbox (recent_events), or momentum
+    (account_weekly_series). Guards the 2026-06 SAO retirement."""
+    repo = _repo(tmp_path)
+    repo.add_event(_event("email:reply:1", "reply", 6))
+    repo.add_event(_event("crm:sales_accepted_opportunity:acc_x",
+                          "sales_accepted_opportunity", 10))
+
+    acct = {a["account_id"]: a for a in repo.engaged_accounts()}["acc_x"]
+    assert acct["score"] == 6           # reply 6 only — SAO's 10 excluded
+    kinds = {e["kind"] for e in repo.events_for_account("acc_x")}
+    assert "sales_accepted_opportunity" not in kinds and "reply" in kinds
+    assert all(e["kind"] != "sales_accepted_opportunity" for e in repo.recent_events())
+    series = repo.account_weekly_series()
+    assert sum(series.get("acc_x", [])) == 6     # momentum excludes SAO too
+
+
 def test_add_event_is_idempotent(tmp_path):
     repo = _repo(tmp_path)
     ev = _event("email:reply:1", "reply", 6)

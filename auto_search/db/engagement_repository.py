@@ -32,6 +32,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
+from auto_search.engagement.scoring import DEPRECATED_KINDS
+
 logger = logging.getLogger(__name__)
 
 # Default source for this phase. Kept as a constant so a future connector can pass
@@ -243,7 +245,7 @@ class EngagementJsonRepository:
         ev: dict[str, dict] = {}
         for e in self._store["events"].values():
             aid = e.get("account_id")
-            if not aid:
+            if not aid or e.get("kind") in DEPRECATED_KINDS:   # retired kinds never count
                 continue
             slot = ev.setdefault(aid, {"score": 0, "clicks": 0, "replies": 0,
                                        "meetings": 0, "last_touch": None})
@@ -276,13 +278,15 @@ class EngagementJsonRepository:
 
     def events_for_account(self, account_id) -> list[dict]:
         rows = [e for e in self._store["events"].values()
-                if e.get("account_id") == account_id]
+                if e.get("account_id") == account_id
+                and e.get("kind") not in DEPRECATED_KINDS]   # hide retired kinds
         rows.sort(key=lambda e: e.get("occurred_at") or "", reverse=True)
         return rows
 
     def account_weekly_series(self, *, weeks: int = 8) -> dict[str, list[int]]:
         rows = [(e.get("account_id"), e.get("occurred_at"), e.get("points"))
-                for e in self._store["events"].values() if e.get("account_id")]
+                for e in self._store["events"].values()
+                if e.get("account_id") and e.get("kind") not in DEPRECATED_KINDS]
         return _bucket_weekly(rows, weeks=weeks)
 
     def contacts(self, *, account_id=None, unresolved_only=False) -> list[dict]:
@@ -295,7 +299,8 @@ class EngagementJsonRepository:
         return rows
 
     def recent_events(self, *, limit=200) -> list[dict]:
-        rows = sorted(self._store["events"].values(),
+        rows = sorted((e for e in self._store["events"].values()
+                       if e.get("kind") not in DEPRECATED_KINDS),
                       key=lambda e: e.get("occurred_at") or "", reverse=True)
         return rows[:limit]
 
@@ -462,7 +467,8 @@ class EngagementPostgresRepository:
     def events_for_account(self, account_id) -> list[dict]:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM engagement_events WHERE account_id = %s "
+                "SELECT * FROM engagement_events "
+                "WHERE account_id = %s AND kind <> 'sales_accepted_opportunity' "
                 "ORDER BY occurred_at DESC",
                 (account_id,),
             ).fetchall()
@@ -473,7 +479,8 @@ class EngagementPostgresRepository:
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT account_id, occurred_at, points FROM engagement_events "
-                "WHERE account_id IS NOT NULL AND occurred_at >= %s", (cutoff,)
+                "WHERE account_id IS NOT NULL AND occurred_at >= %s "
+                "AND kind <> 'sales_accepted_opportunity'", (cutoff,)
             ).fetchall()
         return _bucket_weekly(
             [(r["account_id"], r["occurred_at"], r["points"]) for r in rows], weeks=weeks)
@@ -500,7 +507,9 @@ class EngagementPostgresRepository:
     def recent_events(self, *, limit=200) -> list[dict]:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM engagement_events ORDER BY occurred_at DESC LIMIT %s",
+                "SELECT * FROM engagement_events "
+                "WHERE kind <> 'sales_accepted_opportunity' "
+                "ORDER BY occurred_at DESC LIMIT %s",
                 (limit,),
             ).fetchall()
         return [_norm(dict(r)) for r in rows]

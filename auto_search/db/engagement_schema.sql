@@ -139,7 +139,11 @@ WITH e AS (
            COUNT(*) FILTER (WHERE kind = 'meeting_booked') AS meetings,
            MAX(occurred_at)                              AS last_touch
     FROM engagement_events
+    -- Exclude retired signal kinds (SAO, replaced by meeting_booked in 2026-06):
+    -- historical rows stay for audit but never count toward heat. Keep this literal
+    -- in sync with DEPRECATED_KINDS in engagement/scoring.py.
     WHERE account_id IS NOT NULL
+      AND kind <> 'sales_accepted_opportunity'
     GROUP BY account_id
 ),
 c AS (

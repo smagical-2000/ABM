@@ -21,7 +21,6 @@ POINTS: dict[str, int] = {
     "meeting_booked": 10,   # SFDC booked meeting (Event Type=Meeting) — agreed/booked
     "podcast_lead": 4,      # podcast listen/download lead (ICP Yes/Maybe)
     "opportunity": 10,      # SFDC open/won opportunity (NOT captured today — see sync.py)
-    "sales_accepted_opportunity": 10,  # SFDC SAO (deprecated — replaced by meeting_booked)
     "high_intent_lead": 10, # SFDC high-intent inbound lead (contact/sales form = BOFU)
     "tradeshow": 10,        # SFDC tradeshow lead that booked a meeting (Status=Qualified)
     "low_intent_lead": 6,   # SFDC TOFU lead — filled in a TOFU form (LeadSource '… | TOFU')
@@ -31,6 +30,13 @@ POINTS: dict[str, int] = {
 # Touches we record for rates + the timeline but that score zero — kept explicit
 # (not silently absent) so the intent is obvious to a reviewer.
 ZERO_POINT_KINDS = frozenset({"delivered", "open", "bounce"})
+
+# Retired signal kinds: events may still exist in storage (historical, kept for
+# audit) but are EXCLUDED from heat, breakdowns, momentum, and the timeline
+# everywhere they're read. SAO was replaced by `meeting_booked` in the 2026-06
+# review, so it must no longer count or display. (The SQL view in
+# engagement_schema.sql hardcodes the same literal — keep them in sync.)
+DEPRECATED_KINDS = frozenset({"sales_accepted_opportunity"})
 
 # Heat tier thresholds (inclusive lower bound), highest first.
 _TIERS: tuple[tuple[int, str], ...] = ((21, "Hot"), (12, "Warm"), (6, "Some"), (0, "Lower"))

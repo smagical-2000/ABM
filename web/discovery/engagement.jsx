@@ -93,10 +93,26 @@ function mapAccount(r){
 const mapInbox = (e)=>({ company:e.company, account:e.account_name||null, match:e.match_tier||null,
   kind:e.kind, pts:e.points||0, ts:e.occurred_at });
 function mapDetail(d){
-  const events=(d.events||[]).map(e=>({ kind:e.kind, label:kindOf(e.kind).label,
-    person:e.campaign||e.company||'', ts:e.occurred_at, pts:e.points||0, count:1 }));
+  // join each event to the contact behind it (by contact_ext) so the timeline can
+  // show WHO engaged on hover. Contacts carry email + title (no separate name field).
+  const byId={};
+  (d.contacts||[]).forEach(c=>{ if(c&&c.external_id!=null) byId[String(c.external_id)]={email:c.email||'',title:c.title||'',company:c.company||''}; });
+  const events=(d.events||[]).map(e=>{ const c=byId[String(e.contact_ext)]||{};
+    return { kind:e.kind, label:kindOf(e.kind).label, person:e.campaign||e.company||'',
+      ts:e.occurred_at, pts:e.points||0, count:1, email:c.email||'', title:c.title||'' }; });
   const contacts=(d.contacts||[]).map(c=>c.email||c.company||c.external_id).filter(Boolean);
   return { contacts, events };
+}
+
+// Derive a display name from an email local part ("jane.smith@acme.com" -> "Jane Smith").
+// Returns '' for role/shared addresses (info@, sales@) where there is no person to name.
+function nameFromEmail(email){
+  if(!email||email.indexOf('@')<0) return '';
+  const local=email.split('@')[0];
+  if(/^(info|sales|contact|hello|admin|support|team|office|no-?reply|noreply|marketing)$/i.test(local)) return '';
+  const parts=local.split(/[._-]+/).filter(p=>/[a-z]/i.test(p)&&p.length>1);
+  if(!parts.length) return '';
+  return parts.map(p=>p.charAt(0).toUpperCase()+p.slice(1).toLowerCase()).join(' ');
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -109,8 +125,10 @@ function groupEvents(events){
   (events||[]).forEach(e=>{
     const day=e.ts?new Date(e.ts).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}):'—';
     const key=e.kind+'|'+day;
-    const g=m.get(key)||{kind:e.kind,day,count:0,pts:0,ts:''};
+    const g=m.get(key)||{kind:e.kind,day,count:0,pts:0,ts:'',unit:e.pts||0,people:[]};
     g.count+=1; g.pts+=(e.pts||0); if((e.ts||'')>g.ts)g.ts=e.ts;
+    const email=e.email||'';   // collect the distinct people behind this touch (for the hover)
+    if(email&&!g.people.some(p=>p.email===email)) g.people.push({email,title:e.title||''});
     m.set(key,g);
   });
   return [...m.values()].sort((a,b)=>(a.ts||'').localeCompare(b.ts||''));
@@ -355,6 +373,39 @@ function InboxView({ events, onResolve }){
 }
 
 // ── DRAWER ────────────────────────────────────────────────────────────────────
+// One timeline touch. On hover, touches worth MORE than 5 points reveal who engaged
+// (name derived from the email, plus the email and title). Lighter touches (click,
+// podcast, LinkedIn-ad) have no hover — there is no decision-maker worth naming there.
+function TimelineRow({ g }){
+  const m=kindOf(g.kind);
+  const [hov,setHov]=useState(false);
+  const showWho=(g.unit||0)>5 && g.people && g.people.length>0;
+  return (
+    <div style={{position:'relative',paddingLeft:20,paddingBottom:14}}
+      onMouseEnter={()=>showWho&&setHov(true)} onMouseLeave={()=>setHov(false)}>
+      <span style={{position:'absolute',left:-4,top:4,width:8,height:8,borderRadius:'50%',background:m.dot,boxShadow:'0 0 0 3px #fff'}}/>
+      <div style={{...TX.body,cursor:showWho?'help':'default'}}>{m.label}{g.count>1&&<span style={{color:'#a1a1aa'}}> ×{g.count}</span>}</div>
+      <div style={{...TX.meta,marginTop:2,display:'flex',gap:6,flexWrap:'wrap'}}>
+        <span>{g.day}</span>
+        <span style={{color:'#e4e4e7'}}>·</span>
+        <span style={{fontWeight:500,color:m.dot}}>+{g.pts} pts</span>
+      </div>
+      {hov&&showWho&&(
+        <div style={{position:'absolute',left:20,bottom:'calc(100% - 6px)',zIndex:60,background:'#18181b',color:'#fff',borderRadius:8,padding:'8px 11px',boxShadow:'0 10px 28px rgba(0,0,0,.22)',minWidth:200,maxWidth:300}}>
+          <div style={{fontSize:10,fontWeight:700,letterSpacing:'.05em',textTransform:'uppercase',color:'#a1a1aa',marginBottom:6}}>Who engaged</div>
+          {g.people.map((p,j)=>{ const nm=nameFromEmail(p.email); return (
+            <div key={j} style={{marginBottom:j<g.people.length-1?7:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',maxWidth:278}}>
+              {nm&&<div style={{fontSize:13,fontWeight:600,lineHeight:1.3}}>{nm}</div>}
+              <div style={{fontSize:12,color:'#d4d4d8',lineHeight:1.4}}>{p.email||'email not available'}</div>
+              {p.title&&<div style={{fontSize:11,color:'#a1a1aa',lineHeight:1.4}}>{p.title}</div>}
+            </div>
+          ); })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DetailDrawer({ account:a, detail, accounts, onClose, onActivate }){
   if(!a) return null;
   const tier=tierOf(a.score), hc=HEAT[tier];
@@ -429,18 +480,7 @@ function DetailDrawer({ account:a, detail, accounts, onClose, onActivate }){
 
           <div style={{...TX.label,marginTop:22,marginBottom:10}}>Engagement timeline</div>
           <div style={{borderLeft:'1px solid #f4f4f5',marginLeft:4}}>
-            {groupEvents(d.events).map((g,i)=>{ const m=kindOf(g.kind);
-              return (
-                <div key={i} style={{position:'relative',paddingLeft:20,paddingBottom:14}}>
-                  <span style={{position:'absolute',left:-4,top:4,width:8,height:8,borderRadius:'50%',background:m.dot,boxShadow:'0 0 0 3px #fff'}}/>
-                  <div style={{...TX.body}}>{m.label}{g.count>1&&<span style={{color:'#a1a1aa'}}> ×{g.count}</span>}</div>
-                  <div style={{...TX.meta,marginTop:2,display:'flex',gap:6,flexWrap:'wrap'}}>
-                    <span>{g.day}</span>
-                    <span style={{color:'#e4e4e7'}}>·</span>
-                    <span style={{fontWeight:500,color:m.dot}}>+{g.pts} pts</span>
-                  </div>
-                </div>
-              ); })}
+            {groupEvents(d.events).map((g,i)=><TimelineRow key={i} g={g}/>)}
             {d.events.length===0&&<div style={{paddingLeft:20,...TX.meta}}>No touches.</div>}
           </div>
         </div>

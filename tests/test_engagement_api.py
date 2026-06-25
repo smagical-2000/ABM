@@ -412,6 +412,81 @@ def test_reset_single_activation_by_account_id(client):
     assert repo.is_activated("acc_x") is False
 
 
+def test_activation_suppressed_before_cutoff(client, monkeypatch):
+    """Send cutoff (Galyna): an account whose latest touch predates the cutoff is NOT
+    sent and NOT claimed — so it can still send later if it genuinely re-engages."""
+    from auto_search.engagement import notify
+
+    repo = client.app.state.engagement_repo
+    repo.set_setting("activation_cutoff", "2099-01-01")   # everything is older → suppressed
+    posts = []
+    monkeypatch.setattr(notify, "activate_account", lambda *a, **k: (posts.append(1) or True))
+
+    r = client.post("/api/engagement/acc_x/activate", json={}).json()
+    assert r["suppressed"] is True and r["posted"] is False and r["cutoff"] == "2099-01-01"
+    assert posts == []                                    # nothing posted
+    assert repo.is_activated("acc_x") is False            # NOT claimed → not buried
+
+
+def test_activation_force_overrides_cutoff(client, monkeypatch):
+    """A deliberate force send goes through even when the account predates the cutoff."""
+    from auto_search.engagement import enrichment, notify
+
+    repo = client.app.state.engagement_repo
+    repo.set_setting("activation_cutoff", "2099-01-01")
+
+    async def fake_enrich(domain, *, company=None):
+        return []
+
+    posts = []
+    monkeypatch.setattr(enrichment, "enrich_account", fake_enrich)
+    monkeypatch.setattr(notify, "activate_account", lambda *a, **k: (posts.append(1) or True))
+    r = client.post("/api/engagement/acc_x/activate", json={"force": True}).json()
+    assert r.get("posted") is True and posts == [1]
+
+
+def test_activation_test_post_ignores_cutoff(client, monkeypatch):
+    """A {"test": true} post (private channel) bypasses the cutoff so any card can be
+    smoke-tested."""
+    from auto_search.engagement import notify
+
+    repo = client.app.state.engagement_repo
+    repo.set_setting("activation_cutoff", "2099-01-01")
+    posts = []
+    monkeypatch.setattr(notify, "activate_account", lambda *a, **k: (posts.append(1) or True))
+    r = client.post("/api/engagement/acc_x/activate", json={"test": True}).json()
+    assert r.get("posted") is True and posts == [1]
+
+
+def test_activation_sends_when_touch_on_or_after_cutoff(client, monkeypatch):
+    """An account with activity on/after the cutoff sends normally."""
+    from auto_search.engagement import enrichment, notify
+
+    repo = client.app.state.engagement_repo
+    repo.set_setting("activation_cutoff", "2000-01-01")   # everything is newer → sends
+
+    async def fake_enrich(domain, *, company=None):
+        return []
+
+    posts = []
+    monkeypatch.setattr(enrichment, "enrich_account", fake_enrich)
+    monkeypatch.setattr(notify, "activate_account", lambda *a, **k: (posts.append(1) or True))
+    r = client.post("/api/engagement/acc_x/activate", json={}).json()
+    assert r.get("posted") is True and posts == [1]
+
+
+def test_send_cutoff_get_set_and_validation(client):
+    """The cutoff endpoint round-trips, validates the date format, and clears on empty."""
+    assert client.get("/api/engagement/settings/send-cutoff").json()["cutoff"] is None
+    assert client.post("/api/engagement/settings/send-cutoff",
+                       json={"cutoff": "2026-06-25"}).json()["cutoff"] == "2026-06-25"
+    assert client.get("/api/engagement/settings/send-cutoff").json()["cutoff"] == "2026-06-25"
+    assert client.post("/api/engagement/settings/send-cutoff",
+                       json={"cutoff": "not-a-date"}).status_code == 400
+    assert client.post("/api/engagement/settings/send-cutoff",
+                       json={"cutoff": ""}).json()["cutoff"] is None
+
+
 def test_activation_deep_links_to_account(client, monkeypatch):
     """The Slack 'Open in console' link deep-links to the account's drawer
     (?view=engagement&account=…), not the generic console home."""

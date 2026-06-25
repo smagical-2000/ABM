@@ -958,6 +958,18 @@ def create_app() -> FastAPI:
         body = await _json_body(request)
         is_test = bool(body.get("test"))
         force = bool(body.get("force"))
+        # Send cutoff (Galyna, 2026-06-25): we capture ALL history but only hand off
+        # activity dated on/after the cutoff, so the team is never sent the already-
+        # processed backlog. Exempt: an explicit {"force": true} override and {"test": true}
+        # posts (private channel). Checked BEFORE the dedup claim, so a suppressed account
+        # is NOT marked activated and can still send later if it genuinely re-engages.
+        cutoff = (repo.get_setting("activation_cutoff") or "").strip()[:10]
+        if cutoff and not is_test and not force:
+            last_touch = max((e.get("occurred_at") or "" for e in events), default="")
+            if last_touch[:10] < cutoff:
+                return {"posted": False, "suppressed": True, "reason": "before_cutoff",
+                        "cutoff": cutoff, "last_touch": last_touch or None,
+                        "account_id": account_id}
         # Server-side dedup: claim before any paid/visible work. The winner proceeds;
         # everyone else short-circuits. `force` re-activates on purpose; `test` is exempt.
         claimed = False
@@ -1077,6 +1089,30 @@ def create_app() -> FastAPI:
         repo.set_setting("live_routing", "1" if enabled else "0")
         logger.info("engagement live-routing set to %s", "ON" if enabled else "OFF")
         return _live_routing_state(repo)
+
+    @app.get("/api/engagement/settings/send-cutoff")
+    async def engagement_send_cutoff_get():
+        """The send-cutoff date (YYYY-MM-DD) or null. Activations only fire for accounts
+        with activity on/after it; older 'already-processed' accounts are suppressed."""
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=503, detail="engagement store not available")
+        return {"cutoff": (repo.get_setting("activation_cutoff") or None)}
+
+    @app.post("/api/engagement/settings/send-cutoff")
+    async def engagement_send_cutoff_set(request: Request):
+        """Set (or clear) the send-cutoff. Body {"cutoff": "YYYY-MM-DD"} sets it; an empty
+        string clears it (everything becomes sendable). Changing it sends nothing."""
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=503, detail="engagement store not available")
+        body = await _json_body(request)
+        raw = (body.get("cutoff") or "").strip()
+        if raw and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+            raise HTTPException(status_code=400, detail="cutoff must be YYYY-MM-DD or empty")
+        repo.set_setting("activation_cutoff", raw)   # empty clears the cutoff
+        logger.info("engagement send-cutoff set to %s", raw or "(none)")
+        return {"cutoff": raw or None}
 
     async def _linkedin_tofu(*, dry_run: bool, max_contacts: int | None = None,
                              max_leads: int | None = None, max_reactions: int = 50) -> dict:

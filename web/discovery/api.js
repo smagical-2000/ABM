@@ -91,6 +91,12 @@ window.API = {
   setLiveRouting: (enabled) => http('/api/engagement/settings/live-routing', {
     method: 'POST', body: JSON.stringify({ enabled }),
   }),
+  // Send cutoff (YYYY-MM-DD or null): only accounts with activity on/after it are
+  // handed off; the older already-processed backlog is suppressed. Pass '' to clear.
+  sendCutoff: () => http('/api/engagement/settings/send-cutoff'),
+  setSendCutoff: (cutoff) => http('/api/engagement/settings/send-cutoff', {
+    method: 'POST', body: JSON.stringify({ cutoff }),
+  }),
 
   // ── watch list: lone-standard-hire leads kept out of Discovery ──────────────
   parked: () => http('/api/discovery/parked'),                       // not yet qualified

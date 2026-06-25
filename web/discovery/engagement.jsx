@@ -545,6 +545,7 @@ function EngagementView({ pushToast }){
   const [syncing,setSyncing]=useState(false);
   const [running,setRunning]=useState(false);   // server-side: a sync is in progress
   const [live,setLive]=useState(null);          // server-side: live routing on/off (null=loading)
+  const [cutoff,setCutoff]=useState(null);      // server-side: send-cutoff date (YYYY-MM-DD) or ''
   // Auto-activate: when on, every Hot account is activated once (enriched + posted
   // to Slack), deduped via localStorage so it never re-posts. Mirrors auto-score.
   const [autoActivate,setAutoActivate]=useState(()=>localStorage.getItem('autoActivateEnabled')==='1');
@@ -600,6 +601,13 @@ function EngagementView({ pushToast }){
     pushToast&&pushToast(`${force?'Re-sending':'Enriching'} ${a.name}${force?'':' + posting to Slack'}…`,'muted');
     window.API.activateEngagement(a.id, force).then(r=>{
       if(r&&r.already_activated){ pushToast&&pushToast(`${a.name} is already activated — not re-posted (use Activated → re-send)`,'muted'); return; }
+      if(r&&r.suppressed){   // last activity predates the send cutoff — offer a deliberate override
+        const lt=(r.last_touch||'').slice(0,10);
+        if(window.confirm(`${a.name}'s last activity${lt?` (${lt})`:''} is before the send cutoff (${r.cutoff}).\n\nThis is the already-processed backlog we agreed not to send. Send it anyway?`))
+          handleActivate(a, true);
+        else pushToast&&pushToast(`${a.name} skipped — before the ${r.cutoff} send cutoff`,'muted');
+        return;
+      }
       const n=(r&&r.contacts||[]).filter(p=>p.email||p.phone).length;
       pushToast&&pushToast(`Activated ${a.name} — posted to Slack${n?` with ${n} contact${n===1?'':'s'}`:''}`,'success');
       load();   // refresh so the green "Activated" badge appears
@@ -612,6 +620,18 @@ function EngagementView({ pushToast }){
   // Live-routing toggle. Flipping it sends NOTHING — it only changes where the NEXT
   // activation goes (real AE/SDR channels + @ping vs the private testing line).
   useEffect(()=>{ window.API.liveRouting().then(s=>setLive(!!s.enabled)).catch(()=>{}); },[]);
+  useEffect(()=>{ window.API.sendCutoff().then(s=>setCutoff(s.cutoff||'')).catch(()=>{}); },[]);
+  // Send cutoff: only accounts with activity on/after this date are handed off; the older
+  // already-processed backlog is suppressed. Changing it sends nothing.
+  function editCutoff(){
+    const cur=cutoff||'';
+    const next=window.prompt('Send cutoff date (YYYY-MM-DD). Only accounts with activity on or after this date are sent; older ones are held back. Leave blank to clear.', cur);
+    if(next===null) return;
+    const v=next.trim();
+    if(v && !/^\d{4}-\d{2}-\d{2}$/.test(v)){ pushToast&&pushToast('Date must be YYYY-MM-DD','danger'); return; }
+    window.API.setSendCutoff(v).then(s=>{ setCutoff(s.cutoff||'');
+      pushToast&&pushToast(s.cutoff?`Send cutoff set to ${s.cutoff} — only newer activity is handed off`:'Send cutoff cleared — all activity is sendable','success'); })
+      .catch(e=>pushToast&&pushToast(`Couldn't set cutoff: ${e.message}`,'danger')); }
   function toggleLive(){
     if(live===null) return;
     const next=!live;
@@ -639,15 +659,17 @@ function EngagementView({ pushToast }){
     const sdr=todo.length-hot;
     pushToast&&pushToast(`Auto-routing: ${hot} Hot → AE, ${sdr} Warm/Some → SDR…`,'muted');
     (async()=>{
+      let sent=0, held=0;
       for(const a of todo){
         try{
-          await window.API.activateEngagement(a.id);
-          done.add(a.id);
+          const r=await window.API.activateEngagement(a.id);
+          if(r&&r.suppressed){ held++; continue; }   // before cutoff — skip, don't mark done
+          done.add(a.id); sent++;
           try{ localStorage.setItem('engagementActivated', JSON.stringify([...done])); }catch(_e){}
         }catch(_e){ /* leave for the next cycle */ }
       }
       autoRef.current=false;
-      pushToast&&pushToast('Auto-routing complete','success');
+      pushToast&&pushToast(`Auto-routing complete — ${sent} sent${held?`, ${held} held (before the ${cutoff||'cutoff'})`:''}`,'success');
     })();
   },[accounts,autoActivate]);
 
@@ -686,6 +708,12 @@ function EngagementView({ pushToast }){
                 </span>
                 {live?'LIVE — real channels':'Testing only'}
               </label>}
+            {cutoff!==null &&
+              <span onClick={editCutoff}
+                title="Send cutoff: only accounts with activity on or after this date are handed off; older already-processed accounts are held back. Click to change."
+                style={{display:'inline-flex',alignItems:'center',gap:5,fontSize:12.5,fontWeight:500,color:cutoff?'#3f3f46':'#a1a1aa',cursor:'pointer',userSelect:'none',padding:'3px 9px',borderRadius:999,background:'#f4f4f5',border:'1px solid #e4e4e7'}}>
+                {cutoff?`Sending from ${cutoff}`:'No send cutoff'}
+              </span>}
             <label title="Auto-route: Hot → AE (enrich + Slack), Warm → SDR (Slack only)"
               style={{display:'inline-flex',alignItems:'center',gap:7,fontSize:13,color:'#3f3f46',cursor:'pointer',userSelect:'none'}}>
               <span onClick={()=>setAutoActivate(v=>!v)} style={{position:'relative',width:34,height:20,borderRadius:999,background:autoActivate?'#10b981':'#e4e4e7',transition:'background .15s',flexShrink:0}}>

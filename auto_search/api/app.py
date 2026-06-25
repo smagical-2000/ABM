@@ -998,7 +998,13 @@ def create_app() -> FastAPI:
                                                           company=account.get("name"))
                 except Exception:  # noqa: BLE001 — never block the activation post
                     logger.exception("activation enrichment failed for %s", account_id)
+            # Deep-link the "Open in console" button straight to THIS account's drawer
+            # (the SPA reads ?view=engagement&account=… on load), not the generic home.
             app_url = os.getenv("ENGAGEMENT_APP_URL")
+            if app_url:
+                from urllib.parse import quote
+                sep = "&" if "?" in app_url else "?"
+                app_url = f"{app_url}{sep}view=engagement&account={quote(account_id)}"
             ae = engagement_notify.resolve_ae(account) if is_hot else None
             sdr_mention = engagement_notify.resolve_sdr(account) if is_sdr_tier else None
             owner = ae or sdr_mention

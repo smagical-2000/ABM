@@ -290,6 +290,18 @@ def test_reset_single_activation_by_account_id(client):
     assert repo.is_activated("acc_x") is False
 
 
+def test_activation_deep_links_to_account(client, monkeypatch):
+    """The Slack 'Open in console' link deep-links to the account's drawer
+    (?view=engagement&account=…), not the generic console home."""
+    from auto_search.engagement import notify
+
+    monkeypatch.setenv("ENGAGEMENT_APP_URL", "https://console.test/eng")
+    kw = {}
+    monkeypatch.setattr(notify, "activate_account", lambda *a, **k: (kw.update(k) or True))
+    client.post("/api/engagement/acc_x/activate", json={})
+    assert kw["app_url"] == "https://console.test/eng?view=engagement&account=acc_x"
+
+
 def test_export_csv_has_header_and_rows(client):
     r = client.get("/api/engagement/export.csv")
     assert r.status_code == 200

@@ -453,7 +453,14 @@ function WatchStrip({ parked }) {
 // scoring API. Promote moves a company from Discovery into Scored.
 // ════════════════════════════════════════════════════════════════════════════
 function App() {
-  const [view, setView] = useState('discovery');
+  // Deep-link support: ?view=engagement (e.g. from a Slack "Open in console" link)
+  // lands directly on that tab instead of the default Discovery page.
+  const [view, setView] = useState(() => {
+    try {
+      const v = new URLSearchParams(window.location.search).get('view');
+      return ['discovery', 'scored', 'news', 'watch', 'engagement'].includes(v) ? v : 'discovery';
+    } catch (_e) { return 'discovery'; }
+  });
   const [toasts, setToasts] = useState([]);
   const toastId = useRef(0);
   function pushToast(message, tone = 'success') {

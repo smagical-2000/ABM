@@ -517,6 +517,17 @@ function EngagementView({ pushToast }){
   }
   useEffect(()=>{ load().catch(e=>{ setLoading(false); pushToast&&pushToast(`Couldn't load engagement: ${e.message}`,'danger'); }); },[]);
 
+  // Deep-link: ?account=<id> (e.g. from a Slack "Open in console" link) opens that
+  // account's drawer once the board has loaded. Runs once.
+  const deepLinkRef=useRef(false);
+  useEffect(()=>{
+    if(loading || deepLinkRef.current) return;
+    let aid; try{ aid=new URLSearchParams(window.location.search).get('account'); }catch(_e){ aid=null; }
+    if(!aid) return;
+    deepLinkRef.current=true;
+    openAccount(accounts.find(x=>x.id===aid) || {id:aid, name:aid, score:0});
+  },[loading,accounts]);  // eslint-disable-line
+
   // Poll the server's `running` flag so the UI reflects the ACTUAL background sync
   // (it runs all sources and can take a couple minutes), then refresh once it ends.
   const pollRef=useRef(false);

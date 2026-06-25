@@ -347,6 +347,25 @@ def test_runtime_override_off_beats_env_on(client, monkeypatch):
     assert kw["webhook"] is None and kw["ae"] == "@Gabriel"   # back to private + plain name
 
 
+def test_activation_lower_tier_never_posts(client, monkeypatch):
+    """A Lower-tier account (score < 6) is no-handoff: it must never post (an ownerless
+    card to a real channel) and must not be left claimed, even via a direct API call."""
+    from auto_search.engagement import notify
+
+    eng = client.app.state.engagement_repo
+    eng.upsert_contact({"external_id": "lo1", "account_id": "acc_lo", "matched_lists": ["abm"]})
+    eng.add_event({"external_id": "email:click:lo1", "kind": "click", "channel": "email",
+                   "points": 1, "contact_ext": "lo1", "account_id": "acc_lo",
+                   "occurred_at": "2026-06-25T00:00:00+00:00"})   # score 1 → Lower
+    posts = []
+    monkeypatch.setattr(notify, "activate_account", lambda *a, **k: (posts.append(1) or True))
+
+    r = client.post("/api/engagement/acc_lo/activate", json={}).json()
+    assert r.get("posted") is False and r.get("skipped") == "lower_tier"
+    assert posts == []
+    assert eng.is_activated("acc_lo") is False        # claim released, not stuck
+
+
 def test_activate_dedups_across_users(client, monkeypatch):
     """Two reps activating the same account → it posts to Slack ONCE; the second gets
     already_activated with no spend. `force` deliberately re-activates."""

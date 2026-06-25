@@ -189,6 +189,15 @@
       "root_cause": "parse() used StartDateTime (the meeting time, which can be in the future for a scheduled meeting) as the engagement signal date. The signal (a meeting was booked) actually occurs at CreatedDate.",
       "guard": "tests/test_engagement_sfdc.py::test_meeting_scheduled_in_future_dates_to_booking_not_meeting_time; tests/test_engagement_repository.py::test_future_occurred_at_is_clamped_to_now",
       "lesson": "An engagement signal's date is when the SIGNAL happened, not a scheduled future time. Use CreatedDate (booking) when StartDateTime is in the future, AND clamp occurred_at to now at the storage layer so no source can ever persist a future date. Future dates silently corrupt every date-gated rule downstream (send cutoff, momentum windows, recency)."
+    },
+    {
+      "id": "lower-tier-activation-posts-ownerless-card",
+      "date": "2026-06-25",
+      "area": "auto_search/api/app.py activate endpoint",
+      "symptom": "Found in pre-go-live QA: activating a Lower-tier account computed notify=False (no AE/SDR owner, dm_limit=0) but STILL called activate_account, so a direct API activation of a Lower account would drop an ownerless card into a real channel when live. The UI hides Activate for Lower and auto-route skips it, so it was only reachable by a direct/scripted call.",
+      "root_cause": "The notify flag gated enrichment + owner but not the post itself; the spec is 'Lower -> no handoff', i.e. no post at all.",
+      "guard": "tests/test_engagement_api.py::test_activation_lower_tier_never_posts",
+      "lesson": "When a tier/branch means 'do nothing', short-circuit the SIDE EFFECT (the post), not just its inputs. Don't rely on the UI to keep an unsafe endpoint path unreachable; guard it server-side. Release any dedup claim taken before the early return so the account isn't left stuck 'activated'."
     }
   ]
 }

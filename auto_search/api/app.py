@@ -996,6 +996,13 @@ def create_app() -> FastAPI:
             is_hot = tier == "Hot"
             is_sdr_tier = tier in ("Warm", "Some")   # SDRs own Warm + Some
             notify = is_hot or is_sdr_tier           # Lower → no AE/SDR handoff
+            if not notify:
+                # Lower tier → no handoff: never post (would drop an ownerless card into a
+                # real channel). UI + auto-route never activate Lower; this guards direct
+                # API calls. Release the claim so nothing is left stuck "activated".
+                if claimed:
+                    repo.release_activation(account_id)
+                return {"posted": False, "skipped": "lower_tier", "account_id": account_id}
             # Routing (per the AE/SDR spec):
             #   Hot        → AE,  full packet (enriched decision-makers + intel brief)
             #   Warm/Some  → SDR, the SAME full packet (same process + information)

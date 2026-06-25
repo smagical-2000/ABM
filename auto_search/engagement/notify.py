@@ -169,8 +169,10 @@ def resolve_ae(account: dict, *, owner_name: str | None = None,
     ids = ae_slack_ids() if ids is None else ids   # {} = deliberately no pings (test mode)
     by_specialty = by_specialty if by_specialty is not None else specialty_ae()
     # `framework_key` is the raw rubric key (health_system/specialty/payer); fall back to
-    # `framework` for callers that pass the raw key directly. SPECIALTY_AE is keyed by it.
-    fw_key = account.get("framework_key") or account.get("framework") or ""
+    # `framework`, then to the ABM segment for engaged-but-unscored accounts that have no
+    # framework. SPECIALTY_AE is keyed by it.
+    fw_key = (account.get("framework_key") or account.get("framework")
+              or _framework_from_segment(account.get("segment")) or "")
     # Order: explicit SFDC owner → the AE for this framework → DEFAULT_AE catch-all. The
     # catch-all means an unscored (no-framework) Hot account still tags someone, instead
     # of silently going untagged.
@@ -196,7 +198,8 @@ def resolve_sdr(account: dict, *, ids: dict[str, str] | None = None,
     Same logic as `resolve_ae` but reads SPECIALTY_SDR + SDR_SLACK_IDS."""
     ids = sdr_slack_ids() if ids is None else ids   # {} = deliberately no pings (test mode)
     by_specialty = by_specialty if by_specialty is not None else specialty_sdr()
-    fw_key = account.get("framework_key") or account.get("framework") or ""
+    fw_key = (account.get("framework_key") or account.get("framework")
+              or _framework_from_segment(account.get("segment")) or "")
     # framework SDR → DEFAULT_SDR catch-all, so an unscored Warm account still tags someone.
     name = by_specialty.get(fw_key) or _env_name("DEFAULT_SDR")
     if not name:
@@ -209,6 +212,22 @@ def _env_name(var: str) -> str | None:
     """A single name from an env var (DEFAULT_AE / DEFAULT_SDR), or None if unset."""
     v = (os.getenv(var) or "").strip()
     return v or None
+
+
+def _framework_from_segment(segment: str | None) -> str | None:
+    """Map an account's ABM segment to a routing framework key, so engaged-but-unscored
+    accounts (no Phase-1 framework) still tag the right AE/SDR instead of the default.
+    Keys match SPECIALTY_AE/SPECIALTY_SDR (health_system / specialty / payer)."""
+    s = (segment or "").strip().lower()
+    if not s:
+        return None
+    if "payer" in s:
+        return "payer"
+    if "special" in s:
+        return "specialty"
+    if "health system" in s or "hospital" in s:
+        return "health_system"
+    return None
 
 
 def live_routing() -> bool:

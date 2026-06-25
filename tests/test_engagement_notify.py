@@ -186,6 +186,37 @@ def test_resolve_sdr_uses_framework_key_not_label():
     assert sdr == "<@U10>"
 
 
+def test_framework_from_segment_mapping():
+    f = notify._framework_from_segment
+    assert f("Payer") == "payer" and f("Payers") == "payer"
+    assert f("Specialties") == "specialty" and f("Specialty - Ortho") == "specialty"
+    assert f("Health Systems") == "health_system"
+    assert f("Independent Hospitals") == "health_system"
+    assert f("") is None and f(None) is None and f("Physician Group") is None
+
+
+def test_resolve_ae_falls_back_to_segment_when_no_framework():
+    """An engaged-but-unscored account (no framework_key) routes by its ABM segment."""
+    acct = {"segment": "Specialties"}                       # no framework_key/framework
+    ae = notify.resolve_ae(acct, ids={"Justin Pride": "U1"},
+                           by_specialty={"specialty": "Justin Pride"})
+    assert ae == "<@U1>"
+
+
+def test_resolve_sdr_falls_back_to_segment_when_no_framework():
+    acct = {"segment": "Independent Hospitals"}             # → health_system
+    sdr = notify.resolve_sdr(acct, ids={"Ben Davies": "U2"},
+                             by_specialty={"health_system": "Ben Davies"})
+    assert sdr == "<@U2>"
+
+
+def test_framework_key_wins_over_segment():
+    """An explicit framework_key always beats the segment fallback."""
+    acct = {"framework_key": "payer", "segment": "Specialties"}
+    ae = notify.resolve_ae(acct, ids={}, by_specialty={"payer": "Matt", "specialty": "Jp"})
+    assert ae == "@Matt"
+
+
 # ── live routing: real channels + real pings, gated by a flag ────────────────
 
 

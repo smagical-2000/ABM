@@ -4,9 +4,13 @@ Split like the rest of the engagement code: `build_card` is PURE (account dict +
 events -> Slack Block Kit payload, fully testable, no I/O); `post_card` does the one
 bit of I/O (httpx POST to the webhook from SLACK_ENGAGEMENT_WEBHOOK).
 
-SDR tagging is intentionally NOT live yet — we render the owner as plain text, never
-an encoded <@id> mention, so nobody gets pinged while we tune the format. Flip
-`mention_sdr` (with a real Slack user-id map) when the user says go.
+Routing has two modes, gated by `live_routing()` (ENGAGEMENT_LIVE_ROUTING):
+  • OFF (default) — every card posts to SLACK_ENGAGEMENT_WEBHOOK (the private testing
+    line) with plain-text "@Name" owners (no real ping). Safe for testing.
+  • ON — Hot cards route to SLACK_AE_WEBHOOK and Warm/Some to SLACK_SDR_WEBHOOK, and
+    the owner becomes a real `<@id>` ping (from AE_SLACK_IDS / SDR_SLACK_IDS).
+The endpoint passes ids={} (plain names) + webhook=None whenever it is not live, so
+nobody in a real channel is disturbed until the flag is flipped.
 """
 
 from __future__ import annotations
@@ -162,7 +166,7 @@ def resolve_ae(account: dict, *, owner_name: str | None = None,
     Prefer the SFDC account owner; else fall back to the AE assigned to the
     account's framework (health_system / specialty / payer). Returns a `<@id>`
     Slack mention when the id is known (a real ping), else a plain "@Name"."""
-    ids = ids or ae_slack_ids()
+    ids = ae_slack_ids() if ids is None else ids   # {} = deliberately no pings (test mode)
     by_specialty = by_specialty if by_specialty is not None else specialty_ae()
     # `framework_key` is the raw rubric key (health_system/specialty/payer); fall back to
     # `framework` for callers that pass the raw key directly. SPECIALTY_AE is keyed by it.
@@ -190,7 +194,7 @@ def resolve_sdr(account: dict, *, ids: dict[str, str] | None = None,
     """SDR reference for Warm/Some accounts, or None if we can't name one.
 
     Same logic as `resolve_ae` but reads SPECIALTY_SDR + SDR_SLACK_IDS."""
-    ids = ids or sdr_slack_ids()
+    ids = sdr_slack_ids() if ids is None else ids   # {} = deliberately no pings (test mode)
     by_specialty = by_specialty if by_specialty is not None else specialty_sdr()
     fw_key = account.get("framework_key") or account.get("framework") or ""
     # framework SDR → DEFAULT_SDR catch-all, so an unscored Warm account still tags someone.
@@ -205,6 +209,23 @@ def _env_name(var: str) -> str | None:
     """A single name from an env var (DEFAULT_AE / DEFAULT_SDR), or None if unset."""
     v = (os.getenv(var) or "").strip()
     return v or None
+
+
+def live_routing() -> bool:
+    """When ON, activation cards route to the real AE/SDR channels and @-ping the
+    actual people. OFF (default) keeps every card on SLACK_ENGAGEMENT_WEBHOOK (the
+    private testing line) with plain-text names — so testing never disturbs a channel
+    with real people in it. Flip ENGAGEMENT_LIVE_ROUTING=1 to go live."""
+    return (os.getenv("ENGAGEMENT_LIVE_ROUTING") or "").strip() in ("1", "true", "True")
+
+
+def channel_webhook(*, is_ae: bool) -> str | None:
+    """The destination webhook for a card when live routing is ON: the AE channel for
+    Hot (AE) cards, the SDR channel for Warm/Some (SDR) cards. None when not live or
+    unset, so post_card falls back to SLACK_ENGAGEMENT_WEBHOOK (the testing line)."""
+    if not live_routing():
+        return None
+    return (os.getenv("SLACK_AE_WEBHOOK") if is_ae else os.getenv("SLACK_SDR_WEBHOOK")) or None
 
 
 def _dm_lines(dms: list[dict] | None, *, limit: int = 5) -> str:

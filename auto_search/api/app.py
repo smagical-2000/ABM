@@ -1005,12 +1005,20 @@ def create_app() -> FastAPI:
                 from urllib.parse import quote
                 sep = "&" if "?" in app_url else "?"
                 app_url = f"{app_url}{sep}view=engagement&account={quote(account_id)}"
-            ae = engagement_notify.resolve_ae(account) if is_hot else None
-            sdr_mention = engagement_notify.resolve_sdr(account) if is_sdr_tier else None
+            # Live routing (ENGAGEMENT_LIVE_ROUTING=1): real @-pings + per-tier channel
+            # (Hot→AE channel, Warm/Some→SDR channel). OFF (default) or a {"test":true}
+            # post → plain-text names on the private testing webhook, so testing never
+            # pings a real person or hits a channel with people in it.
+            live = engagement_notify.live_routing() and not is_test
+            ids_override = None if live else {}   # None=use env IDs (ping); {}=plain @Name
+            ae = engagement_notify.resolve_ae(account, ids=ids_override) if is_hot else None
+            sdr_mention = (engagement_notify.resolve_sdr(account, ids=ids_override)
+                           if is_sdr_tier else None)
             owner = ae or sdr_mention
+            webhook = engagement_notify.channel_webhook(is_ae=is_hot) if live else None
             ok = await asyncio.to_thread(
                 engagement_notify.activate_account, account, events,
-                dms=dms, research=research, app_url=app_url, ae=owner,
+                dms=dms, research=research, app_url=app_url, ae=owner, webhook=webhook,
                 dm_limit=(2 if notify else 0), test=is_test)
             if not ok:
                 raise HTTPException(status_code=502, detail="Slack post failed (check webhook)")

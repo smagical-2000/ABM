@@ -225,6 +225,71 @@ def test_some_tier_routes_to_sdr(client, monkeypatch):
     assert kw["ae"] == "@Gabriel"
 
 
+def test_activation_testing_mode_private_webhook_plain_name(client, monkeypatch):
+    """Default (no ENGAGEMENT_LIVE_ROUTING): the card stays on the private webhook
+    (None → SLACK_ENGAGEMENT_WEBHOOK) with a plain @Name — testing never pings a real
+    person or posts to the AE/SDR channel, even with all the live config present."""
+    from auto_search.engagement import enrichment, notify
+
+    monkeypatch.delenv("ENGAGEMENT_LIVE_ROUTING", raising=False)
+    monkeypatch.setenv("DEFAULT_SDR", "Gabriel")
+    monkeypatch.setenv("SDR_SLACK_IDS", "Gabriel=U096")
+    monkeypatch.setenv("SLACK_SDR_WEBHOOK", "https://hooks.test/sdr")
+
+    async def fake_enrich(domain, *, company=None):
+        return []
+
+    kw = {}
+    monkeypatch.setattr(enrichment, "enrich_account", fake_enrich)
+    monkeypatch.setattr(notify, "activate_account", lambda *a, **k: (kw.update(k) or True))
+
+    r = client.post("/api/engagement/acc_x/activate", json={})   # acc_x Warm → SDR
+    assert r.status_code == 200
+    assert kw["webhook"] is None             # falls back to the private testing line
+    assert kw["ae"] == "@Gabriel"            # plain name, NOT <@U096> — no real ping
+
+
+def test_activation_live_mode_routes_to_sdr_channel_and_pings(client, monkeypatch):
+    """ENGAGEMENT_LIVE_ROUTING=1: a Warm/Some card routes to the SDR channel webhook
+    and @-pings the real SDR member id."""
+    from auto_search.engagement import enrichment, notify
+
+    monkeypatch.setenv("ENGAGEMENT_LIVE_ROUTING", "1")
+    monkeypatch.setenv("DEFAULT_SDR", "Gabriel")
+    monkeypatch.setenv("SDR_SLACK_IDS", "Gabriel=U096")
+    monkeypatch.setenv("SLACK_SDR_WEBHOOK", "https://hooks.test/sdr")
+
+    async def fake_enrich(domain, *, company=None):
+        return []
+
+    kw = {}
+    monkeypatch.setattr(enrichment, "enrich_account", fake_enrich)
+    monkeypatch.setattr(notify, "activate_account", lambda *a, **k: (kw.update(k) or True))
+
+    r = client.post("/api/engagement/acc_x/activate", json={})
+    assert r.status_code == 200
+    assert kw["webhook"] == "https://hooks.test/sdr"   # routed to the SDR channel
+    assert kw["ae"] == "<@U096>"                        # real ping
+
+
+def test_activation_test_post_stays_private_even_when_live(client, monkeypatch):
+    """A {"test": true} post must NOT hit the real channel or ping anyone even when
+    live routing is ON — it's how we safely smoke-test from the private line."""
+    from auto_search.engagement import notify
+
+    monkeypatch.setenv("ENGAGEMENT_LIVE_ROUTING", "1")
+    monkeypatch.setenv("DEFAULT_SDR", "Gabriel")
+    monkeypatch.setenv("SDR_SLACK_IDS", "Gabriel=U096")
+    monkeypatch.setenv("SLACK_SDR_WEBHOOK", "https://hooks.test/sdr")
+
+    kw = {}
+    monkeypatch.setattr(notify, "activate_account", lambda *a, **k: (kw.update(k) or True))
+
+    r = client.post("/api/engagement/acc_x/activate", json={"test": True})
+    assert r.status_code == 200
+    assert kw["webhook"] is None and kw["ae"] == "@Gabriel"   # private line, plain name
+
+
 def test_activate_dedups_across_users(client, monkeypatch):
     """Two reps activating the same account → it posts to Slack ONCE; the second gets
     already_activated with no spend. `force` deliberately re-activates."""

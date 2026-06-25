@@ -186,6 +186,45 @@ def test_resolve_sdr_uses_framework_key_not_label():
     assert sdr == "<@U10>"
 
 
+# ── live routing: real channels + real pings, gated by a flag ────────────────
+
+
+def test_live_routing_off_by_default(monkeypatch):
+    monkeypatch.delenv("ENGAGEMENT_LIVE_ROUTING", raising=False)
+    assert notify.live_routing() is False
+
+
+def test_live_routing_on_when_flag_set(monkeypatch):
+    monkeypatch.setenv("ENGAGEMENT_LIVE_ROUTING", "1")
+    assert notify.live_routing() is True
+
+
+def test_channel_webhook_none_when_not_live(monkeypatch):
+    """Not live → no per-tier webhook, so post_card stays on the private testing line."""
+    monkeypatch.delenv("ENGAGEMENT_LIVE_ROUTING", raising=False)
+    monkeypatch.setenv("SLACK_AE_WEBHOOK", "https://hooks.test/ae")
+    monkeypatch.setenv("SLACK_SDR_WEBHOOK", "https://hooks.test/sdr")
+    assert notify.channel_webhook(is_ae=True) is None
+    assert notify.channel_webhook(is_ae=False) is None
+
+
+def test_channel_webhook_routes_by_tier_when_live(monkeypatch):
+    monkeypatch.setenv("ENGAGEMENT_LIVE_ROUTING", "1")
+    monkeypatch.setenv("SLACK_AE_WEBHOOK", "https://hooks.test/ae")
+    monkeypatch.setenv("SLACK_SDR_WEBHOOK", "https://hooks.test/sdr")
+    assert notify.channel_webhook(is_ae=True) == "https://hooks.test/ae"     # Hot → AE channel
+    assert notify.channel_webhook(is_ae=False) == "https://hooks.test/sdr"   # Warm/Some → SDR
+
+
+def test_resolve_uses_env_ids_when_none_but_plain_when_empty(monkeypatch):
+    """ids=None means 'use SDR_SLACK_IDS env' (real ping); ids={} means plain @Name —
+    this is how the endpoint switches pings off for testing without unsetting env."""
+    monkeypatch.setenv("SDR_SLACK_IDS", "Gabriel=U096")
+    monkeypatch.setenv("SPECIALTY_SDR", "payer=Gabriel")
+    assert notify.resolve_sdr(_acct(framework_key="payer"), ids=None) == "<@U096>"
+    assert notify.resolve_sdr(_acct(framework_key="payer"), ids={}) == "@Gabriel"
+
+
 def test_card_sdr_lead_line_for_warm():
     card = notify.build_card(_acct(name="Baptist Health", tier="Warm", score=14),
                              _events(), ae="@Ben Davies")

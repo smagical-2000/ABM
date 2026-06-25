@@ -982,12 +982,16 @@ def create_app() -> FastAPI:
                 logger.exception("intel brief failed for %s", account_id)
             tier = account.get("tier") or "—"
             is_hot = tier == "Hot"
-            is_warm = tier == "Warm"
-            # Enrich (paid) — only Hot activations spend enrichment credits.
-            # Warm/Some get notified but NOT enriched (saves Apollo/FullEnrich spend).
-            # A {"test": true} post never spends credits.
+            is_sdr_tier = tier in ("Warm", "Some")   # SDRs own Warm + Some
+            notify = is_hot or is_sdr_tier           # Lower → no AE/SDR handoff
+            # Routing (per the AE/SDR spec):
+            #   Hot        → AE,  full packet (enriched decision-makers + intel brief)
+            #   Warm/Some  → SDR, the SAME full packet (same process + information)
+            #   Lower      → no handoff
+            # Enrich (paid Apollo) for ANY notified tier so the SDR card carries the same
+            # decision-makers as the AE card. A {"test": true} post never spends credits.
             dms: list[dict] = []
-            if is_hot and account.get("domain") and not is_test:
+            if notify and account.get("domain") and not is_test:
                 from auto_search.engagement import enrichment
                 try:
                     dms = await enrichment.enrich_account(account["domain"],
@@ -995,16 +999,13 @@ def create_app() -> FastAPI:
                 except Exception:  # noqa: BLE001 — never block the activation post
                     logger.exception("activation enrichment failed for %s", account_id)
             app_url = os.getenv("ENGAGEMENT_APP_URL")
-            # Tier-based routing:
-            #   Hot  → AE tagged, enriched contacts, 2 DMs
-            #   Warm → SDR tagged, no enrichment, no DMs
             ae = engagement_notify.resolve_ae(account) if is_hot else None
-            sdr_mention = engagement_notify.resolve_sdr(account) if is_warm else None
+            sdr_mention = engagement_notify.resolve_sdr(account) if is_sdr_tier else None
             owner = ae or sdr_mention
             ok = await asyncio.to_thread(
                 engagement_notify.activate_account, account, events,
                 dms=dms, research=research, app_url=app_url, ae=owner,
-                dm_limit=(2 if is_hot else 0), test=is_test)
+                dm_limit=(2 if notify else 0), test=is_test)
             if not ok:
                 raise HTTPException(status_code=502, detail="Slack post failed (check webhook)")
         except Exception:

@@ -216,7 +216,8 @@ function AccountRow({ a, onOpen, onActivate, showReason }){
           ? <span title="Already sent to Slack — click to re-send" onClick={e=>{e.stopPropagation();onActivate(a,true);}}
               style={{display:'inline-flex',alignItems:'center',gap:4,background:'#f0fdf4',border:'1px solid #bbf7d0',fontFamily:'var(--font-sans)',fontSize:12,fontWeight:500,color:'#15803d',cursor:'pointer',padding:'4px 10px',borderRadius:6}}>
               <Icon name="check" size={12}/>Activated</span>
-          : tier==='Hot'&&<button onClick={e=>{e.stopPropagation();onActivate(a);}}
+          : (tier==='Hot'||tier==='Warm'||tier==='Some')&&<button onClick={e=>{e.stopPropagation();onActivate(a);}}
+              title={tier==='Hot'?'Send to the AE':'Send to the SDR'}
               style={{background:'#fffbeb',border:'1px solid #fde68a',fontFamily:'var(--font-sans)',fontSize:12,fontWeight:500,color:'#b45309',cursor:'pointer',padding:'4px 10px',borderRadius:6}}>Activate</button>}
         <span style={{color:hov?'#a1a1aa':'#e4e4e7'}}><Icon name="arrowRight" size={14}/></span>
       </div>
@@ -552,19 +553,19 @@ function EngagementView({ pushToast }){
     window.API.resetActivations().then(r=>{ pushToast&&pushToast(`Reset ${r.reset} activation${r.reset===1?'':'s'} — accounts can be re-activated`,'success'); load(); })
       .catch(e=>pushToast&&pushToast(`Reset failed: ${e.message}`,'danger')); }
 
-  // Auto-activate Hot + Warm accounts (once each) when the toggle is on.
-  // Hot → AE tagged + enrichment; Warm → SDR tagged, no enrichment.
-  // Sequential so we don't hammer Slack; deduped in localStorage.
+  // Auto-route accounts (once each) when the toggle is on:
+  // Hot → AE; Warm + Some → SDR. All get the same enriched packet.
+  // Sequential so we don't hammer Slack; deduped in localStorage + server-side.
   useEffect(()=>{
     if(!autoActivate || !accounts.length || autoRef.current) return;
     let done; try{ done=new Set(JSON.parse(localStorage.getItem('engagementActivated')||'[]')); }catch(_e){ done=new Set(); }
-    const routable=new Set(['Hot','Warm']);
+    const routable=new Set(['Hot','Warm','Some']);
     const todo=accounts.filter(a=>routable.has(tierOf(a.score)) && !done.has(a.id));
     if(!todo.length) return;
     autoRef.current=true;
     const hot=todo.filter(a=>tierOf(a.score)==='Hot').length;
-    const warm=todo.filter(a=>tierOf(a.score)==='Warm').length;
-    pushToast&&pushToast(`Auto-routing: ${hot} Hot → AE, ${warm} Warm → SDR…`,'muted');
+    const sdr=todo.length-hot;
+    pushToast&&pushToast(`Auto-routing: ${hot} Hot → AE, ${sdr} Warm/Some → SDR…`,'muted');
     (async()=>{
       for(const a of todo){
         try{

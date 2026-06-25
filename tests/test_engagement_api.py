@@ -171,35 +171,51 @@ def test_activate_test_mode_skips_enrichment_credit_safety(client, monkeypatch):
     assert r2.json()["contacts"][0]["email"] == "x@acme.com"
 
 
-def test_warm_activation_routes_to_sdr_no_enrichment(client, monkeypatch):
-    """Warm accounts route to the SDR (not AE) and skip enrichment (no credits spent)."""
+def test_warm_routes_to_sdr_with_full_packet(client, monkeypatch):
+    """Warm → SDR with the SAME enriched packet as an AE (same process + information):
+    Apollo enrich runs and the card carries the 2 decision-makers."""
+    from auto_search.db.scoring_repository import ScoringJsonRepository
     from auto_search.engagement import enrichment, notify
 
+    monkeypatch.setattr(ScoringJsonRepository, "get",
+                        lambda self, aid: {"name": "Acme", "domain": "acme.com"}
+                        if aid == "acc_x" else None)
     enrich_calls = []
 
     async def fake_enrich(domain, *, company=None):
         enrich_calls.append(domain)
         return [{"name": "X", "title": "VP", "email": "x@x.com", "phone": None}]
 
-    activate_kwargs = {}
-
-    def capture_activate(*_args, **kw):
-        activate_kwargs.update(kw)
-        return True
-
+    kw = {}
     monkeypatch.setattr(enrichment, "enrich_account", fake_enrich)
-    monkeypatch.setattr(notify, "activate_account", capture_activate)
-    monkeypatch.setattr(notify, "resolve_sdr",
-                        lambda acct, **_kw: "@Ben Davies")
+    monkeypatch.setattr(notify, "activate_account", lambda *a, **k: (kw.update(k) or True))
+    monkeypatch.setattr(notify, "resolve_sdr", lambda acct, **_kw: "@Ben Davies")
     monkeypatch.setattr(notify, "resolve_ae", lambda acct, **_kw: None)
 
-    # The fixture seeds acc_x with reply(6) + meeting_booked(10) = 16 → Warm
-    r = client.post("/api/engagement/acc_x/activate", json={})
-    assert r.status_code == 200
-    assert r.json()["routed_to"] == "@Ben Davies"
-    assert enrich_calls == []          # Warm = no enrichment spend
-    assert activate_kwargs["ae"] == "@Ben Davies"
-    assert activate_kwargs["dm_limit"] == 0
+    r = client.post("/api/engagement/acc_x/activate", json={})   # acc_x = 16 → Warm
+    assert r.status_code == 200 and r.json()["routed_to"] == "@Ben Davies"
+    assert enrich_calls == ["acme.com"]      # Warm now enriches, same as the AE card
+    assert kw["ae"] == "@Ben Davies" and kw["dm_limit"] == 2
+
+
+def test_some_tier_routes_to_sdr(client, monkeypatch):
+    """An account in the Some tier (6-11) also routes to the SDR (not just Warm)."""
+    from auto_search.engagement import notify
+
+    eng = client.app.state.engagement_repo
+    eng.upsert_contact({"external_id": "some1", "account_id": "acc_some",
+                        "company": "SomeCo", "matched_lists": ["abm"]})
+    eng.add_event({"external_id": "email:reply:some1", "kind": "reply", "channel": "email",
+                   "points": 6, "contact_ext": "some1", "account_id": "acc_some",
+                   "occurred_at": "2026-06-10T00:00:00+00:00"})   # score 6 → Some
+    kw = {}
+    monkeypatch.setattr(notify, "activate_account", lambda *a, **k: (kw.update(k) or True))
+    monkeypatch.setattr(notify, "resolve_sdr", lambda acct, **_kw: "@Gabriel")
+    monkeypatch.setattr(notify, "resolve_ae", lambda acct, **_kw: None)
+
+    r = client.post("/api/engagement/acc_some/activate", json={})
+    assert r.status_code == 200 and r.json()["routed_to"] == "@Gabriel"
+    assert kw["ae"] == "@Gabriel"
 
 
 def test_activate_dedups_across_users(client, monkeypatch):

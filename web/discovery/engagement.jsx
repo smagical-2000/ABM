@@ -544,7 +544,6 @@ function EngagementView({ pushToast }){
   const [segFilter,setSegFilter]=useState('all');
   const [syncing,setSyncing]=useState(false);
   const [running,setRunning]=useState(false);   // server-side: a sync is in progress
-  const [live,setLive]=useState(null);          // server-side: live routing on/off (null=loading)
   const [cutoff,setCutoff]=useState(null);      // server-side: send-cutoff date (YYYY-MM-DD) or ''
   // Auto-activate: when on, every Hot account is activated once (enriched + posted
   // to Slack), deduped via localStorage so it never re-posts. Mirrors auto-score.
@@ -617,9 +616,6 @@ function EngagementView({ pushToast }){
     window.API.resetActivations().then(r=>{ pushToast&&pushToast(`Reset ${r.reset} activation${r.reset===1?'':'s'} — accounts can be re-activated`,'success'); load(); })
       .catch(e=>pushToast&&pushToast(`Reset failed: ${e.message}`,'danger')); }
 
-  // Live-routing toggle. Flipping it sends NOTHING — it only changes where the NEXT
-  // activation goes (real AE/SDR channels + @ping vs the private testing line).
-  useEffect(()=>{ window.API.liveRouting().then(s=>setLive(!!s.enabled)).catch(()=>{}); },[]);
   useEffect(()=>{ window.API.sendCutoff().then(s=>setCutoff(s.cutoff||'')).catch(()=>{}); },[]);
   // Send cutoff: only accounts with activity on/after this date are handed off; the older
   // already-processed backlog is suppressed. Changing it sends nothing.
@@ -632,19 +628,6 @@ function EngagementView({ pushToast }){
     window.API.setSendCutoff(v).then(s=>{ setCutoff(s.cutoff||'');
       pushToast&&pushToast(s.cutoff?`Send cutoff set to ${s.cutoff} — only newer activity is handed off`:'Send cutoff cleared — all activity is sendable','success'); })
       .catch(e=>pushToast&&pushToast(`Couldn't set cutoff: ${e.message}`,'danger')); }
-  function toggleLive(){
-    if(live===null) return;
-    const next=!live;
-    if(next && !window.confirm(
-      'Go LIVE?\n\nNew activations will post to the real AE/SDR Slack channels and @-ping them. '
-      +'This does NOT send anything now — only future activations (manual or auto-route).\n\nContinue?')) return;
-    window.API.setLiveRouting(next).then(s=>{ setLive(!!s.enabled);
-      pushToast&&pushToast(s.enabled
-        ?'Live routing ON — activations now post to the real AE/SDR channels and ping them'
-        :'Live routing OFF — activations stay on the private testing channel (plain names)',
-        s.enabled?'success':'muted'); })
-      .catch(e=>pushToast&&pushToast(`Couldn't change live routing: ${e.message}`,'danger')); }
-
   // Auto-route accounts (once each) when the toggle is on:
   // Hot → AE; Warm + Some → SDR. All get the same enriched packet.
   // Sequential so we don't hammer Slack; deduped in localStorage + server-side.
@@ -698,20 +681,10 @@ function EngagementView({ pushToast }){
             <p style={{margin:'5px 0 0',fontSize:14,color:'#71717a',maxWidth:640}}>Buyer intent across email, podcast, Salesforce &amp; LinkedIn ads — matched to your accounts, ranked by heat.</p>
           </div>
           <div style={{display:'flex',alignItems:'center',gap:12}}>
-            {live!==null &&
-              <label title={live
-                ? 'LIVE: activations post to the real AE/SDR channels and @-ping them. Click to switch back to testing.'
-                : 'Testing: activations stay on the private channel with plain names. Click to go live.'}
-                style={{display:'inline-flex',alignItems:'center',gap:7,fontSize:13,fontWeight:600,color:live?'#b91c1c':'#3f3f46',cursor:'pointer',userSelect:'none'}}>
-                <span onClick={toggleLive} style={{position:'relative',width:34,height:20,borderRadius:999,background:live?'#ef4444':'#e4e4e7',transition:'background .15s',flexShrink:0}}>
-                  <span style={{position:'absolute',top:2,left:live?16:2,width:16,height:16,borderRadius:'50%',background:'#fff',boxShadow:'0 1px 2px rgba(0,0,0,.2)',transition:'left .15s'}}/>
-                </span>
-                {live?'LIVE — real channels':'Testing only'}
-              </label>}
             {cutoff!==null &&
               <span onClick={editCutoff}
-                title="Send cutoff: only accounts with activity on or after this date are handed off; older already-processed accounts are held back. Click to change."
-                style={{display:'inline-flex',alignItems:'center',gap:5,fontSize:12.5,fontWeight:500,color:cutoff?'#3f3f46':'#a1a1aa',cursor:'pointer',userSelect:'none',padding:'3px 9px',borderRadius:999,background:'#f4f4f5',border:'1px solid #e4e4e7'}}>
+                title="Send cutoff: only accounts with activity on or after this date are handed off to the AE/SDR channels; older already-processed accounts are held back. Click to change."
+                style={{display:'inline-flex',alignItems:'center',gap:5,fontSize:12.5,fontWeight:500,whiteSpace:'nowrap',color:cutoff?'#3f3f46':'#a1a1aa',cursor:'pointer',userSelect:'none',padding:'4px 10px',borderRadius:6,background:'#f4f4f5',border:'1px solid #e4e4e7'}}>
                 {cutoff?`Sending from ${cutoff}`:'No send cutoff'}
               </span>}
             <label title="Auto-route: Hot → AE (enrich + Slack), Warm → SDR (Slack only)"

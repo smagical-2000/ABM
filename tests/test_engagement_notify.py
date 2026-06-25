@@ -113,8 +113,15 @@ def test_resolve_ae_plain_name_when_no_slack_id():
     assert ae == "@Aly J"          # names them, does not ping
 
 
-def test_resolve_ae_none_when_unmapped():
+def test_resolve_ae_none_when_unmapped(monkeypatch):
+    monkeypatch.delenv("DEFAULT_AE", raising=False)
     assert notify.resolve_ae(_acct(framework="specialty"), ids={}, by_specialty={}) is None
+
+
+def test_resolve_ae_falls_back_to_default(monkeypatch):
+    # An unscored (no-framework) Hot account still tags someone via DEFAULT_AE.
+    monkeypatch.setenv("DEFAULT_AE", "Alykhan")
+    assert notify.resolve_ae({}, ids={}, by_specialty={}) == "@Alykhan"
 
 
 def test_resolve_ae_uses_raw_framework_key_not_label():
@@ -161,9 +168,15 @@ def test_resolve_sdr_plain_name_when_no_slack_id():
     assert sdr == "@Gabriel"
 
 
-def test_resolve_sdr_none_when_unmapped():
+def test_resolve_sdr_none_when_unmapped(monkeypatch):
+    monkeypatch.delenv("DEFAULT_SDR", raising=False)
     assert notify.resolve_sdr(_acct(framework_key="specialty"),
                               ids={}, by_specialty={}) is None
+
+
+def test_resolve_sdr_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("DEFAULT_SDR", "Ben Davies")
+    assert notify.resolve_sdr({}, ids={}, by_specialty={}) == "@Ben Davies"
 
 
 def test_resolve_sdr_uses_framework_key_not_label():

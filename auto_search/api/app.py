@@ -807,6 +807,7 @@ def create_app() -> FastAPI:
         abm = _abm_display(app.state.repo)
         series_by = repo.account_weekly_series(weeks=8)
         recent_by = _recent_touch_by_account(repo)
+        activated = repo.activated_account_ids()   # which accounts a rep already actioned
         out: list[dict] = []
         for r in repo.engaged_accounts():
             aid = r["account_id"]
@@ -820,6 +821,7 @@ def create_app() -> FastAPI:
                 **_classify(s, d),
                 "domain": s.get("domain") or d.get("domain"),
                 "tier": engagement_scoring.tier_for(r.get("score") or 0),
+                "activated": aid in activated,   # show "Activated" so reps don't redo it
                 "lists": sorted(lists_by.get(aid, [])),
                 "abm": "abm" in lists_by.get(aid, set()),
                 "series": series, "trend": trend, "delta_week": delta_week,
@@ -1011,6 +1013,21 @@ def create_app() -> FastAPI:
             raise
         return {"posted": True, "account_id": account_id, "contacts": dms,
                 "routed_to": owner, "reactivated": bool(force and not claimed)}
+
+    @app.post("/api/engagement/activations/reset")
+    async def engagement_activations_reset(request: Request):
+        """Clear the activation ledger so accounts can be activated again — for the
+        SDR/AE testing phase. Body {"account_id": "..."} resets ONE account; an empty
+        body resets ALL. Returns how many were cleared."""
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=503, detail="engagement store not available")
+        body = await _json_body(request)
+        account_id = (body.get("account_id") or "").strip()
+        if account_id:
+            repo.release_activation(account_id)
+            return {"reset": 1, "account_id": account_id}
+        return {"reset": repo.reset_activations()}
 
     async def _linkedin_tofu(*, dry_run: bool, max_contacts: int | None = None,
                              max_leads: int | None = None, max_reactions: int = 50) -> dict:

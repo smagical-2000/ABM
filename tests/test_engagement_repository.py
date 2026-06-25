@@ -39,6 +39,18 @@ def test_claim_activation_is_atomic_and_releasable(tmp_path):
     assert repo.claim_activation("acc_x") is True      # can re-claim after release
 
 
+def test_activated_account_ids_and_reset(tmp_path):
+    """The board reads activated_account_ids() to badge actioned accounts; reset clears
+    the ledger so the SDR/AE testing phase can re-activate everything."""
+    repo = _repo(tmp_path)
+    repo.claim_activation("acc_a")
+    repo.claim_activation("acc_b")
+    assert repo.activated_account_ids() == {"acc_a", "acc_b"}
+    assert repo.reset_activations() == 2
+    assert repo.activated_account_ids() == set()
+    assert repo.claim_activation("acc_a") is True   # can re-activate after reset
+
+
 def test_deprecated_sao_excluded_from_heat_and_drawer(tmp_path):
     """Retired SAO events stay in storage (audit) but must NOT count toward heat,
     appear in the drawer (events_for_account), the inbox (recent_events), or momentum

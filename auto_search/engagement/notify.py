@@ -167,7 +167,10 @@ def resolve_ae(account: dict, *, owner_name: str | None = None,
     # `framework_key` is the raw rubric key (health_system/specialty/payer); fall back to
     # `framework` for callers that pass the raw key directly. SPECIALTY_AE is keyed by it.
     fw_key = account.get("framework_key") or account.get("framework") or ""
-    name = (owner_name or "").strip() or by_specialty.get(fw_key)
+    # Order: explicit SFDC owner → the AE for this framework → DEFAULT_AE catch-all. The
+    # catch-all means an unscored (no-framework) Hot account still tags someone, instead
+    # of silently going untagged.
+    name = (owner_name or "").strip() or by_specialty.get(fw_key) or _env_name("DEFAULT_AE")
     if not name:
         return None
     sid = ids.get(name)
@@ -190,11 +193,18 @@ def resolve_sdr(account: dict, *, ids: dict[str, str] | None = None,
     ids = ids or sdr_slack_ids()
     by_specialty = by_specialty if by_specialty is not None else specialty_sdr()
     fw_key = account.get("framework_key") or account.get("framework") or ""
-    name = by_specialty.get(fw_key)
+    # framework SDR → DEFAULT_SDR catch-all, so an unscored Warm account still tags someone.
+    name = by_specialty.get(fw_key) or _env_name("DEFAULT_SDR")
     if not name:
         return None
     sid = ids.get(name)
     return f"<@{sid}>" if sid else f"@{name}"
+
+
+def _env_name(var: str) -> str | None:
+    """A single name from an env var (DEFAULT_AE / DEFAULT_SDR), or None if unset."""
+    v = (os.getenv(var) or "").strip()
+    return v or None
 
 
 def _dm_lines(dms: list[dict] | None, *, limit: int = 5) -> str:

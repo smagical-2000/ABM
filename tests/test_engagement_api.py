@@ -247,6 +247,26 @@ def test_test_activation_is_never_deduped(client, monkeypatch):
     assert client.app.state.engagement_repo.is_activated("acc_x") is False   # never claimed
 
 
+def test_board_shows_activated_and_reset_clears_it(client):
+    """The board badges activated accounts; the reset endpoint clears the ledger so
+    SDRs/AEs can re-activate during testing."""
+    client.app.state.engagement_repo.claim_activation("acc_x")
+    a = {x["account_id"]: x for x in client.get("/api/engagement").json()["accounts"]}["acc_x"]
+    assert a["activated"] is True
+    r = client.post("/api/engagement/activations/reset", json={}).json()
+    assert r["reset"] == 1
+    a2 = {x["account_id"]: x for x in client.get("/api/engagement").json()["accounts"]}["acc_x"]
+    assert a2["activated"] is False
+
+
+def test_reset_single_activation_by_account_id(client):
+    repo = client.app.state.engagement_repo
+    repo.claim_activation("acc_x")
+    r = client.post("/api/engagement/activations/reset", json={"account_id": "acc_x"}).json()
+    assert r == {"reset": 1, "account_id": "acc_x"}
+    assert repo.is_activated("acc_x") is False
+
+
 def test_export_csv_has_header_and_rows(client):
     r = client.get("/api/engagement/export.csv")
     assert r.status_code == 200

@@ -75,8 +75,15 @@ window.API = {
   engagementInbox: () => http('/api/engagement/inbox'),
   engagementAccount: (id) => http(`/api/engagement/${encodeURIComponent(id)}`),
   syncEngagement: () => http('/api/engagement/sync', { method: 'POST' }),
-  syncLinkedinTofu: (dryRun = false) => http(`/api/engagement/linkedin/run?dry_run=${dryRun}`, { method: 'POST' }),
-  activateEngagement: (id) => http(`/api/engagement/${encodeURIComponent(id)}/activate`, { method: 'POST' }),
+  // force=true deliberately re-sends an already-activated account (else it dedups).
+  activateEngagement: (id, force = false) => http(`/api/engagement/${encodeURIComponent(id)}/activate`, {
+    method: 'POST', body: JSON.stringify({ force }),
+  }),
+  // Clear the activation ledger so accounts can be re-activated (SDR/AE testing).
+  // Pass an account_id to reset one; omit to reset all.
+  resetActivations: (account_id) => http('/api/engagement/activations/reset', {
+    method: 'POST', body: JSON.stringify(account_id ? { account_id } : {}),
+  }),
 
   // ── watch list: lone-standard-hire leads kept out of Discovery ──────────────
   parked: () => http('/api/discovery/parked'),                       // not yet qualified

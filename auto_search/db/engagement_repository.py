@@ -100,6 +100,14 @@ class EngagementRepository(Protocol):
         """Undo a claim (e.g. the Slack post failed after claiming) so it can retry."""
         ...
 
+    def activated_account_ids(self) -> set[str]:
+        """Every account_id that has been activated — so the board can badge them."""
+        ...
+
+    def reset_activations(self) -> int:
+        """Clear the whole activation ledger (testing/replay). Returns rows removed."""
+        ...
+
     def get_sync_state(self, source: str = SOURCE_REPLYIO) -> dict | None: ...
 
     def set_sync_state(self, source: str = SOURCE_REPLYIO, *, status: str | None = None,
@@ -333,6 +341,15 @@ class EngagementJsonRepository:
     def release_activation(self, account_id) -> None:
         if self._store.get("activations", {}).pop(account_id, None) is not None:
             self._flush()
+
+    def activated_account_ids(self) -> set:
+        return set(self._store.get("activations", {}))
+
+    def reset_activations(self) -> int:
+        n = len(self._store.get("activations", {}))
+        self._store["activations"] = {}
+        self._flush()
+        return n
 
     def get_sync_state(self, source=SOURCE_REPLYIO) -> dict | None:
         return self._store["sync"].get(source)
@@ -568,6 +585,15 @@ class EngagementPostgresRepository:
         with self._pool.connection() as conn:
             conn.execute(
                 "DELETE FROM engagement_activations WHERE account_id = %s", (account_id,))
+
+    def activated_account_ids(self) -> set:
+        with self._pool.connection() as conn:
+            rows = conn.execute("SELECT account_id FROM engagement_activations").fetchall()
+        return {r["account_id"] for r in rows}
+
+    def reset_activations(self) -> int:
+        with self._pool.connection() as conn:
+            return conn.execute("DELETE FROM engagement_activations").rowcount
 
     def get_sync_state(self, source=SOURCE_REPLYIO) -> dict | None:
         with self._pool.connection() as conn:

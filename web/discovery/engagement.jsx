@@ -86,7 +86,7 @@ function mapAccount(r){
     id:r.account_id, name:r.name, segment:segKey(r), abm:!!r.abm,
     contacts:r.contacts||0, domain:r.domain||'', framework:frameworkText(r),
     score:r.score||0, series:(r.series&&r.series.length?r.series:[0,0,0,0,0,0,0,0]),
-    trend:r.trend||'flat', deltaWeek:r.delta_week||0, actioned:false, lastTouch:r.last_touch,
+    trend:r.trend||'flat', deltaWeek:r.delta_week||0, actioned:!!r.activated, lastTouch:r.last_touch,
     recent:r.recent||null,   // {kind, at} — most significant meaningful touch (last 14d)
   };
 }
@@ -212,8 +212,12 @@ function AccountRow({ a, onOpen, onActivate, showReason }){
           </span>
         : <span style={{...TX.meta,whiteSpace:'nowrap'}}>Last touch {relTime(a.lastTouch)}</span>}
       <div style={{display:'flex',justifyContent:'flex-end',alignItems:'center',gap:6}}>
-        {tier==='Hot'&&<button onClick={e=>{e.stopPropagation();onActivate(a);}}
-          style={{background:'#fffbeb',border:'1px solid #fde68a',fontFamily:'var(--font-sans)',fontSize:12,fontWeight:500,color:'#b45309',cursor:'pointer',padding:'4px 10px',borderRadius:6}}>Activate</button>}
+        {a.actioned
+          ? <span title="Already sent to Slack — click to re-send" onClick={e=>{e.stopPropagation();onActivate(a,true);}}
+              style={{display:'inline-flex',alignItems:'center',gap:4,background:'#f0fdf4',border:'1px solid #bbf7d0',fontFamily:'var(--font-sans)',fontSize:12,fontWeight:500,color:'#15803d',cursor:'pointer',padding:'4px 10px',borderRadius:6}}>
+              <Icon name="check" size={12}/>Activated</span>
+          : tier==='Hot'&&<button onClick={e=>{e.stopPropagation();onActivate(a);}}
+              style={{background:'#fffbeb',border:'1px solid #fde68a',fontFamily:'var(--font-sans)',fontSize:12,fontWeight:500,color:'#b45309',cursor:'pointer',padding:'4px 10px',borderRadius:6}}>Activate</button>}
         <span style={{color:hov?'#a1a1aa':'#e4e4e7'}}><Icon name="arrowRight" size={14}/></span>
       </div>
     </div>
@@ -535,13 +539,18 @@ function EngagementView({ pushToast }){
   function sync(){ setSyncing(true); pushToast&&pushToast('Syncing all sources (email, Salesforce, podcast, LinkedIn ads)…','muted');
     window.API.syncEngagement().then(()=>{ setRunning(true); setSyncing(false); pollSyncStatus(); })
       .catch(e=>{ setSyncing(false); pushToast&&pushToast(`Sync failed: ${e.message}`,'danger'); }); }
-  function handleActivate(a){ setActivating(null); setOpen(null);
-    pushToast&&pushToast(`Enriching ${a.name} + posting to Slack…`,'muted');
-    window.API.activateEngagement(a.id).then(r=>{
-      if(r&&r.already_activated){ pushToast&&pushToast(`${a.name} was already activated — not re-posted`,'muted'); return; }
+  function handleActivate(a, force=false){ setActivating(null); setOpen(null);
+    pushToast&&pushToast(`${force?'Re-sending':'Enriching'} ${a.name}${force?'':' + posting to Slack'}…`,'muted');
+    window.API.activateEngagement(a.id, force).then(r=>{
+      if(r&&r.already_activated){ pushToast&&pushToast(`${a.name} is already activated — not re-posted (use Activated → re-send)`,'muted'); return; }
       const n=(r&&r.contacts||[]).filter(p=>p.email||p.phone).length;
       pushToast&&pushToast(`Activated ${a.name} — posted to Slack${n?` with ${n} contact${n===1?'':'s'}`:''}`,'success');
+      load();   // refresh so the green "Activated" badge appears
     }).catch(e=>pushToast&&pushToast(`Activate failed: ${e.message}`,'danger')); }
+  function resetActivations(){
+    if(!window.confirm('Reset ALL activations? Every account can then be activated again (for testing).')) return;
+    window.API.resetActivations().then(r=>{ pushToast&&pushToast(`Reset ${r.reset} activation${r.reset===1?'':'s'} — accounts can be re-activated`,'success'); load(); })
+      .catch(e=>pushToast&&pushToast(`Reset failed: ${e.message}`,'danger')); }
 
   // Auto-activate Hot + Warm accounts (once each) when the toggle is on.
   // Hot → AE tagged + enrichment; Warm → SDR tagged, no enrichment.
@@ -609,6 +618,10 @@ function EngagementView({ pushToast }){
               : <span title={lastSync&&lastSync.last_synced_at?`Last completed ${new Date(lastSync.last_synced_at).toLocaleString()}`:'No sync has run yet'} style={{display:'inline-flex',alignItems:'center',gap:6,fontSize:12.5,color:'#71717a'}}>
                   <Icon name="check" size={13} style={{color:lastSync&&lastSync.last_synced_at?'#10b981':'#d4d4d8'}}/>{lastSync&&lastSync.last_synced_at?`Last synced ${relTime(lastSync.last_synced_at)}`:'Never synced'}
                 </span>}
+            <button onClick={resetActivations} title="Clear all 'Activated' marks so accounts can be re-activated (for testing)"
+              style={{display:'inline-flex',alignItems:'center',gap:6,borderRadius:8,background:'#fff',border:'1px solid #e4e4e7',padding:'8px 12px',fontFamily:'var(--font-sans)',fontSize:13,fontWeight:500,color:'#71717a',cursor:'pointer'}}>
+              <Icon name="refresh" size={14}/>Reset activations
+            </button>
             <button onClick={()=>{window.location.href='/api/engagement/export.csv';}}
               style={{display:'inline-flex',alignItems:'center',gap:6,borderRadius:8,background:'#fff',border:'1px solid #e4e4e7',padding:'8px 14px',fontFamily:'var(--font-sans)',fontSize:13,fontWeight:600,color:'#3f3f46',cursor:'pointer'}}>
               <Icon name="ext" size={15}/>Export CSV

@@ -125,7 +125,7 @@ function groupEvents(events){
   (events||[]).forEach(e=>{
     const day=e.ts?new Date(e.ts).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}):'—';
     const key=e.kind+'|'+day;
-    const g=m.get(key)||{kind:e.kind,day,count:0,pts:0,ts:'',unit:e.pts||0,people:[]};
+    const g=m.get(key)||{kind:e.kind,day,count:0,pts:0,ts:'',people:[]};
     g.count+=1; g.pts+=(e.pts||0); if((e.ts||'')>g.ts)g.ts=e.ts;
     const email=e.email||'';   // collect the distinct people behind this touch (for the hover)
     if(email&&!g.people.some(p=>p.email===email)) g.people.push({email,title:e.title||''});
@@ -373,13 +373,14 @@ function InboxView({ events, onResolve }){
 }
 
 // ── DRAWER ────────────────────────────────────────────────────────────────────
-// One timeline touch. On hover, touches worth MORE than 5 points reveal who engaged
-// (name derived from the email, plus the email and title). Lighter touches (click,
-// podcast, LinkedIn-ad) have no hover — there is no decision-maker worth naming there.
+// One timeline touch. On hover, any touch with a known person reveals who engaged
+// (name derived from the email, plus the email and title). Only bare email clicks
+// stay quiet. Account-level signals with no individual contact (e.g. Salesforce
+// meetings) have nothing to show, so no hover appears there.
 function TimelineRow({ g }){
   const m=kindOf(g.kind);
   const [hov,setHov]=useState(false);
-  const showWho=(g.unit||0)>5 && g.people && g.people.length>0;
+  const showWho=g.kind!=='click' && g.people && g.people.length>0;
   return (
     <div style={{position:'relative',paddingLeft:20,paddingBottom:14}}
       onMouseEnter={()=>showWho&&setHov(true)} onMouseLeave={()=>setHov(false)}>

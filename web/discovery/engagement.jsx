@@ -98,8 +98,10 @@ function mapDetail(d){
   const byId={};
   (d.contacts||[]).forEach(c=>{ if(c&&c.external_id!=null) byId[String(c.external_id)]={email:c.email||'',title:c.title||'',company:c.company||''}; });
   const events=(d.events||[]).map(e=>{ const c=byId[String(e.contact_ext)]||{};
+    const att=(e.raw&&e.raw.attendee)||{};   // SFDC meeting attendee (name only)
     return { kind:e.kind, label:kindOf(e.kind).label, person:e.campaign||e.company||'',
-      ts:e.occurred_at, pts:e.points||0, count:1, email:c.email||'', title:c.title||'' }; });
+      ts:e.occurred_at, pts:e.points||0, count:1,
+      email:c.email||'', title:c.title||'', name:att.name||'' }; });
   const contacts=(d.contacts||[]).map(c=>c.email||c.company||c.external_id).filter(Boolean);
   return { contacts, events };
 }
@@ -127,8 +129,8 @@ function groupEvents(events){
     const key=e.kind+'|'+day;
     const g=m.get(key)||{kind:e.kind,day,count:0,pts:0,ts:'',people:[]};
     g.count+=1; g.pts+=(e.pts||0); if((e.ts||'')>g.ts)g.ts=e.ts;
-    const email=e.email||'';   // collect the distinct people behind this touch (for the hover)
-    if(email&&!g.people.some(p=>p.email===email)) g.people.push({email,title:e.title||''});
+    const email=e.email||'',name=e.name||'';   // distinct people behind this touch (for the hover)
+    if((email||name)&&!g.people.some(p=>p.email===email&&p.name===name)) g.people.push({email,name,title:e.title||''});
     m.set(key,g);
   });
   return [...m.values()].sort((a,b)=>(a.ts||'').localeCompare(b.ts||''));
@@ -394,11 +396,12 @@ function TimelineRow({ g }){
       {hov&&showWho&&(
         <div style={{position:'absolute',left:20,bottom:'calc(100% - 6px)',zIndex:60,background:'#18181b',color:'#fff',borderRadius:8,padding:'8px 11px',boxShadow:'0 10px 28px rgba(0,0,0,.22)',minWidth:200,maxWidth:300}}>
           <div style={{fontSize:10,fontWeight:700,letterSpacing:'.05em',textTransform:'uppercase',color:'#a1a1aa',marginBottom:6}}>Who engaged</div>
-          {g.people.map((p,j)=>{ const nm=nameFromEmail(p.email); return (
+          {g.people.map((p,j)=>{ const nm=p.name||nameFromEmail(p.email); return (
             <div key={j} style={{marginBottom:j<g.people.length-1?7:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',maxWidth:278}}>
               {nm&&<div style={{fontSize:13,fontWeight:600,lineHeight:1.3}}>{nm}</div>}
-              <div style={{fontSize:12,color:'#d4d4d8',lineHeight:1.4}}>{p.email||'email not available'}</div>
+              {p.email&&<div style={{fontSize:12,color:'#d4d4d8',lineHeight:1.4}}>{p.email}</div>}
               {p.title&&<div style={{fontSize:11,color:'#a1a1aa',lineHeight:1.4}}>{p.title}</div>}
+              {!nm&&!p.email&&<div style={{fontSize:12,color:'#d4d4d8'}}>contact on file</div>}
             </div>
           ); })}
         </div>

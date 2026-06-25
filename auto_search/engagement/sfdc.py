@@ -100,6 +100,14 @@ def parse(meetings: list[dict], opportunities: list[dict], *, now: str | None = 
         occurred = (_dt(m.get("StartDateTime")) or _dt(m.get("ActivityDateTime"))
                     or _dt(m.get("CreatedDate")) or now)
         _record(acc["meeting"], occurred, _sid(m.get("Id")), m.get("Subject"))
+        # Capture the attendee NAME (Who.Name is already in the meeting query) from the
+        # most recent meeting, for the drawer's timeline hover. Who.Email isn't queryable
+        # here (WhoId is polymorphic Contact/Lead), so display is name-only (AGT-1442).
+        who = m.get("Who") or {}
+        nm = (who.get("Name") or "").strip()
+        if nm and occurred >= (acc["meeting"].get("attendee_at") or ""):
+            acc["meeting"]["attendee"] = {"name": nm, "type": who.get("Type")}
+            acc["meeting"]["attendee_at"] = occurred
 
     for o in opportunities:
         key, company, domain = _account_identity(o, name_from_subject=False)
@@ -165,6 +173,8 @@ def _event(account_key: str, channel: str, kind: str, company: str | None,
            slot: dict, now: str) -> dict:
     raw = {"count": len(slot["ids"]), "ids": slot["ids"],
            "subjects": slot["subjects"][:10], **slot["extra"]}
+    if slot.get("attendee"):                  # meeting attendee (name) for the hover
+        raw["attendee"] = slot["attendee"]
     return {
         "source": SOURCE, "external_id": f"{channel}:{kind}:{account_key}",
         "channel": channel, "kind": kind, "points": scoring.points_for(kind),

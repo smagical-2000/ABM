@@ -45,6 +45,36 @@ def test_meeting_event_shape_and_points():
     assert c["meeting_booked"] is True
 
 
+def test_meeting_captures_attendee_name_for_hover():
+    """Who.Name (already in the meeting query) is stored on the event raw so the drawer
+    timeline can name who attended. Scoring/dedup/contact_ext are unchanged."""
+    _, events = sfdc.parse([_meeting()], [], now="2026-06-15T00:00:00+00:00")
+    e = events[0]
+    assert e["raw"]["attendee"] == {"name": "Jo", "type": "Contact"}
+    assert e["contact_ext"] == "acct:001ACME" and e["points"] == 10   # unchanged
+
+
+def test_meeting_attendee_is_the_most_recent():
+    """When an account has several meetings, the hover shows the most-recent attendee."""
+    meetings = [_meeting(Id="00U1", StartDateTime="2026-06-20T00:00:00.000+0000",
+                         Who={"Name": "Early", "Type": "Contact"}),
+                _meeting(Id="00U2", StartDateTime="2026-06-25T00:00:00.000+0000",
+                         Who={"Name": "Latest", "Type": "Lead"})]
+    _, events = sfdc.parse(meetings, [])
+    e = next(x for x in events if x["kind"] == "meeting_booked")
+    assert e["raw"]["attendee"]["name"] == "Latest"
+    assert e["raw"]["count"] == 2                      # still account-level dedup (10 pts once)
+
+
+def test_meeting_without_who_has_no_attendee():
+    """A meeting with no Who (account-level auto-log) carries no attendee — graceful,
+    the hover simply does not appear. Opportunities never carry an attendee."""
+    _, m_events = sfdc.parse([_meeting(Who=None)], [], now="2026-06-15T00:00:00+00:00")
+    assert "attendee" not in m_events[0]["raw"]
+    _, o_events = sfdc.parse([], [_opp()])
+    assert "attendee" not in o_events[0]["raw"]
+
+
 def test_opportunity_event_shape_and_points():
     _, events = sfdc.parse([], [_opp()], now="2026-06-15T00:00:00+00:00")
     e = events[0]

@@ -52,6 +52,13 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(_app.engagement_sync_mod, "run_podcast_url_sync", _noop_sync_blocking)
     import auto_search.engagement.linkedin_ads_runner as _li
     monkeypatch.setattr(_li, "run", _noop_sync)
+    # _linkedin_tofu builds these BEFORE the (stubbed) runner; stub them too so the
+    # sync tests don't depend on AIRTABLE_*/REPLYIO env (absent in CI — this was the
+    # "works on my machine" red CI: the linkedin leg crashed constructing AirtableClient).
+    import auto_search.engagement.airtable_client as _atc
+    import auto_search.engagement.replyio_client as _rc
+    monkeypatch.setattr(_atc, "AirtableClient", lambda *a, **k: object())
+    monkeypatch.setattr(_rc, "ReplyioClient", lambda *a, **k: object())
 
     from auto_search.api.app import create_app
     with TestClient(create_app()) as c:

@@ -162,6 +162,15 @@
       "root_cause": "The formula wrapped the value in single quotes and SQL-style-escaped embedded quotes (\\'), which Airtable's formula grammar does not honor.",
       "guard": "tests/test_engagement_airtable_client.py::test_upsert_escapes_apostrophe_in_merge_value",
       "lesson": "Each query language has its own string-literal escaping — don't assume SQL rules. Airtable formulas: wrap the literal in DOUBLE quotes and escape only \\ and \"; an apostrophe is then literal. Match the target grammar, not a familiar one."
+    },
+    {
+      "id": "ci-red-test-depends-on-local-dotenv",
+      "date": "2026-06-25",
+      "area": "tests/test_engagement_api.py client fixture (consolidated sync tests)",
+      "symptom": "CI lint-and-test went red on every push: test_sync_runs_all_sources_best_effort failed with 'AIRTABLE_BASE_ID / AIRTABLE_LINKEDIN_TABLE not set' — the LinkedIn sync leg crashed constructing AirtableClient before reaching the mocked runner, so 'linkedin' was never recorded. It PASSED locally and only failed in CI.",
+      "root_cause": "The fixture stubbed linkedin_ads_runner.run but NOT the AirtableClient/ReplyioClient that _linkedin_tofu constructs BEFORE calling the runner. Those constructors need AIRTABLE_*/REPLYIO env, which exists locally via .env (load_dotenv) but not in CI — a hidden env dependency that 'works on my machine' masked.",
+      "guard": "tests/test_engagement_api.py::test_sync_runs_all_sources_best_effort (fixture now stubs AirtableClient + ReplyioClient)",
+      "lesson": "Tests must be env-independent: stub EVERY external client a code path constructs, not just the one that does I/O. 'Passes locally' is worthless when local .env supplies vars CI lacks — reproduce CI by moving .env aside. And verify the way CI does (ruff check . over the whole repo + bare pytest), not a narrower scoped command."
     }
   ]
 }

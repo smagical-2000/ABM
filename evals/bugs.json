@@ -180,6 +180,15 @@
       "root_cause": "FastAPI matches routes in registration order; a single-segment path under /api/engagement/ collides with the /api/engagement/{id} catch-all unless registered BEFORE it (like inbox/sync are). The new route was defined after {id}.",
       "guard": "tests/test_engagement_api.py::test_live_routing_toggle_get_and_set",
       "lesson": "Don't add a single-segment route after a sibling /{id} catch-all. Either register it earlier, or use a 2-segment namespaced path (e.g. /api/engagement/settings/live-routing, like /api/engagement/activations/reset) so {id} can't swallow it."
+    },
+    {
+      "id": "future-dated-sfdc-meeting",
+      "date": "2026-06-25",
+      "area": "auto_search/engagement/sfdc.py parse() meeting occurred_at + db/engagement_repository.py _event_row",
+      "symptom": "A Salesforce meeting SCHEDULED in the future (StartDateTime 2026-07-09 while today was 2026-06-25) was stored with that future occurred_at. It showed a future timeline entry ('Meeting booked Jul 9'), inflated current heat, and trivially passed the June-25 send cutoff (future >= cutoff) — so under permanent-live it would have pushed the account to AEs/SDRs off a meeting that had not happened.",
+      "root_cause": "parse() used StartDateTime (the meeting time, which can be in the future for a scheduled meeting) as the engagement signal date. The signal (a meeting was booked) actually occurs at CreatedDate.",
+      "guard": "tests/test_engagement_sfdc.py::test_meeting_scheduled_in_future_dates_to_booking_not_meeting_time; tests/test_engagement_repository.py::test_future_occurred_at_is_clamped_to_now",
+      "lesson": "An engagement signal's date is when the SIGNAL happened, not a scheduled future time. Use CreatedDate (booking) when StartDateTime is in the future, AND clamp occurred_at to now at the storage layer so no source can ever persist a future date. Future dates silently corrupt every date-gated rule downstream (send cutoff, momentum windows, recency)."
     }
   ]
 }

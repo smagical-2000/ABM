@@ -97,8 +97,16 @@ def parse(meetings: list[dict], opportunities: list[dict], *, now: str | None = 
         if not key:
             continue
         acc = _slot(accounts, key, company, domain)
-        occurred = (_dt(m.get("StartDateTime")) or _dt(m.get("ActivityDateTime"))
-                    or _dt(m.get("CreatedDate")) or now)
+        # A booked meeting can be SCHEDULED in the future; its StartDateTime would then be
+        # a future date that inflates today's heat, shows a future timeline entry, and
+        # trips the send cutoff. The signal (they agreed to meet) happened when the record
+        # was created, so use the meeting time only if it is in the past, else the booking
+        # date (CreatedDate); never let it exceed today.
+        start = _dt(m.get("StartDateTime")) or _dt(m.get("ActivityDateTime"))
+        created = _dt(m.get("CreatedDate"))
+        occurred = start if (start and start[:10] <= now[:10]) else (created or now)
+        if occurred[:10] > now[:10]:
+            occurred = now
         _record(acc["meeting"], occurred, _sid(m.get("Id")), m.get("Subject"))
         # Capture the attendee NAME (Who.Name is already in the meeting query) from the
         # most recent meeting, for the drawer's timeline hover. Who.Email isn't queryable

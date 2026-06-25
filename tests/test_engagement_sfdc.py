@@ -27,7 +27,7 @@ def _opp(**kw):
 
 
 def test_meeting_event_shape_and_points():
-    contacts, events = sfdc.parse([_meeting()], [], now="2026-06-15T00:00:00+00:00")
+    contacts, events = sfdc.parse([_meeting()], [], now="2026-06-25T00:00:00+00:00")
     assert len(contacts) == 1 and len(events) == 1
     e = events[0]
     assert e["source"] == "sfdc"
@@ -43,6 +43,21 @@ def test_meeting_event_shape_and_points():
     assert c["email_domain"] == "acme.com"                   # from Account.Website
     assert c["company_key"]                                  # normalized non-empty
     assert c["meeting_booked"] is True
+
+
+def test_meeting_scheduled_in_future_dates_to_booking_not_meeting_time():
+    """A meeting scheduled AHEAD must not be dated in the future (it would inflate today's
+    heat, show a future timeline entry, and trip the send cutoff). Use the booking date."""
+    m = _meeting(StartDateTime="2999-01-01T00:00:00.000+0000",
+                 CreatedDate="2026-06-10T00:00:00.000+0000")
+    _, events = sfdc.parse([m], [], now="2026-06-25T00:00:00+00:00")
+    assert events[0]["occurred_at"].startswith("2026-06-10")   # CreatedDate, not 2999
+
+
+def test_meeting_with_no_dates_falls_back_to_now_never_future():
+    m = _meeting(StartDateTime="2999-01-01T00:00:00.000+0000", CreatedDate=None)
+    _, events = sfdc.parse([m], [], now="2026-06-25T00:00:00+00:00")
+    assert events[0]["occurred_at"][:10] <= "2026-06-25"        # never in the future
 
 
 def test_meeting_captures_attendee_name_for_hover():

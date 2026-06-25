@@ -63,6 +63,18 @@ def test_setting_roundtrip_and_survives_reload(tmp_path):
     assert EngagementJsonRepository(path=str(path)).get_setting("live_routing") == "0"
 
 
+def test_future_occurred_at_is_clamped_to_now(tmp_path):
+    """A meeting scheduled in the future must never be stored as a future date — it would
+    inflate today's heat, show a future timeline entry, and trip the send cutoff."""
+    from datetime import UTC, datetime
+    repo = _repo(tmp_path)
+    repo.add_event(_event("crm:meeting_booked:acc_x", "meeting_booked", 10,
+                          at="2999-01-01T00:00:00+00:00"))
+    ev = repo.events_for_account("acc_x")[0]
+    assert not ev["occurred_at"].startswith("2999")                       # clamped
+    assert ev["occurred_at"][:10] <= datetime.now(UTC).date().isoformat()  # not in the future
+
+
 def test_deprecated_sao_excluded_from_heat_and_drawer(tmp_path):
     """Retired SAO events stay in storage (audit) but must NOT count toward heat,
     appear in the drawer (events_for_account), the inbox (recent_events), or momentum

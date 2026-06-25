@@ -143,6 +143,15 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _no_future(iso: Any) -> Any:
+    """Never store a future occurred_at. A meeting scheduled ahead (its StartDateTime is
+    in the future) would otherwise inflate today's heat, show a future timeline date, and
+    trip the send cutoff. Clamp to now; date-prefix compare is format/timezone agnostic."""
+    now = _now()
+    s = _iso(iso)
+    return now if isinstance(s, str) and s[:10] > now[:10] else s
+
+
 def _norm(row: dict) -> dict:
     """ISO-stringify datetime values so Postgres reads match the JSON repo's shape
     — the dual-repo parity rule (the sibling repos normalize the same way)."""
@@ -184,7 +193,7 @@ def _event_row(e: dict) -> dict:
         "company": e.get("company"),
         "account_id": e.get("account_id"),
         "campaign": e.get("campaign"),
-        "occurred_at": _iso(e["occurred_at"]),
+        "occurred_at": _no_future(e["occurred_at"]),
         "raw": e.get("raw") or {},
     }
 

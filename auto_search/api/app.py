@@ -1005,17 +1005,20 @@ def create_app() -> FastAPI:
                 from urllib.parse import quote
                 sep = "&" if "?" in app_url else "?"
                 app_url = f"{app_url}{sep}view=engagement&account={quote(account_id)}"
-            # Live routing (ENGAGEMENT_LIVE_ROUTING=1): real @-pings + per-tier channel
-            # (Hot→AE channel, Warm/Some→SDR channel). OFF (default) or a {"test":true}
-            # post → plain-text names on the private testing webhook, so testing never
-            # pings a real person or hits a channel with people in it.
-            live = engagement_notify.live_routing() and not is_test
+            # Live routing: real @-pings + per-tier channel (Hot→AE, Warm/Some→SDR).
+            # The console's runtime toggle (repo setting) overrides the env default;
+            # OFF (default) or a {"test":true} post → plain-text names on the private
+            # testing webhook, so testing never pings a real person or hits a channel
+            # with people in it.
+            override = repo.get_setting("live_routing")   # "1"/"0" from the UI, or None
+            live = (override == "1") if override is not None else engagement_notify.live_routing()
+            live = live and not is_test
             ids_override = None if live else {}   # None=use env IDs (ping); {}=plain @Name
             ae = engagement_notify.resolve_ae(account, ids=ids_override) if is_hot else None
             sdr_mention = (engagement_notify.resolve_sdr(account, ids=ids_override)
                            if is_sdr_tier else None)
             owner = ae or sdr_mention
-            webhook = engagement_notify.channel_webhook(is_ae=is_hot) if live else None
+            webhook = engagement_notify.tier_webhook(is_ae=is_hot) if live else None
             ok = await asyncio.to_thread(
                 engagement_notify.activate_account, account, events,
                 dms=dms, research=research, app_url=app_url, ae=owner, webhook=webhook,
@@ -1043,6 +1046,37 @@ def create_app() -> FastAPI:
             repo.release_activation(account_id)
             return {"reset": 1, "account_id": account_id}
         return {"reset": repo.reset_activations()}
+
+    def _live_routing_state(repo) -> dict:
+        """Resolve the effective live-routing state: the console toggle (repo) wins
+        over the env default. `source` tells the UI which one is in effect."""
+        override = repo.get_setting("live_routing")
+        if override is not None:
+            return {"enabled": override == "1", "source": "override"}
+        return {"enabled": engagement_notify.live_routing(), "source": "env"}
+
+    @app.get("/api/engagement/settings/live-routing")
+    async def engagement_live_routing_get():
+        """Whether activation cards go to the real AE/SDR channels with @-pings (live)
+        or stay on the private testing webhook with plain names (off)."""
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=503, detail="engagement store not available")
+        return _live_routing_state(repo)
+
+    @app.post("/api/engagement/settings/live-routing")
+    async def engagement_live_routing_set(request: Request):
+        """Flip the live-routing toggle. Body {"enabled": true|false}. Persists in the
+        repo so it survives restarts and is the source of truth over the env default.
+        Toggling sends nothing — it only changes where the NEXT activation routes."""
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=503, detail="engagement store not available")
+        body = await _json_body(request)
+        enabled = bool(body.get("enabled"))
+        repo.set_setting("live_routing", "1" if enabled else "0")
+        logger.info("engagement live-routing set to %s", "ON" if enabled else "OFF")
+        return _live_routing_state(repo)
 
     async def _linkedin_tofu(*, dry_run: bool, max_contacts: int | None = None,
                              max_leads: int | None = None, max_reactions: int = 50) -> dict:

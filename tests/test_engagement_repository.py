@@ -51,6 +51,18 @@ def test_activated_account_ids_and_reset(tmp_path):
     assert repo.claim_activation("acc_a") is True   # can re-activate after reset
 
 
+def test_setting_roundtrip_and_survives_reload(tmp_path):
+    """The live-routing toggle (and any runtime setting) persists across restarts so
+    the console button is the source of truth, not an env var."""
+    path = tmp_path / "eng.json"
+    repo = EngagementJsonRepository(path=str(path))
+    assert repo.get_setting("live_routing") is None      # unset → None (falls back to env)
+    repo.set_setting("live_routing", "1")
+    assert repo.get_setting("live_routing") == "1"
+    repo.set_setting("live_routing", "0")                 # upsert overwrites
+    assert EngagementJsonRepository(path=str(path)).get_setting("live_routing") == "0"
+
+
 def test_deprecated_sao_excluded_from_heat_and_drawer(tmp_path):
     """Retired SAO events stay in storage (audit) but must NOT count toward heat,
     appear in the drawer (events_for_account), the inbox (recent_events), or momentum

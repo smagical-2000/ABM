@@ -138,6 +138,14 @@ CREATE TABLE IF NOT EXISTS engagement_activations (
 );
 
 
+-- Persisted runtime settings (key/value), e.g. the live-routing toggle the console
+-- flips. Survives restarts so the UI button is the source of truth, not an env var.
+CREATE TABLE IF NOT EXISTS engagement_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+
 -- ── ENGAGED-ACCOUNTS rollup (derived at read time) ───────────────────────────
 -- score = SUM(points): because events are one-per-contact-per-kind, this already
 -- counts each contact's click(+1)/reply(+6)/meeting(+10) at most once. Rates come

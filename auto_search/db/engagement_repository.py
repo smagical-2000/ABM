@@ -108,6 +108,14 @@ class EngagementRepository(Protocol):
         """Clear the whole activation ledger (testing/replay). Returns rows removed."""
         ...
 
+    def get_setting(self, key: str) -> str | None:
+        """A persisted runtime setting (e.g. the live-routing toggle), or None."""
+        ...
+
+    def set_setting(self, key: str, value: str) -> None:
+        """Upsert a persisted runtime setting. Identical in both impls."""
+        ...
+
     def get_sync_state(self, source: str = SOURCE_REPLYIO) -> dict | None: ...
 
     def set_sync_state(self, source: str = SOURCE_REPLYIO, *, status: str | None = None,
@@ -351,6 +359,13 @@ class EngagementJsonRepository:
         self._flush()
         return n
 
+    def get_setting(self, key) -> str | None:
+        return self._store.get("settings", {}).get(key)
+
+    def set_setting(self, key, value) -> None:
+        self._store.setdefault("settings", {})[key] = value
+        self._flush()
+
     def get_sync_state(self, source=SOURCE_REPLYIO) -> dict | None:
         return self._store["sync"].get(source)
 
@@ -408,7 +423,8 @@ class EngagementJsonRepository:
 
 
 def _empty_store() -> dict:
-    return {"raw": [], "contacts": {}, "events": {}, "sync": {}, "activations": {}}
+    return {"raw": [], "contacts": {}, "events": {}, "sync": {}, "activations": {},
+            "settings": {}}
 
 
 # ── Postgres ──────────────────────────────────────────────────────────
@@ -594,6 +610,21 @@ class EngagementPostgresRepository:
     def reset_activations(self) -> int:
         with self._pool.connection() as conn:
             return conn.execute("DELETE FROM engagement_activations").rowcount
+
+    def get_setting(self, key) -> str | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT value FROM engagement_settings WHERE key = %s", (key,)
+            ).fetchone()
+        return row["value"] if row else None
+
+    def set_setting(self, key, value) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                """INSERT INTO engagement_settings (key, value) VALUES (%s, %s)
+                   ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""",
+                (key, value),
+            )
 
     def get_sync_state(self, source=SOURCE_REPLYIO) -> dict | None:
         with self._pool.connection() as conn:

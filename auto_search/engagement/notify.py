@@ -212,19 +212,18 @@ def _env_name(var: str) -> str | None:
 
 
 def live_routing() -> bool:
-    """When ON, activation cards route to the real AE/SDR channels and @-ping the
-    actual people. OFF (default) keeps every card on SLACK_ENGAGEMENT_WEBHOOK (the
-    private testing line) with plain-text names — so testing never disturbs a channel
-    with real people in it. Flip ENGAGEMENT_LIVE_ROUTING=1 to go live."""
+    """The ENV default for live routing. The console's runtime toggle (stored in the
+    repo) overrides this when set; the activate endpoint resolves the two. When live,
+    cards route to the real AE/SDR channels and @-ping the actual people. OFF (default)
+    keeps every card on SLACK_ENGAGEMENT_WEBHOOK (the private testing line) with
+    plain-text names — so testing never disturbs a channel with real people in it."""
     return (os.getenv("ENGAGEMENT_LIVE_ROUTING") or "").strip() in ("1", "true", "True")
 
 
-def channel_webhook(*, is_ae: bool) -> str | None:
-    """The destination webhook for a card when live routing is ON: the AE channel for
-    Hot (AE) cards, the SDR channel for Warm/Some (SDR) cards. None when not live or
-    unset, so post_card falls back to SLACK_ENGAGEMENT_WEBHOOK (the testing line)."""
-    if not live_routing():
-        return None
+def tier_webhook(*, is_ae: bool) -> str | None:
+    """The destination webhook for a tier: the AE channel for Hot (AE) cards, the SDR
+    channel for Warm/Some (SDR) cards. The caller only uses this when live; otherwise
+    it passes None so post_card falls back to SLACK_ENGAGEMENT_WEBHOOK (testing line)."""
     return (os.getenv("SLACK_AE_WEBHOOK") if is_ae else os.getenv("SLACK_SDR_WEBHOOK")) or None
 
 

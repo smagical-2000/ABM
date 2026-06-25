@@ -199,21 +199,18 @@ def test_live_routing_on_when_flag_set(monkeypatch):
     assert notify.live_routing() is True
 
 
-def test_channel_webhook_none_when_not_live(monkeypatch):
-    """Not live → no per-tier webhook, so post_card stays on the private testing line."""
-    monkeypatch.delenv("ENGAGEMENT_LIVE_ROUTING", raising=False)
+def test_tier_webhook_routes_by_tier(monkeypatch):
+    """tier_webhook maps tier→channel (the endpoint decides whether to use it)."""
     monkeypatch.setenv("SLACK_AE_WEBHOOK", "https://hooks.test/ae")
     monkeypatch.setenv("SLACK_SDR_WEBHOOK", "https://hooks.test/sdr")
-    assert notify.channel_webhook(is_ae=True) is None
-    assert notify.channel_webhook(is_ae=False) is None
+    assert notify.tier_webhook(is_ae=True) == "https://hooks.test/ae"      # Hot → AE channel
+    assert notify.tier_webhook(is_ae=False) == "https://hooks.test/sdr"    # Warm/Some → SDR
 
 
-def test_channel_webhook_routes_by_tier_when_live(monkeypatch):
-    monkeypatch.setenv("ENGAGEMENT_LIVE_ROUTING", "1")
-    monkeypatch.setenv("SLACK_AE_WEBHOOK", "https://hooks.test/ae")
-    monkeypatch.setenv("SLACK_SDR_WEBHOOK", "https://hooks.test/sdr")
-    assert notify.channel_webhook(is_ae=True) == "https://hooks.test/ae"     # Hot → AE channel
-    assert notify.channel_webhook(is_ae=False) == "https://hooks.test/sdr"   # Warm/Some → SDR
+def test_tier_webhook_none_when_unset(monkeypatch):
+    monkeypatch.delenv("SLACK_AE_WEBHOOK", raising=False)
+    monkeypatch.delenv("SLACK_SDR_WEBHOOK", raising=False)
+    assert notify.tier_webhook(is_ae=True) is None
 
 
 def test_resolve_uses_env_ids_when_none_but_plain_when_empty(monkeypatch):

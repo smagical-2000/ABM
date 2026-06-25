@@ -84,6 +84,13 @@ window.API = {
   resetActivations: (account_id) => http('/api/engagement/activations/reset', {
     method: 'POST', body: JSON.stringify(account_id ? { account_id } : {}),
   }),
+  // Live-routing toggle: ON = activation cards go to the real AE/SDR channels with
+  // @-pings; OFF = they stay on the private testing webhook with plain names.
+  // → { enabled, source: 'override'|'env' }. Toggling sends nothing.
+  liveRouting: () => http('/api/engagement/settings/live-routing'),
+  setLiveRouting: (enabled) => http('/api/engagement/settings/live-routing', {
+    method: 'POST', body: JSON.stringify({ enabled }),
+  }),
 
   // ── watch list: lone-standard-hire leads kept out of Discovery ──────────────
   parked: () => http('/api/discovery/parked'),                       // not yet qualified

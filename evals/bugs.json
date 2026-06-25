@@ -171,6 +171,15 @@
       "root_cause": "The fixture stubbed linkedin_ads_runner.run but NOT the AirtableClient/ReplyioClient that _linkedin_tofu constructs BEFORE calling the runner. Those constructors need AIRTABLE_*/REPLYIO env, which exists locally via .env (load_dotenv) but not in CI — a hidden env dependency that 'works on my machine' masked.",
       "guard": "tests/test_engagement_api.py::test_sync_runs_all_sources_best_effort (fixture now stubs AirtableClient + ReplyioClient)",
       "lesson": "Tests must be env-independent: stub EVERY external client a code path constructs, not just the one that does I/O. 'Passes locally' is worthless when local .env supplies vars CI lacks — reproduce CI by moving .env aside. And verify the way CI does (ruff check . over the whole repo + bare pytest), not a narrower scoped command."
+    },
+    {
+      "id": "engagement-route-collision-single-segment",
+      "date": "2026-06-25",
+      "area": "auto_search/api/app.py engagement routes",
+      "symptom": "A new GET /api/engagement/live-routing returned {'detail':'account not found'} — it was matched by the earlier GET /api/engagement/{id} account route (id='live-routing'), not the new handler.",
+      "root_cause": "FastAPI matches routes in registration order; a single-segment path under /api/engagement/ collides with the /api/engagement/{id} catch-all unless registered BEFORE it (like inbox/sync are). The new route was defined after {id}.",
+      "guard": "tests/test_engagement_api.py::test_live_routing_toggle_get_and_set",
+      "lesson": "Don't add a single-segment route after a sibling /{id} catch-all. Either register it earlier, or use a 2-segment namespaced path (e.g. /api/engagement/settings/live-routing, like /api/engagement/activations/reset) so {id} can't swallow it."
     }
   ]
 }

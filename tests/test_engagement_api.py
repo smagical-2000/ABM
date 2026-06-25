@@ -290,6 +290,63 @@ def test_activation_test_post_stays_private_even_when_live(client, monkeypatch):
     assert kw["webhook"] is None and kw["ae"] == "@Gabriel"   # private line, plain name
 
 
+def test_live_routing_toggle_get_and_set(client, monkeypatch):
+    """The console toggle reads/writes the live-routing state and persists it."""
+    monkeypatch.delenv("ENGAGEMENT_LIVE_ROUTING", raising=False)
+    s = client.get("/api/engagement/settings/live-routing").json()
+    assert s == {"enabled": False, "source": "env"}      # default off, from env
+    s2 = client.post("/api/engagement/settings/live-routing", json={"enabled": True}).json()
+    assert s2 == {"enabled": True, "source": "override"}  # toggled on, now an override
+    assert client.get("/api/engagement/settings/live-routing").json()["enabled"] is True
+
+
+def test_runtime_override_on_beats_env_off(client, monkeypatch):
+    """Flipping the UI toggle ON routes live even when the env default is OFF — no
+    redeploy needed."""
+    from auto_search.engagement import enrichment, notify
+
+    monkeypatch.delenv("ENGAGEMENT_LIVE_ROUTING", raising=False)   # env default OFF
+    monkeypatch.setenv("DEFAULT_SDR", "Gabriel")
+    monkeypatch.setenv("SDR_SLACK_IDS", "Gabriel=U096")
+    monkeypatch.setenv("SLACK_SDR_WEBHOOK", "https://hooks.test/sdr")
+
+    async def fake_enrich(domain, *, company=None):
+        return []
+
+    kw = {}
+    monkeypatch.setattr(enrichment, "enrich_account", fake_enrich)
+    monkeypatch.setattr(notify, "activate_account", lambda *a, **k: (kw.update(k) or True))
+
+    client.post("/api/engagement/settings/live-routing", json={"enabled": True})   # UI flips it on
+    r = client.post("/api/engagement/acc_x/activate", json={})            # acc_x Warm → SDR
+    assert r.status_code == 200
+    assert kw["webhook"] == "https://hooks.test/sdr"   # routed live despite env off
+    assert kw["ae"] == "<@U096>"                        # real ping
+
+
+def test_runtime_override_off_beats_env_on(client, monkeypatch):
+    """Flipping the UI toggle OFF keeps testing private even when env says live — the
+    console is the source of truth (an emergency 'stop pinging' switch)."""
+    from auto_search.engagement import enrichment, notify
+
+    monkeypatch.setenv("ENGAGEMENT_LIVE_ROUTING", "1")   # env default ON
+    monkeypatch.setenv("DEFAULT_SDR", "Gabriel")
+    monkeypatch.setenv("SDR_SLACK_IDS", "Gabriel=U096")
+    monkeypatch.setenv("SLACK_SDR_WEBHOOK", "https://hooks.test/sdr")
+
+    async def fake_enrich(domain, *, company=None):
+        return []
+
+    kw = {}
+    monkeypatch.setattr(enrichment, "enrich_account", fake_enrich)
+    monkeypatch.setattr(notify, "activate_account", lambda *a, **k: (kw.update(k) or True))
+
+    client.post("/api/engagement/settings/live-routing", json={"enabled": False})   # UI flips it off
+    r = client.post("/api/engagement/acc_x/activate", json={})
+    assert r.status_code == 200
+    assert kw["webhook"] is None and kw["ae"] == "@Gabriel"   # back to private + plain name
+
+
 def test_activate_dedups_across_users(client, monkeypatch):
     """Two reps activating the same account → it posts to Slack ONCE; the second gets
     already_activated with no spend. `force` deliberately re-activates."""

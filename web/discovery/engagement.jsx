@@ -546,6 +546,7 @@ function EngagementView({ pushToast }){
   const [running,setRunning]=useState(false);   // server-side: a sync is in progress
   const [live,setLive]=useState(null);          // server-side: live routing on/off (null=loading)
   const [cutoff,setCutoff]=useState(null);      // server-side: send-cutoff date (YYYY-MM-DD) or ''
+  const [settingsOpen,setSettingsOpen]=useState(false);   // gear popover (mode, cutoff, auto-route, reset)
   // Auto-activate: when on, every Hot account is activated once (enriched + posted
   // to Slack), deduped via localStorage so it never re-posts. Mirrors auto-score.
   const [autoActivate,setAutoActivate]=useState(()=>localStorage.getItem('autoActivateEnabled')==='1');
@@ -697,46 +698,71 @@ function EngagementView({ pushToast }){
             <h1 style={{margin:0,fontSize:24,fontWeight:600,letterSpacing:'-.02em',color:'#18181b'}}>Engagement</h1>
             <p style={{margin:'5px 0 0',fontSize:14,color:'#71717a',maxWidth:640}}>Buyer intent across email, podcast, Salesforce &amp; LinkedIn ads — matched to your accounts, ranked by heat.</p>
           </div>
-          <div style={{display:'flex',alignItems:'center',gap:12}}>
-            {live!==null &&
-              <label title={live
-                ? 'LIVE: activations post to the real AE/SDR channels and @-ping them. Click to switch back to testing.'
-                : 'Testing: activations stay on the private channel with plain names. Click to go live.'}
-                style={{display:'inline-flex',alignItems:'center',gap:7,fontSize:13,fontWeight:600,color:live?'#b91c1c':'#3f3f46',cursor:'pointer',userSelect:'none'}}>
-                <span onClick={toggleLive} style={{position:'relative',width:34,height:20,borderRadius:999,background:live?'#ef4444':'#e4e4e7',transition:'background .15s',flexShrink:0}}>
-                  <span style={{position:'absolute',top:2,left:live?16:2,width:16,height:16,borderRadius:'50%',background:'#fff',boxShadow:'0 1px 2px rgba(0,0,0,.2)',transition:'left .15s'}}/>
-                </span>
-                {live?'LIVE — real channels':'Testing only'}
-              </label>}
-            {cutoff!==null &&
-              <span onClick={editCutoff}
-                title="Send cutoff: only accounts with activity on or after this date are handed off to the AE/SDR channels; older already-processed accounts are held back. Click to change."
-                style={{display:'inline-flex',alignItems:'center',gap:5,fontSize:12.5,fontWeight:500,whiteSpace:'nowrap',color:cutoff?'#3f3f46':'#a1a1aa',cursor:'pointer',userSelect:'none',padding:'4px 10px',borderRadius:6,background:'#f4f4f5',border:'1px solid #e4e4e7'}}>
-                {cutoff?`Sending from ${cutoff}`:'No send cutoff'}
-              </span>}
-            <label title="Auto-route: Hot → AE (enrich + Slack), Warm → SDR (Slack only)"
-              style={{display:'inline-flex',alignItems:'center',gap:7,fontSize:13,color:'#3f3f46',cursor:'pointer',userSelect:'none'}}>
-              <span onClick={()=>setAutoActivate(v=>!v)} style={{position:'relative',width:34,height:20,borderRadius:999,background:autoActivate?'#10b981':'#e4e4e7',transition:'background .15s',flexShrink:0}}>
-                <span style={{position:'absolute',top:2,left:autoActivate?16:2,width:16,height:16,borderRadius:'50%',background:'#fff',boxShadow:'0 1px 2px rgba(0,0,0,.2)',transition:'left .15s'}}/>
-              </span>
-              Auto-route
-            </label>
-            {/* Live sync status: amber pulse while a background sync runs, else last-completed time */}
+          <div style={{display:'flex',alignItems:'center',gap:10}}>
+            {/* sync status — amber pulse while a background sync runs, else last-completed time */}
             {(running||syncing)
               ? <span title="A sync is running in the background (all sources)" style={{display:'inline-flex',alignItems:'center',gap:6,fontSize:12.5,fontWeight:600,color:'#b45309',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:999,padding:'5px 11px'}}>
-                  <span className="pulse" style={{width:7,height:7,borderRadius:'50%',background:'#f59e0b',display:'inline-block'}}/>Syncing all sources…
+                  <span className="pulse" style={{width:7,height:7,borderRadius:'50%',background:'#f59e0b',display:'inline-block'}}/>Syncing…
                 </span>
               : <span title={lastSync&&lastSync.last_synced_at?`Last completed ${new Date(lastSync.last_synced_at).toLocaleString()}`:'No sync has run yet'} style={{display:'inline-flex',alignItems:'center',gap:6,fontSize:12.5,color:'#71717a'}}>
-                  <Icon name="check" size={13} style={{color:lastSync&&lastSync.last_synced_at?'#10b981':'#d4d4d8'}}/>{lastSync&&lastSync.last_synced_at?`Last synced ${relTime(lastSync.last_synced_at)}`:'Never synced'}
+                  <Icon name="check" size={13} style={{color:lastSync&&lastSync.last_synced_at?'#10b981':'#d4d4d8'}}/>{lastSync&&lastSync.last_synced_at?`Synced ${relTime(lastSync.last_synced_at)}`:'Never synced'}
                 </span>}
-            <button onClick={resetActivations} title="Clear all 'Activated' marks so accounts can be re-activated (for testing)"
-              style={{display:'inline-flex',alignItems:'center',gap:6,borderRadius:8,background:'#fff',border:'1px solid #e4e4e7',padding:'8px 12px',fontFamily:'var(--font-sans)',fontSize:13,fontWeight:500,color:'#71717a',cursor:'pointer'}}>
-              <Icon name="refresh" size={14}/>Reset activations
-            </button>
+
+            {/* settings gear — mode toggle, send cutoff, auto-route, reset (decluttered out of the bar).
+                The dot shows the mode at a glance: red = LIVE, grey = testing. */}
+            <div style={{position:'relative'}}>
+              <button onClick={()=>setSettingsOpen(v=>!v)} title="Settings: live mode, send cutoff, auto-route, reset"
+                style={{display:'inline-flex',alignItems:'center',gap:7,borderRadius:8,background:settingsOpen?'#f4f4f5':'#fff',border:'1px solid #e4e4e7',padding:'8px 11px',fontFamily:'var(--font-sans)',fontSize:13,fontWeight:600,color:'#3f3f46',cursor:'pointer'}}>
+                <span style={{fontSize:14,lineHeight:1}}>⚙</span>
+                <span title={(live===true)?'Live':'Testing'} style={{display:'inline-block',width:7,height:7,borderRadius:'50%',background:(live===true)?'#ef4444':'#d4d4d8'}}/>
+              </button>
+              {settingsOpen && <>
+                <div onClick={()=>setSettingsOpen(false)} style={{position:'fixed',inset:0,zIndex:40}}/>
+                <div className="pop" style={{position:'absolute',right:0,top:'calc(100% + 8px)',zIndex:41,width:296,background:'#fff',border:'1px solid #e4e4e7',borderRadius:12,boxShadow:'0 10px 30px rgba(24,24,27,.13)',padding:6}}>
+                  {/* Live / Testing */}
+                  <div style={{display:'flex',alignItems:'center',gap:10,padding:'9px 10px',borderRadius:8}}>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:13,fontWeight:600,color:(live===true)?'#b91c1c':'#18181b'}}>{(live===true)?'Live — real channels':'Testing only'}</div>
+                      <div style={{fontSize:11.5,color:'#a1a1aa',marginTop:2,lineHeight:1.35}}>{(live===true)?'Activations ping the real AE/SDR channels':'Activations stay on your private channel'}</div>
+                    </div>
+                    <span onClick={toggleLive} title="Toggle live vs testing" style={{position:'relative',width:34,height:20,borderRadius:999,background:(live===true)?'#ef4444':'#e4e4e7',cursor:'pointer',flexShrink:0,transition:'background .15s'}}>
+                      <span style={{position:'absolute',top:2,left:(live===true)?16:2,width:16,height:16,borderRadius:'50%',background:'#fff',boxShadow:'0 1px 2px rgba(0,0,0,.2)',transition:'left .15s'}}/>
+                    </span>
+                  </div>
+                  {/* Send cutoff */}
+                  <div onClick={editCutoff} style={{display:'flex',alignItems:'center',gap:10,padding:'9px 10px',borderRadius:8,cursor:'pointer'}}>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:13,fontWeight:600,color:'#18181b'}}>Send cutoff</div>
+                      <div style={{fontSize:11.5,color:'#a1a1aa',marginTop:2}}>{cutoff?`Sending from ${cutoff}`:'No cutoff — everything sendable'}</div>
+                    </div>
+                    <span style={{fontSize:12,fontWeight:600,color:'#6366f1'}}>Edit</span>
+                  </div>
+                  {/* Auto-route */}
+                  <div style={{display:'flex',alignItems:'center',gap:10,padding:'9px 10px',borderRadius:8}}>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:13,fontWeight:600,color:'#18181b'}}>Auto-route</div>
+                      <div style={{fontSize:11.5,color:'#a1a1aa',marginTop:2,lineHeight:1.35}}>Auto-send each account once: Hot → AE, Warm/Some → SDR</div>
+                    </div>
+                    <span onClick={()=>setAutoActivate(v=>!v)} title="Toggle auto-route" style={{position:'relative',width:34,height:20,borderRadius:999,background:autoActivate?'#10b981':'#e4e4e7',cursor:'pointer',flexShrink:0,transition:'background .15s'}}>
+                      <span style={{position:'absolute',top:2,left:autoActivate?16:2,width:16,height:16,borderRadius:'50%',background:'#fff',boxShadow:'0 1px 2px rgba(0,0,0,.2)',transition:'left .15s'}}/>
+                    </span>
+                  </div>
+                  <div style={{height:1,background:'#f4f4f5',margin:'5px 8px'}}/>
+                  {/* Reset activations */}
+                  <button onClick={()=>{setSettingsOpen(false);resetActivations();}} title="Clear all 'Activated' marks so accounts can be re-activated"
+                    style={{display:'flex',alignItems:'center',gap:8,width:'100%',background:'none',border:'none',padding:'9px 10px',borderRadius:8,fontFamily:'var(--font-sans)',fontSize:13,fontWeight:500,color:'#71717a',cursor:'pointer',textAlign:'left'}}>
+                    <Icon name="refresh" size={14}/>Reset activations
+                  </button>
+                </div>
+              </>}
+            </div>
+
+            {/* Export */}
             <button onClick={()=>{window.location.href='/api/engagement/export.csv';}}
               style={{display:'inline-flex',alignItems:'center',gap:6,borderRadius:8,background:'#fff',border:'1px solid #e4e4e7',padding:'8px 14px',fontFamily:'var(--font-sans)',fontSize:13,fontWeight:600,color:'#3f3f46',cursor:'pointer'}}>
               <Icon name="ext" size={15}/>Export CSV
             </button>
+            {/* Sync all (primary) */}
             <button onClick={sync} disabled={syncing||running} title="Pull every engagement source: Reply.io email, Salesforce leads/meetings, podcast, and LinkedIn TOFU ad reactions" style={{display:'inline-flex',alignItems:'center',gap:7,borderRadius:8,background:'#4f46e5',border:'none',padding:'8px 14px',fontFamily:'var(--font-sans)',fontSize:13,fontWeight:600,color:'#fff',cursor:'pointer',boxShadow:'0 1px 2px rgba(24,24,27,.05)',opacity:(syncing||running)?.6:1}}>
               <Icon name="refresh" size={15} className={(syncing||running)?'spin':''}/>{(syncing||running)?'Syncing…':'Sync all'}
             </button>

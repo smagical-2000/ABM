@@ -79,6 +79,39 @@ async def test_enrich_no_decision_makers(monkeypatch):
     assert await enrichment.enrich_account("acme.com") == []
 
 
+@pytest.mark.asyncio
+async def test_enrich_contact_without_key_returns_none(monkeypatch):
+    """Per-contact helper (TOFU lead flow) is a no-op without a key — no spend, no break."""
+    monkeypatch.delenv("FULLENRICH_API_KEY", raising=False)
+    r = await enrichment.enrich_contact(first_name="Anna", last_name="Abm", domain="x.com")
+    assert r == {"email": None, "phone": None}
+
+
+@pytest.mark.asyncio
+async def test_enrich_contact_resolves_phone(monkeypatch):
+    monkeypatch.setenv("FULLENRICH_API_KEY", "k")
+
+    async def fake_fullenrich(dms, domain, company, key, http):
+        return [{**dms[0], "email": "anna@x.com", "phone": "+15557654321"}]
+
+    monkeypatch.setattr(enrichment, "_fullenrich", fake_fullenrich)
+    r = await enrichment.enrich_contact(first_name="Anna", last_name="Abm",
+                                        domain="x.com", company="ABM Health")
+    assert r == {"email": "anna@x.com", "phone": "+15557654321"}
+
+
+@pytest.mark.asyncio
+async def test_enrich_contact_swallows_errors(monkeypatch):
+    monkeypatch.setenv("FULLENRICH_API_KEY", "k")
+
+    async def boom(*a, **k):
+        raise RuntimeError("fullenrich down")
+
+    monkeypatch.setattr(enrichment, "_fullenrich", boom)
+    r = await enrichment.enrich_contact(first_name="A", last_name="B", domain="x.com")
+    assert r == {"email": None, "phone": None}      # never breaks the lead flow
+
+
 def test_merge_uses_custom_ref_and_tolerates_null_entries():
     # FullEnrich returns rows reordered + one null — must still map to the right person
     dms = [{"name": "A"}, {"name": "B"}, {"name": "C"}]

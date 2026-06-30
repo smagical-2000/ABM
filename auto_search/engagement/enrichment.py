@@ -56,6 +56,28 @@ async def enrich_account(domain: str | None, *, company: str | None = None,
         return [{**d, "email": None, "phone": None} for d in dms]
 
 
+async def enrich_contact(*, first_name: str | None, last_name: str | None,
+                         domain: str | None = None, company: str | None = None,
+                         linkedin: str | None = None,
+                         http: httpx.AsyncClient | None = None) -> dict:
+    """Resolve ONE known contact's verified mobile + work email via FullEnrich.
+    Returns {"email": ..., "phone": ...} (None if no key / not found / error). For the
+    TOFU lead flow, where we already have the person and only need the phone Apollo
+    missed. COSTS one credit — call only when needed (no Apollo phone) on a real run."""
+    key = _key()
+    if not key:
+        return {"email": None, "phone": None}
+    name = f"{(first_name or '').strip()} {(last_name or '').strip()}".strip()
+    dm = {"name": name, "linkedin": linkedin or ""}
+    try:
+        merged = await _fullenrich([dm], domain, company, key, http)
+    except Exception:  # noqa: BLE001 — enrichment must never break the lead flow
+        logger.exception("FullEnrich contact enrich failed for %s", name)
+        return {"email": None, "phone": None}
+    r = (merged or [{}])[0]
+    return {"email": r.get("email"), "phone": r.get("phone")}
+
+
 async def _fullenrich(dms: list[dict], domain: str | None, company: str | None,
                       key: str, http: httpx.AsyncClient | None) -> list[dict]:
     payload = {

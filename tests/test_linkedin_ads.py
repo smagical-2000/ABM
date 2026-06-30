@@ -197,6 +197,43 @@ async def test_live_run_upserts_and_records_heat(patched, monkeypatch):
     assert ev[0]["raw"]["category"] == "Ortho"
 
 
+async def test_fullenrich_fills_phone_to_airtable_on_live(patched, monkeypatch):
+    """Apollo returns no phone → FullEnrich resolves the mobile, and it lands on the
+    Airtable upsert (which syncs to Salesforce) and Reply.io. Flow unchanged; phone added."""
+    calls = []
+
+    async def fake_fe(*, first_name=None, last_name=None, domain=None,
+                      company=None, linkedin=None):
+        calls.append(last_name)
+        return {"email": None, "phone": "+15557654321"}
+
+    monkeypatch.setattr(runner.enrichment, "enrich_contact", fake_fe)
+    monkeypatch.setattr(runner, "cross_and_persist", lambda **kw: (2, 2))
+    air, reply = _FakeAirtable(), _FakeReply()
+    await runner.run(share_categories={"111": "Ortho"}, engagement_repo=object(),
+                     scoring_repo=None, discovery_repo=None,
+                     airtable_client=air, replyio_client=reply, dry_run=False)
+    assert calls                                                  # FullEnrich ran for no-phone leads
+    assert air.upserts[0]["fields"]["Phone"] == "+15557654321"    # → Airtable → Salesforce
+    assert reply.added[0]["phone"] == "+15557654321"             # → Reply.io
+
+
+async def test_fullenrich_not_called_on_dry_run(patched, monkeypatch):
+    """Dry runs never spend FullEnrich credits."""
+    calls = []
+
+    async def fake_fe(**kw):
+        calls.append(1)
+        return {"email": None, "phone": "x"}
+
+    monkeypatch.setattr(runner.enrichment, "enrich_contact", fake_fe)
+    air, reply = _FakeAirtable(), _FakeReply()
+    await runner.run(share_categories={"111": "Ortho"}, engagement_repo=None,
+                     scoring_repo=None, discovery_repo=None,
+                     airtable_client=air, replyio_client=reply, dry_run=True)
+    assert calls == []
+
+
 async def test_person_who_likes_two_posts_counts_once(patched, monkeypatch):
     monkeypatch.setattr(runner, "cross_and_persist", lambda **kw: (0, 0))
     out = await runner.run(share_categories={"111": "Ortho", "222": "Payers"},

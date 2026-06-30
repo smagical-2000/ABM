@@ -31,8 +31,8 @@ import logging
 from collections import Counter
 from datetime import UTC, datetime
 
+from auto_search.engagement import enrichment, scoring
 from auto_search.engagement import linkedin_ads as la
-from auto_search.engagement import scoring
 from auto_search.engagement.cross import build_index
 from auto_search.engagement.sync import cross_and_persist
 from auto_search.normalize import clean_domain, normalize_company_name
@@ -169,6 +169,18 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
 
         company = company or m.name
         campaign_id = la.campaign_for(r["category"])
+        # FullEnrich fallback for the mobile Apollo missed — real runs only (no dry-run
+        # spend), and only when Apollo returned no phone, so we never double-spend. The
+        # lead already passed the ABM + email gate, so the credit is worth it. The phone
+        # goes into the Airtable fields below (and on to Salesforce via Airtable's own
+        # sync — we never write SFDC here) plus Reply.io. Flow unchanged; phone added.
+        if not phone and not dry_run:
+            fe = await enrichment.enrich_contact(
+                first_name=first, last_name=last, domain=domain,
+                company=company, linkedin=enriched_url)
+            if fe.get("phone"):
+                phone = fe["phone"]
+                stats["fullenrich_phone"] += 1
         outcome = {
             "name": display, "email": email, "phone": phone, "title": title,
             "company": company, "domain": domain, "category": r["category"],

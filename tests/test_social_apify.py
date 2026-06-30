@@ -1,6 +1,6 @@
 """Apify parsing — pinned to the real dataset shapes captured from live runs."""
 
-from auto_search.social.apify import normalize_enrichment, parse_engagers
+from auto_search.social.apify import normalize_enrichment, normalize_profile, parse_engagers
 
 # Real shape from harvestapi~linkedin-profile-posts: a flat list mixing
 # 'reaction'/'comment'/'post' items; actors carry name/position/linkedinUrl.
@@ -61,3 +61,29 @@ def test_normalize_enrichment_nested_data():
 def test_normalize_enrichment_empty_is_none():
     assert normalize_enrichment([]) is None
     assert normalize_enrichment([{"data": {}}]) is None
+
+
+def test_normalize_profile_resolves_company_and_public_slug():
+    """harvestapi profile scraper result: current company from currentPosition[0], plus
+    the RESOLVED public slug (this is what fixes the ACoAAA enrichment dead-end)."""
+    items = [{
+        "firstName": "Alejandro", "lastName": "Fernandez",
+        "headline": "CEO", "linkedinUrl": "https://www.linkedin.com/in/alexfernandezmba",
+        "emails": [],
+        "currentPosition": [{"position": "Chief Executive Officer",
+                             "companyName": "Synergy Orthopedic Specialists",
+                             "companyLinkedinUrl": "https://www.linkedin.com/company/synergy/"}],
+    }]
+    out = normalize_profile(items)
+    assert out["company"] == "Synergy Orthopedic Specialists"
+    assert out["linkedin_url"] == "https://www.linkedin.com/in/alexfernandezmba"   # public slug
+    assert out["job_title"] == "Chief Executive Officer"
+    assert out["full_name"] == "Alejandro Fernandez"
+
+
+def test_normalize_profile_falls_back_to_experience_and_handles_empty():
+    items = [{"firstName": "Jo", "lastName": "Doe", "currentPosition": [],
+              "experience": [{"position": "CFO", "companyName": "Acme Health"}]}]
+    assert normalize_profile(items)["company"] == "Acme Health"
+    assert normalize_profile([]) is None
+    assert normalize_profile([{"firstName": "", "lastName": "", "currentPosition": []}]) is None

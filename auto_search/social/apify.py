@@ -191,10 +191,51 @@ async def fetch_engagers(
     return engagers
 
 
+_ACTOR_PROFILE = "harvestapi~linkedin-profile-scraper"
+
+
+def normalize_profile(items: list[dict]) -> dict | None:
+    """Pull the fields we need from a harvestapi linkedin-profile-scraper result.
+
+    Unlike the freshdata actor, this RESOLVES LinkedIn's obfuscated `ACoAAA…` member
+    URLs (what the post-reactions scraper returns) into the public profile, and gives
+    the *current* company + the public slug. Returns None if the profile didn't resolve.
+    Same key shape as `normalize_enrichment` so the caller is unchanged.
+    """
+    if not items or not isinstance(items[0], dict):
+        return None
+    p = items[0]
+    pos = p.get("currentPosition") or p.get("experience") or []
+    cur = pos[0] if pos and isinstance(pos[0], dict) else {}
+    first = (p.get("firstName") or "").strip()
+    last = (p.get("lastName") or "").strip()
+    full_name = (p.get("fullName") or f"{first} {last}").strip()
+    company = cur.get("companyName")
+    if not (full_name or company):
+        return None
+    emails = [e for e in (p.get("emails") or []) if isinstance(e, str) and e]
+    return {
+        "full_name": full_name,
+        "job_title": cur.get("position") or p.get("headline"),
+        "company": company,
+        "company_domain": None,            # this actor returns the company LinkedIn URL, not a website
+        "company_linkedin": cur.get("companyLinkedinUrl"),
+        "industry": None,
+        "employee_count": None,
+        "linkedin_url": p.get("linkedinUrl"),    # the RESOLVED public slug (not the ACoAAA id)
+        "email": emails[0] if emails else None,
+        "city": p.get("location"),
+        "country": None,
+    }
+
+
 async def enrich(linkedin_url: str, *, client: httpx.AsyncClient | None = None) -> dict | None:
-    """Enrich one LinkedIn profile URL → company + firmographics, or None."""
-    items = await _run_actor(_ACTOR_ENRICH, {"linkedin_url": linkedin_url}, client=client)
-    return normalize_enrichment(items)
+    """Enrich one LinkedIn profile URL → resolved public profile + current company, or
+    None. Uses harvestapi's profile scraper, which accepts LinkedIn's obfuscated
+    `ACoAAA…` member URLs — the freshdata actor returns nothing for those, which is why
+    the TOFU runner was dropping every reactor at 'no company'."""
+    items = await _run_actor(_ACTOR_PROFILE, {"queries": [linkedin_url]}, client=client)
+    return normalize_profile(items)
 
 
 # Reactions (likes) on a specific post — the LinkedIn TOFU ad-engagement flow. A

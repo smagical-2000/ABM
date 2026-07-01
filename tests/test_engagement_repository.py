@@ -18,6 +18,7 @@ from auto_search.db.engagement_repository import (
     EngagementJsonRepository,
     contact_person_key,
     dedupe_contacts,
+    engaging_contacts,
 )
 
 
@@ -160,17 +161,49 @@ def test_engaged_account_with_contact_only_has_rates_but_zero_score(tmp_path):
 
 def test_engaged_accounts_dedupes_same_person_across_sources(tmp_path):
     """The Central Ohio case: one human as an SFDC lead AND a Reply.io contact (same
-    email, different external_id, even different case) is ONE person — contacts counts
-    them once, while send-stats still sum."""
+    email, different external_id, even different case) is ONE person — counted once (they
+    engaged via an open), and send-stats still sum across both rows."""
     repo = _repo(tmp_path)
     repo.upsert_contact({"external_id": "sfdc-1", "source": "sfdc",
                          "account_id": "acc_x", "email": "s.ridge@copcp.com"})
     repo.upsert_contact({"external_id": "reply-1", "source": "replyio",
                          "account_id": "acc_x", "email": "S.Ridge@copcp.com",  # same, diff case
-                         "sent": 1, "delivered": 1})
+                         "sent": 1, "delivered": 1, "opened": 1})              # engaged (opened)
     a = {r["account_id"]: r for r in repo.engaged_accounts()}["acc_x"]
     assert a["contacts"] == 1                 # one person, not two source-rows
-    assert a["delivered"] == 1                # send-stats still counted
+    assert a["delivered"] == 1 and a["opened"] == 1
+
+
+def test_engaged_count_excludes_silent_recipients_includes_opens_meetings_events(tmp_path):
+    """"contacts engaging" = real engagements: an opener, a booked meeting (even with no
+    email), and a scored-event person — but NOT a delivered-but-never-opened recipient."""
+    repo = _repo(tmp_path)
+    repo.upsert_contact({"external_id": "op", "account_id": "acc_e",       # opener → counts
+                         "email": "opener@x.com", "delivered": 3, "opened": 2})
+    repo.upsert_contact({"external_id": "silent", "account_id": "acc_e",   # never opened → no
+                         "email": "silent@x.com", "delivered": 4, "opened": 0})
+    repo.upsert_contact({"external_id": "acct:001", "source": "sfdc",      # meeting, no email → counts
+                         "account_id": "acc_e", "meeting_booked": True})
+    repo.upsert_contact({"external_id": "linkedin:pid", "account_id": "acc_e",  # scored event → counts
+                         "email": "reactor@x.com"})
+    repo.add_event({"external_id": "linkedin:linkedin_tofu:pid", "channel": "linkedin",
+                    "kind": "linkedin_tofu", "points": 6, "contact_ext": "linkedin:pid",
+                    "account_id": "acc_e", "occurred_at": "2026-06-24T00:00:00+00:00"})
+    a = {r["account_id"]: r for r in repo.engaged_accounts()}["acc_e"]
+    assert a["contacts"] == 3                  # opener + meeting + reactor; silent excluded
+    assert a["delivered"] == 7                 # rates still over ALL recipients (3 + 4)
+
+
+def test_engaging_contacts_helper_filters_and_dedupes():
+    contacts = [
+        {"external_id": "op", "email": "o@x.com", "opened": 1},                 # engaged
+        {"external_id": "sil", "email": "s@x.com", "delivered": 5, "opened": 0},  # not
+        {"external_id": "acct:1", "meeting_booked": True},                      # meeting, no email
+        {"external_id": "li", "email": "r@x.com"},                              # engaged via event
+    ]
+    out = engaging_contacts(contacts, [{"contact_ext": "li", "points": 6}])
+    assert len(out) == 3                                       # silent recipient dropped
+    assert {c.get("email") for c in out} == {"o@x.com", "r@x.com", None}   # None = meeting row
 
 
 def test_dedupe_contacts_merges_by_email_and_is_idempotent():

@@ -168,10 +168,15 @@ WITH e AS (
 ),
 c AS (
     SELECT account_id,
-           -- distinct PEOPLE, not contact rows: the same human tracked under two
-           -- sources (e.g. SFDC lead + Reply.io contact, same email) counts once.
-           -- Mirrors contact_person_key() in engagement_repository.py.
-           COUNT(DISTINCT COALESCE(NULLIF(LOWER(email), ''), external_id)) AS contacts,
+           -- distinct ENGAGED people: opened/clicked/replied an email, a booked meeting,
+           -- or a scored event (LinkedIn reaction / BOFU lead / meeting) — a
+           -- delivered-but-silent recipient does NOT count. Same human across sources
+           -- counts once. Mirrors _contact_engaged + contact_person_key in the repo.
+           COUNT(DISTINCT COALESCE(NULLIF(LOWER(email), ''), external_id)) FILTER (
+               WHERE opened > 0 OR clicked > 0 OR replied > 0 OR meeting_booked
+                  OR external_id IN (SELECT contact_ext FROM engagement_events
+                                     WHERE COALESCE(points, 0) > 0)
+           )                                          AS contacts,
            SUM(delivered)  AS delivered,
            SUM(opened)     AS opened,
            SUM(replied)    AS replied_sends

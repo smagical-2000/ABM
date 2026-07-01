@@ -238,6 +238,52 @@ def test_tier_webhook_routes_by_tier(monkeypatch):
     assert notify.tier_webhook(is_ae=False) == "https://hooks.test/sdr"    # Warm/Some → SDR
 
 
+# ── TOFU low-intent lead card ────────────────────────────────────────────────
+
+def _lead(**kw):
+    base = {"name": "Michael Verdon", "title": "Chief Medical Officer",
+            "company": "Transcendent Care, Inc.", "email": "mv@transcendentcareinc.com",
+            "phone": "+1 908 842 3840", "segment": "specialty",
+            "linkedin": "https://www.linkedin.com/in/michael-verdon"}
+    base.update(kw)
+    return base
+
+
+def test_lead_card_structure_and_fields():
+    card = notify.build_lead_card(_lead())
+    blob = json.dumps(card, ensure_ascii=False)
+    assert card["attachments"][0]["color"] == "#2EB67D"          # green bar
+    assert card["attachments"][0]["blocks"][0]["type"] == "header"
+    assert "New TOFU Lead" in blob
+    assert "*Michael Verdon*" in blob and "Chief Medical Officer" in blob
+    assert "Transcendent Care, Inc." in blob and "mv@transcendentcareinc.com" in blob
+    assert "Specialty" in blob                                    # segment label, not the key
+    assert card["text"] == "New TOFU lead: Michael Verdon — Transcendent Care, Inc."
+
+
+def test_lead_card_linkedin_button_only_with_url():
+    with_btn = json.dumps(notify.build_lead_card(_lead()), ensure_ascii=False)
+    assert "LinkedIn profile" in with_btn
+    no_btn = json.dumps(notify.build_lead_card(_lead(linkedin="")), ensure_ascii=False)
+    assert "LinkedIn profile" not in no_btn                       # scheme-less/blank → no button
+
+
+def test_lead_card_test_footer():
+    blob = json.dumps(notify.build_lead_card(_lead(), test=True), ensure_ascii=False)
+    assert "Wiring test" in blob and "entering Salesforce" not in blob
+
+
+def test_lead_card_tolerates_missing_optionals():
+    card = notify.build_lead_card({"name": "Jane Doe"})          # no company/email/segment
+    blob = json.dumps(card, ensure_ascii=False)
+    assert "Jane Doe" in blob and "New TOFU Lead" in blob        # never raises
+
+
+def test_notify_lead_no_webhook_returns_false(monkeypatch):
+    monkeypatch.delenv("SLACK_TOFU_WEBHOOK", raising=False)
+    assert notify.notify_lead(_lead()) is False                   # no env, no crash
+
+
 def test_tier_webhook_none_when_unset(monkeypatch):
     monkeypatch.delenv("SLACK_AE_WEBHOOK", raising=False)
     monkeypatch.delenv("SLACK_SDR_WEBHOOK", raising=False)

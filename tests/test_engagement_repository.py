@@ -14,7 +14,11 @@ import os
 
 import pytest
 
-from auto_search.db.engagement_repository import EngagementJsonRepository
+from auto_search.db.engagement_repository import (
+    EngagementJsonRepository,
+    contact_person_key,
+    dedupe_contacts,
+)
 
 
 def _repo(tmp_path):
@@ -152,6 +156,47 @@ def test_engaged_account_with_contact_only_has_rates_but_zero_score(tmp_path):
     assert a["contacts"] == 1
     assert a["delivered"] == 7 and a["opened"] == 3
     assert a["last_touch"] is None
+
+
+def test_engaged_accounts_dedupes_same_person_across_sources(tmp_path):
+    """The Central Ohio case: one human as an SFDC lead AND a Reply.io contact (same
+    email, different external_id, even different case) is ONE person — contacts counts
+    them once, while send-stats still sum."""
+    repo = _repo(tmp_path)
+    repo.upsert_contact({"external_id": "sfdc-1", "source": "sfdc",
+                         "account_id": "acc_x", "email": "s.ridge@copcp.com"})
+    repo.upsert_contact({"external_id": "reply-1", "source": "replyio",
+                         "account_id": "acc_x", "email": "S.Ridge@copcp.com",  # same, diff case
+                         "sent": 1, "delivered": 1})
+    a = {r["account_id"]: r for r in repo.engaged_accounts()}["acc_x"]
+    assert a["contacts"] == 1                 # one person, not two source-rows
+    assert a["delivered"] == 1                # send-stats still counted
+
+
+def test_dedupe_contacts_merges_by_email_and_is_idempotent():
+    contacts = [
+        {"external_id": "sfdc-1", "source": "sfdc", "email": "a@x.com", "title": "CFO"},
+        {"external_id": "rep-1", "source": "replyio", "email": "A@x.com",  # same person
+         "sent": 1, "delivered": 1, "matched_lists": ["scored"]},
+        {"external_id": "li-9", "source": "linkedin_ads", "email": "b@y.com"},   # different
+        {"external_id": "no-mail", "source": "sfdc", "email": ""},               # blank → by id
+    ]
+    out = dedupe_contacts(contacts)
+    assert len(out) == 3                                   # a@x.com merged; b + blank stay
+    merged = next(c for c in out if c["email"] == "a@x.com")
+    assert merged["delivered"] == 1 and merged["title"] == "CFO"   # stats summed, title kept
+    assert merged["matched_lists"] == ["scored"]
+    assert set(merged["sources"]) == {"sfdc", "replyio"}
+    # idempotent — re-deduping yields the same people and preserves the source list
+    again = dedupe_contacts(out)
+    assert len(again) == 3
+    assert set(next(c for c in again if c["email"] == "a@x.com")["sources"]) == {"sfdc", "replyio"}
+
+
+def test_contact_person_key_prefers_email_then_external_id():
+    assert contact_person_key({"email": "A@X.com"}) == "a@x.com"       # case-folded
+    assert contact_person_key({"email": "", "external_id": "99"}) == "id:99"
+    assert contact_person_key({"external_id": "77"}) == "id:77"
 
 
 def test_engaged_accounts_ranked_by_score_desc(tmp_path):

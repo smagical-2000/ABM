@@ -168,7 +168,10 @@ WITH e AS (
 ),
 c AS (
     SELECT account_id,
-           COUNT(*)        AS contacts,
+           -- distinct PEOPLE, not contact rows: the same human tracked under two
+           -- sources (e.g. SFDC lead + Reply.io contact, same email) counts once.
+           -- Mirrors contact_person_key() in engagement_repository.py.
+           COUNT(DISTINCT COALESCE(NULLIF(LOWER(email), ''), external_id)) AS contacts,
            SUM(delivered)  AS delivered,
            SUM(opened)     AS opened,
            SUM(replied)    AS replied_sends

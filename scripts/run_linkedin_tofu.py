@@ -116,7 +116,10 @@ def main() -> int:
         logger.exception("[run_linkedin_tofu] run failed")
         return 1
     if not args.dry_run:                       # stamp the last real run for the throttle
-        engagement_repo.set_sync_state(source=_SYNC_SOURCE, status="ok", stats=summary["stats"])
+        # pass last_synced_at explicitly: set_sync_state only auto-stamps on
+        # status success/failed, so "ok" alone would leave it NULL (→ never throttles).
+        engagement_repo.set_sync_state(source=_SYNC_SOURCE, status="success",
+                                       stats=summary["stats"], last_synced_at=datetime.now(UTC))
     print(f"[run_linkedin_tofu] {'dry-run ' if args.dry_run else ''}ok: {summary['stats']}",
           flush=True)
     return 0

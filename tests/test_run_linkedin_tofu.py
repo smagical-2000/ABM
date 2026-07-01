@@ -51,6 +51,19 @@ def test_throttle_skips_recent_run_before_any_spend(monkeypatch):
     assert rlt.main() == 0
 
 
+def test_stamp_persists_last_synced_at_for_throttle(tmp_path):
+    """Regression: the run stamp must actually set last_synced_at (status='ok' does NOT
+    auto-stamp — the runner passes it explicitly), else the throttle never reads a time."""
+    from auto_search.db.engagement_repository import EngagementJsonRepository
+    repo = EngagementJsonRepository(path=str(tmp_path / "e.json"))
+    repo.set_sync_state(source=rlt._SYNC_SOURCE, status="success",
+                        stats={"scanned": 1}, last_synced_at=datetime.now(UTC))
+    st = repo.get_sync_state(source=rlt._SYNC_SOURCE)
+    assert st is not None
+    hrs = rlt._hours_since(st.get("last_synced_at"))
+    assert hrs is not None and hrs < 0.1        # stamped ~now → throttle would fire
+
+
 def test_no_throttle_when_no_prior_run(monkeypatch):
     """First run ever (no sync_state) is not throttled — it must proceed to the runner."""
     monkeypatch.setattr(rlt, "get_engagement_repository", lambda: _Repo(None))

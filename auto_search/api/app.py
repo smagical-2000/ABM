@@ -44,7 +44,11 @@ from auto_search.abm import (
 )
 from auto_search.api.auth import install_basic_auth
 from auto_search.db import get_repository
-from auto_search.db.engagement_repository import dedupe_contacts, get_engagement_repository
+from auto_search.db.engagement_repository import (
+    dedupe_contacts,
+    engaging_contacts,
+    get_engagement_repository,
+)
 from auto_search.db.scoring_repository import (
     STALE_SCORING_SECONDS,
     get_scoring_repository,
@@ -897,11 +901,12 @@ def create_app() -> FastAPI:
     def _engaged_one(account_id, events, contacts):
         """Single-account rollup for the drawer — from the rows already fetched, so
         opening a drawer doesn't recompute the whole board."""
-        contacts = dedupe_contacts(contacts)   # count distinct PEOPLE, not source-rows
+        allc = dedupe_contacts(contacts)                 # all recipients, for rate math
+        engaged = engaging_contacts(contacts, events)    # only people who actually engaged
         score = sum(e.get("points") or 0 for e in events)
-        delivered = sum(c.get("delivered") or 0 for c in contacts)
-        opened = sum(c.get("opened") or 0 for c in contacts)
-        replied = sum(c.get("replied") or 0 for c in contacts)
+        delivered = sum(c.get("delivered") or 0 for c in allc)
+        opened = sum(c.get("opened") or 0 for c in allc)
+        replied = sum(c.get("replied") or 0 for c in allc)
         s = {}
         if hasattr(app.state.scoring_repo, "get"):
             s = app.state.scoring_repo.get(account_id) or {}
@@ -916,11 +921,11 @@ def create_app() -> FastAPI:
             "clicks": sum(1 for e in events if e.get("kind") == "click"),
             "replies": sum(1 for e in events if e.get("kind") == "reply"),
             "meetings": sum(1 for e in events if e.get("kind") == "meeting_booked"),
-            "contacts": len(contacts), "delivered": delivered, "opened": opened,
+            "contacts": len(engaged), "delivered": delivered, "opened": opened,
             "replied_sends": replied,
             "last_touch": max((e.get("occurred_at") for e in events if e.get("occurred_at")),
                               default=None),
-            "lists": sorted({x for c in contacts for x in (c.get("matched_lists") or [])}),
+            "lists": sorted({x for c in allc for x in (c.get("matched_lists") or [])}),
             "open_rate": round(100 * opened / delivered) if delivered else None,
             "reply_rate": round(100 * replied / delivered) if delivered else None,
         }
@@ -931,11 +936,12 @@ def create_app() -> FastAPI:
         if not repo:
             raise HTTPException(status_code=404, detail="engagement not available")
         events = repo.events_for_account(account_id)
-        contacts = dedupe_contacts(repo.contacts(account_id=account_id))   # one row per person
-        if not events and not contacts:
+        raw = repo.contacts(account_id=account_id)
+        if not events and not raw:
             raise HTTPException(status_code=404, detail="account not found")
-        return {"account": _engaged_one(account_id, events, contacts),
-                "events": events, "contacts": contacts}
+        # avatars = the people who actually engaged (deduped), matching the count
+        return {"account": _engaged_one(account_id, events, raw),
+                "events": events, "contacts": engaging_contacts(raw, events)}
 
     @app.post("/api/engagement/{account_id}/activate")
     async def engagement_activate(account_id: str, request: Request):

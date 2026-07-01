@@ -196,6 +196,25 @@ def dedupe_contacts(contacts: list[dict]) -> list[dict]:
     return list(merged.values())
 
 
+def _contact_engaged(c: dict, scored_exts: set) -> bool:
+    """A row that actually ENGAGED, vs a mere recipient. True when it opened, clicked
+    or replied an email, has a booked-meeting flag, or is the subject of a scored event
+    (`scored_exts` = that account's event contact_exts). Opens count (0 heat, still
+    engagement); delivered-but-never-opened does not. Account-level meeting/opp rows (no
+    email) still count — a booked meeting is an engagement even without a named person."""
+    return (int(c.get("opened") or 0) > 0 or int(c.get("clicked") or 0) > 0
+            or int(c.get("replied") or 0) > 0 or bool(c.get("meeting_booked"))
+            or c.get("external_id") in scored_exts)
+
+
+def engaging_contacts(contacts: list[dict], events: list[dict]) -> list[dict]:
+    """Deduped ENGAGEMENTS for an account — the people (or account-level signals) that
+    actually engaged, one row per person. Drops delivered-but-silent recipients, then
+    dedupes across sources. Backs the "contacts engaging" count + the drawer avatars."""
+    scored_exts = {e.get("contact_ext") for e in events if (e.get("points") or 0) > 0}
+    return dedupe_contacts([c for c in contacts if _contact_engaged(c, scored_exts)])
+
+
 def _contact_row(c: dict) -> dict:
     """Normalize an inbound contact dict to the stored shape (defaults + types)."""
     return {
@@ -318,10 +337,13 @@ class EngagementJsonRepository:
 
     def engaged_accounts(self) -> list[dict]:
         ev: dict[str, dict] = {}
+        scored_exts: dict[str, set] = {}   # account -> contact_exts with a scored event
         for e in self._store["events"].values():
             aid = e.get("account_id")
             if not aid or e.get("kind") in DEPRECATED_KINDS:   # retired kinds never count
                 continue
+            if (e.get("points") or 0) > 0:
+                scored_exts.setdefault(aid, set()).add(e.get("contact_ext"))
             slot = ev.setdefault(aid, {"score": 0, "clicks": 0, "replies": 0,
                                        "meetings": 0, "last_touch": None})
             slot["score"] += int(e.get("points") or 0)
@@ -343,14 +365,17 @@ class EngagementJsonRepository:
                 continue
             slot = cc.setdefault(aid, {"contacts": 0, "delivered": 0,
                                        "opened": 0, "replied_sends": 0})
-            key = contact_person_key(c)          # same human across sources counts once
-            ks = seen_people.setdefault(aid, set())
-            if key not in ks:
-                ks.add(key)
-                slot["contacts"] += 1
-            slot["delivered"] += int(c.get("delivered") or 0)
+            slot["delivered"] += int(c.get("delivered") or 0)   # rates over ALL recipients
             slot["opened"] += int(c.get("opened") or 0)
             slot["replied_sends"] += int(c.get("replied") or 0)
+            # "contacts" = distinct ENGAGED people only (opened/clicked/replied, a booked
+            # meeting, or a scored event) — a delivered-but-silent recipient doesn't count.
+            if _contact_engaged(c, scored_exts.get(aid, set())):
+                key = contact_person_key(c)      # same human across sources counts once
+                ks = seen_people.setdefault(aid, set())
+                if key not in ks:
+                    ks.add(key)
+                    slot["contacts"] += 1
         rows = [_engaged_row(aid, ev.get(aid, {}), cc.get(aid, {}))
                 for aid in (set(ev) | set(cc))]
         rows.sort(key=lambda r: (r["score"], r.get("last_touch") or ""), reverse=True)

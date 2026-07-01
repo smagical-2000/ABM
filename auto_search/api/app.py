@@ -44,7 +44,7 @@ from auto_search.abm import (
 )
 from auto_search.api.auth import install_basic_auth
 from auto_search.db import get_repository
-from auto_search.db.engagement_repository import get_engagement_repository
+from auto_search.db.engagement_repository import dedupe_contacts, get_engagement_repository
 from auto_search.db.scoring_repository import (
     STALE_SCORING_SECONDS,
     get_scoring_repository,
@@ -897,6 +897,7 @@ def create_app() -> FastAPI:
     def _engaged_one(account_id, events, contacts):
         """Single-account rollup for the drawer — from the rows already fetched, so
         opening a drawer doesn't recompute the whole board."""
+        contacts = dedupe_contacts(contacts)   # count distinct PEOPLE, not source-rows
         score = sum(e.get("points") or 0 for e in events)
         delivered = sum(c.get("delivered") or 0 for c in contacts)
         opened = sum(c.get("opened") or 0 for c in contacts)
@@ -930,7 +931,7 @@ def create_app() -> FastAPI:
         if not repo:
             raise HTTPException(status_code=404, detail="engagement not available")
         events = repo.events_for_account(account_id)
-        contacts = repo.contacts(account_id=account_id)
+        contacts = dedupe_contacts(repo.contacts(account_id=account_id))   # one row per person
         if not events and not contacts:
             raise HTTPException(status_code=404, detail="account not found")
         return {"account": _engaged_one(account_id, events, contacts),

@@ -132,6 +132,74 @@ def activate_account(account: dict, events: list[dict], *, dms: list[dict] | Non
                      webhook=webhook, http=http)
 
 
+# ── TOFU low-intent lead → Slack (the "heads up before Salesforce" card) ──────
+# A single enriched LinkedIn-engagement lead, posted to SLACK_TOFU_WEBHOOK right
+# before it is created in Salesforce, so the team sees every TOFU lead as it lands.
+# Unlike the account activation card (clean, no emoji), this one is intentionally a
+# bit more visual — it's a fast scannable "new lead" ping, not a sales packet.
+
+_SEGMENT_LABEL = {"specialty": "Specialty", "health_system": "Health System",
+                  "payer": "Payer"}
+
+
+def build_lead_card(lead: dict, *, test: bool = False) -> dict:
+    """Slack Block Kit card for one TOFU low-intent lead. PURE.
+
+    `lead` keys (all optional except name): name, title, company, email, phone,
+    linkedin, segment (specialty/health_system/payer). Renders a green-barred card:
+    person up top, a two-column contact grid, the source line, a LinkedIn button,
+    and a context footer noting it's entering Salesforce."""
+    name = (lead.get("name") or "New lead").strip()
+    title = (lead.get("title") or "").strip()
+    company = (lead.get("company") or "—").strip()
+    email = (lead.get("email") or "").strip()
+    phone = (lead.get("phone") or "").strip()
+    linkedin = (lead.get("linkedin") or "").strip()
+    segment = _SEGMENT_LABEL.get((lead.get("segment") or "").strip().lower())
+
+    fields = [{"type": "mrkdwn", "text": f"*🏢 Company*\n{company}"}]
+    if segment:
+        fields.append({"type": "mrkdwn", "text": f"*🧭 Segment*\n{segment}"})
+    if email:
+        fields.append({"type": "mrkdwn", "text": f"*✉️ Email*\n{email}"})
+    if phone:
+        fields.append({"type": "mrkdwn", "text": f"*📞 Phone*\n{phone}"})
+
+    person = f"*{name}*" + (f"\n_{title}_" if title else "")
+    blocks: list[dict] = [
+        {"type": "header",
+         "text": {"type": "plain_text", "text": "🎯 New TOFU Lead", "emoji": True}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": person}},
+        {"type": "section", "fields": fields[:10]},
+        {"type": "section", "text": {"type": "mrkdwn",
+         "text": "*📣 Source*   LinkedIn · paid-social · _TOFU Engagement Campaign_"}},
+    ]
+    if linkedin.startswith(("http://", "https://")):   # Slack rejects scheme-less URLs
+        blocks.append({"type": "actions", "elements": [
+            {"type": "button", "text": {"type": "plain_text",
+             "text": "🔗 LinkedIn profile", "emoji": True}, "url": linkedin}]})
+    foot = "🧪 Wiring test" if test else "📥 Captured from LinkedIn engagement · entering Salesforce"
+    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": foot}]})
+
+    return {"text": f"New TOFU lead: {name} — {company}",
+            "attachments": [{"color": "#2EB67D", "blocks": blocks}]}
+
+
+def notify_lead(lead: dict, *, webhook: str | None = None, test: bool = False,
+                http: httpx.Client | None = None) -> bool:
+    """Build + post the TOFU lead card. Webhook defaults to SLACK_TOFU_WEBHOOK.
+    Best-effort (never raises) — a Slack hiccup must not block the Airtable write.
+
+    Resolves the hook here and no-ops when it's unset, rather than delegating to
+    post_card — otherwise a missing SLACK_TOFU_WEBHOOK would fall back to
+    SLACK_ENGAGEMENT_WEBHOOK and leak TOFU lead cards into the activation channel."""
+    hook = webhook or os.getenv("SLACK_TOFU_WEBHOOK")
+    if not hook:
+        logger.warning("SLACK_TOFU_WEBHOOK not set — skipping TOFU lead post")
+        return False
+    return post_card(build_lead_card(lead, test=test), webhook=hook, http=http)
+
+
 # ── AE routing (Hot account → owner) ─────────────────────────────────────────
 # Two operator-maintained maps, both env-driven so they change without a deploy:
 #   AE_SLACK_IDS   "Alykhan Jina=U01ABC;Manu Gupta=U02DEF"   (name -> Slack member id)

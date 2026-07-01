@@ -161,6 +161,41 @@ def _norm(row: dict) -> dict:
 _COUNT_FIELDS = ("sent", "delivered", "opened", "clicked", "replied", "bounced")
 
 
+def contact_person_key(c: dict) -> str:
+    """Dedup key so one human tracked under multiple sources counts once — e.g. the
+    same person as an SFDC lead AND a Reply.io sequence contact (same email, different
+    external_id). Email (lowercased) when present, else the source-scoped external_id.
+    Mirror of the SQL in engaged_accounts (COALESCE(NULLIF(LOWER(email),''), ext_id))."""
+    e = (c.get("email") or "").strip().lower()
+    return e or f"id:{c.get('external_id')}"
+
+
+def dedupe_contacts(contacts: list[dict]) -> list[dict]:
+    """Collapse contacts to one row per person (contact_person_key), merging send-stats
+    (summed), matched_lists (union), meeting flag (any), and sources. So a person in two
+    systems shows once with their combined activity — pure, order-preserving."""
+    merged: dict[str, dict] = {}
+    for c in contacts:
+        k = contact_person_key(c)
+        m = merged.get(k)
+        if m is None:
+            m = dict(c)
+            m["sources"] = (list(c["sources"]) if c.get("sources")     # idempotent re-dedupe
+                            else [c["source"]] if c.get("source") else [])
+            merged[k] = m
+            continue
+        for f in _COUNT_FIELDS:
+            m[f] = int(m.get(f) or 0) + int(c.get(f) or 0)
+        m["meeting_booked"] = bool(m.get("meeting_booked")) or bool(c.get("meeting_booked"))
+        m["matched_lists"] = sorted(set(m.get("matched_lists") or [])
+                                    | set(c.get("matched_lists") or []))
+        if not m.get("title") and c.get("title"):
+            m["title"] = c["title"]
+        if c.get("source") and c["source"] not in m["sources"]:
+            m["sources"].append(c["source"])
+    return list(merged.values())
+
+
 def _contact_row(c: dict) -> dict:
     """Normalize an inbound contact dict to the stored shape (defaults + types)."""
     return {
@@ -301,13 +336,18 @@ class EngagementJsonRepository:
             if ot and (slot["last_touch"] is None or ot > slot["last_touch"]):
                 slot["last_touch"] = ot
         cc: dict[str, dict] = {}
+        seen_people: dict[str, set] = {}   # account_id -> person keys (dedup the count)
         for c in self._store["contacts"].values():
             aid = c.get("account_id")
             if not aid:
                 continue
             slot = cc.setdefault(aid, {"contacts": 0, "delivered": 0,
                                        "opened": 0, "replied_sends": 0})
-            slot["contacts"] += 1
+            key = contact_person_key(c)          # same human across sources counts once
+            ks = seen_people.setdefault(aid, set())
+            if key not in ks:
+                ks.add(key)
+                slot["contacts"] += 1
             slot["delivered"] += int(c.get("delivered") or 0)
             slot["opened"] += int(c.get("opened") or 0)
             slot["replied_sends"] += int(c.get("replied") or 0)

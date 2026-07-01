@@ -27,11 +27,12 @@ enrichment + Apollo run only for not-yet-processed people, ABM survivors get the
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import Counter
 from datetime import UTC, datetime
 
-from auto_search.engagement import enrichment, scoring
+from auto_search.engagement import enrichment, notify, scoring
 from auto_search.engagement import linkedin_ads as la
 from auto_search.engagement.cross import build_index
 from auto_search.engagement.sync import cross_and_persist
@@ -195,6 +196,16 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
             if max_leads and leads >= max_leads:
                 break
             continue
+
+        # Slack heads-up BEFORE the lead is written to Airtable (Airtable then creates
+        # the Salesforce lead via its own automation). So the team sees every TOFU lead
+        # the moment it enters the pipeline, ahead of SFDC. Best-effort + off-loop (the
+        # poster is sync) so a Slack hiccup never blocks or slows the write.
+        if await asyncio.to_thread(notify.notify_lead, {
+                "name": display, "title": title, "company": company, "email": email,
+                "phone": phone, "linkedin": enriched_url,
+                "segment": la.segment_for(r["category"])}):
+            stats["slack_notified"] += 1
 
         # ── writes: Airtable first (the sink). Heat + Reply.io only if it lands, so a
         #    failed push never zombie-scores an account or pushes outreach. Airtable

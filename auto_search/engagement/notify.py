@@ -314,6 +314,41 @@ def tier_webhook(*, is_ae: bool) -> str | None:
     return (os.getenv("SLACK_AE_WEBHOOK") if is_ae else os.getenv("SLACK_SDR_WEBHOOK")) or None
 
 
+# ── tier-change handoff gating (auto AE/SDR push) ─────────────────────────────
+# Send ONCE per upward tier move, not on every point change: Some/Warm → SDR, Hot → AE.
+# Hot is terminal (rank can't rise past it, so it never re-sends). A downward drift
+# (decay/TTL) never re-sends. Callers persist the last-notified tier per account and
+# pass it in as `notified`.
+_TIER_RANK = {"lower": 0, "some": 1, "warm": 2, "hot": 3}
+
+
+def tier_role(tier: str | None) -> str | None:
+    """Owner role for a tier: Hot → 'ae', Warm/Some → 'sdr', else None (no handoff)."""
+    t = (tier or "").strip().lower()
+    if t == "hot":
+        return "ae"
+    if t in ("warm", "some"):
+        return "sdr"
+    return None
+
+
+def accounts_to_notify(accounts: list[dict], notified: dict[str, str]) -> list[dict]:
+    """Accounts whose tier ROSE above the last tier we notified them at — the only ones
+    that should fire a handoff. PURE. `notified` maps account_id -> last-notified tier.
+    Returns [{account, tier, role, prev}] (prev = the tier we last sent, 'Lower' if none).
+    Upward-only + Hot-terminal fall out of the rank compare."""
+    out: list[dict] = []
+    for a in accounts:
+        tier = a.get("tier") or "Lower"
+        role = tier_role(tier)
+        if not role:                                   # Lower / unknown → no handoff
+            continue
+        prev = notified.get(a.get("account_id")) or "Lower"
+        if _TIER_RANK.get(tier.lower(), 0) > _TIER_RANK.get(prev.lower(), 0):
+            out.append({"account": a, "tier": tier, "role": role, "prev": prev})
+    return out
+
+
 def _dm_lines(dms: list[dict] | None, *, limit: int = 5) -> str:
     """Up to `limit` decision-makers: '• *Jane Doe* — VP Revenue Cycle\\n   jane@x.com · +1…'."""
     out = []

@@ -718,11 +718,17 @@ def create_app() -> FastAPI:
             return "Physician Group - " + s[len("PGs - "):]
         return s
 
-    def _classify(scored: dict, abm: dict) -> dict:
+    def _classify(scored: dict, abm: dict, ai_framework: str | None = None) -> dict:
         """Classification shown on an engaged account: the scored system's framework +
         fit tier (authoritative) AND the segment (scored's, else cleaned ABM's). The
-        junk ABM segments collapse to None (the 'Unclassified' fix)."""
+        junk ABM segments collapse to None (the 'Unclassified' fix).
+
+        `ai_framework` is the Claude classification fallback for engaged-but-never-scored
+        accounts — used ONLY when there's no scored framework, and ONLY for routable
+        buckets (health_system/payer/specialty), so a guess never overrides real scoring."""
         fw = (scored or {}).get("framework")
+        if not fw and ai_framework in ("health_system", "payer", "specialty"):
+            fw = ai_framework
         fw_label = _FRAMEWORK_LABEL.get(fw, fw) if fw else None
         seg = _clean_segment((scored or {}).get("segment") or (abm or {}).get("segment"))
         # Re-resolve the fit tier against today's rubric (don't trust the stored label,
@@ -812,6 +818,8 @@ def create_app() -> FastAPI:
         series_by = repo.account_weekly_series(weeks=8)
         recent_by = _recent_touch_by_account(repo)
         activated = repo.activated_account_ids()   # which accounts a rep already actioned
+        import json as _json
+        ai_map = _json.loads(repo.get_setting("ai_classifications") or "{}")  # Claude fallbacks
         out: list[dict] = []
         for r in repo.engaged_accounts():
             aid = r["account_id"]
@@ -822,7 +830,7 @@ def create_app() -> FastAPI:
             out.append({
                 **r,
                 "name": s.get("name") or d.get("name") or aid,
-                **_classify(s, d),
+                **_classify(s, d, ai_map.get(aid)),
                 "domain": s.get("domain") or d.get("domain"),
                 "tier": engagement_scoring.tier_for(r.get("score") or 0),
                 "activated": aid in activated,   # show "Activated" so reps don't redo it
@@ -912,10 +920,13 @@ def create_app() -> FastAPI:
             s = app.state.scoring_repo.get(account_id) or {}
         d = (_abm_display(app.state.repo).get(account_id, {})
              if account_id.startswith("abm_") else {})
+        import json as _json
+        _repo = getattr(app.state, "engagement_repo", None)
+        _ai = _json.loads(_repo.get_setting("ai_classifications") or "{}") if _repo else {}
         return {
             "account_id": account_id,
             "name": s.get("name") or d.get("name") or account_id,
-            **_classify(s, d),
+            **_classify(s, d, _ai.get(account_id)),
             "domain": s.get("domain") or d.get("domain"),
             "score": score, "tier": engagement_scoring.tier_for(score),
             "clicks": sum(1 for e in events if e.get("kind") == "click"),
@@ -1137,6 +1148,45 @@ def create_app() -> FastAPI:
             repo.set_setting("notified_tiers", json.dumps(ledger))
         return {"due": len(due), "posted": posted, "live": live,
                 "dry_run": dry_run, "detail": fired[:60]}
+
+    @app.post("/api/engagement/classify")
+    async def engagement_classify(dry_run: bool = True, limit: int = 60):
+        """Claude-classify engaged accounts that have NO scored framework, from name+domain.
+        Stores ONLY high-confidence routable buckets (health_system/payer/specialty) into
+        the ai_classifications setting; uncertain / non-ICP are left Unclassified so a guess
+        never mislabels an account. dry_run=true (default) returns proposals without storing."""
+        import asyncio
+        import json
+
+        from auto_search.engagement import classify as classify_mod
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=503, detail="engagement store not available")
+        existing = json.loads(repo.get_setting("ai_classifications") or "{}")
+        todo = [a for a in _engaged_view()
+                if not (a.get("framework") or a.get("segment"))
+                and (a.get("score") or 0) > 0 and a["account_id"] not in existing][:limit]
+        sem = asyncio.Semaphore(5)
+
+        async def _one(a):
+            async with sem:
+                return a, await classify_mod.classify_account(a.get("name"), a.get("domain"))
+
+        results = await asyncio.gather(*[_one(a) for a in todo])
+        routable = ("health_system", "payer", "specialty")
+        detail, applied = [], 0
+        for a, r in results:
+            row = {"account": a.get("name"), "framework": r["framework"],
+                   "confidence": r["confidence"], "reason": r["reason"]}
+            if not dry_run and r["confidence"] == "high" and r["framework"] in routable:
+                existing[a["account_id"]] = r["framework"]
+                applied += 1
+                row["applied"] = True
+            detail.append(row)
+        if not dry_run:
+            repo.set_setting("ai_classifications", json.dumps(existing))
+        return {"evaluated": len(todo), "applied": applied, "stored_total": len(existing),
+                "dry_run": dry_run, "detail": detail[:80]}
 
     @app.get("/api/engagement/settings/live-routing")
     async def engagement_live_routing_get():

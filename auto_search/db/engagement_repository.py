@@ -75,6 +75,12 @@ class EngagementRepository(Protocol):
         """An account's meaningful touches, newest first (the drawer timeline)."""
         ...
 
+    def scores_before(self, cutoff: str) -> dict[str, int]:
+        """Per-account heat SUM from events dated strictly BEFORE `cutoff` (YYYY-MM-DD) —
+        the tier an account had as of the cutoff, so the notifier can baseline the
+        pre-cutoff state and fire only on tier changes that happened on/after it."""
+        ...
+
     def contacts(self, *, account_id: str | None = None,
                  unresolved_only: bool = False) -> list[dict]:
         """Contacts, optionally filtered to one account or to the unresolved queue
@@ -388,6 +394,15 @@ class EngagementJsonRepository:
         rows.sort(key=lambda e: e.get("occurred_at") or "", reverse=True)
         return rows
 
+    def scores_before(self, cutoff: str) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for e in self._store["events"].values():
+            aid = e.get("account_id")
+            oc = e.get("occurred_at") or ""
+            if aid and oc and oc[:10] < cutoff[:10] and e.get("kind") not in DEPRECATED_KINDS:
+                out[aid] = out.get(aid, 0) + int(e.get("points") or 0)
+        return out
+
     def account_weekly_series(self, *, weeks: int = 8) -> dict[str, list[int]]:
         rows = [(e.get("account_id"), e.get("occurred_at"), e.get("points"))
                 for e in self._store["events"].values()
@@ -610,6 +625,15 @@ class EngagementPostgresRepository:
                 (account_id,),
             ).fetchall()
         return [_norm(dict(r)) for r in rows]
+
+    def scores_before(self, cutoff: str) -> dict[str, int]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT account_id, SUM(points) AS s FROM engagement_events "
+                "WHERE account_id IS NOT NULL AND kind <> 'sales_accepted_opportunity' "
+                "AND occurred_at::date < %s::date GROUP BY account_id", (cutoff[:10],)
+            ).fetchall()
+        return {r["account_id"]: int(r["s"] or 0) for r in rows}
 
     def account_weekly_series(self, *, weeks: int = 8) -> dict[str, list[int]]:
         cutoff = datetime.now(UTC) - timedelta(weeks=weeks)

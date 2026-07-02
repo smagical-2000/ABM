@@ -646,6 +646,27 @@ function EngagementView({ pushToast }){
     window.API.setSendCutoff(v).then(s=>{ setCutoff(s.cutoff||'');
       pushToast&&pushToast(s.cutoff?`Send cutoff set to ${s.cutoff} — only newer activity is handed off`:'Send cutoff cleared — all activity is sendable','success'); })
       .catch(e=>pushToast&&pushToast(`Couldn't set cutoff: ${e.message}`,'danger')); }
+  // Tier-change AE/SDR notifier (manual): preview (dry-run, no posts), baseline (seed each
+  // account to its pre-cutoff tier so only FUTURE rises fire), or send (capped at 5). It
+  // fires once per upward tier move — Some/Warm → SDR, Hot → AE — respecting the live toggle.
+  function notifyChanges(kind){
+    const qs=kind==='preview'?'?dry_run=true':kind==='seed'?'?seed=true':'?limit=5';
+    if(kind==='send'&&!window.confirm('Send tier-change notifications now?\n\n'
+      +((live===true)?'LIVE — real AE/SDR channels.':'TEST — your private channel only.')
+      +'\n\nCapped at 5 cards for safety.')) return;
+    setSettingsOpen(false);
+    fetch('/api/engagement/notify-changes'+qs,{method:'POST'}).then(r=>r.json()).then(d=>{
+      if(kind==='seed'){ pushToast&&pushToast(`Baselined ${d.seeded} accounts to their pre-cutoff tier — only future rises fire`,'success'); return; }
+      const det=d.detail||[];
+      if(kind==='preview'){
+        const ae=det.filter(x=>x.role==='AE').length, sdr=det.filter(x=>x.role==='SDR').length;
+        if(console.table) console.table(det);
+        pushToast&&pushToast(`${d.due} would fire — ${ae} AE, ${sdr} SDR (preview only, nothing sent — details in console)`,'muted');
+        return;
+      }
+      pushToast&&pushToast(`Sent ${d.posted} tier-change card(s)${d.live?' to real channels':' to the private channel'}`,'success');
+    }).catch(e=>pushToast&&pushToast(`Notify failed: ${e.message}`,'danger'));
+  }
   // Auto-route accounts (once each) when the toggle is on:
   // Hot → AE; Warm + Some → SDR. All get the same enriched packet.
   // Sequential so we don't hammer Slack; deduped in localStorage + server-side.
@@ -746,6 +767,20 @@ function EngagementView({ pushToast }){
                     <span onClick={()=>setAutoActivate(v=>!v)} title="Toggle auto-route" style={{position:'relative',width:34,height:20,borderRadius:999,background:autoActivate?'#10b981':'#e4e4e7',cursor:'pointer',flexShrink:0,transition:'background .15s'}}>
                       <span style={{position:'absolute',top:2,left:autoActivate?16:2,width:16,height:16,borderRadius:'50%',background:'#fff',boxShadow:'0 1px 2px rgba(0,0,0,.2)',transition:'left .15s'}}/>
                     </span>
+                  </div>
+                  <div style={{height:1,background:'#f4f4f5',margin:'5px 8px'}}/>
+                  {/* Tier-change alerts (AE/SDR push) */}
+                  <div style={{padding:'9px 10px'}}>
+                    <div style={{fontSize:13,fontWeight:600,color:'#18181b'}}>Tier-change alerts</div>
+                    <div style={{fontSize:11.5,color:'#a1a1aa',marginTop:2,lineHeight:1.35}}>Fire once per upward move: Some/Warm → SDR, Hot → AE.</div>
+                    <div style={{display:'flex',gap:6,marginTop:8}}>
+                      <button onClick={()=>notifyChanges('preview')} title="Dry-run: see who would fire + routing, sends nothing"
+                        style={{flex:1,background:'#fff',border:'1px solid #e4e4e7',borderRadius:7,padding:'6px 0',fontFamily:'var(--font-sans)',fontSize:12,fontWeight:600,color:'#3f3f46',cursor:'pointer'}}>Preview</button>
+                      <button onClick={()=>notifyChanges('seed')} title="Baseline every account to its pre-cutoff tier so only FUTURE rises fire (run once)"
+                        style={{flex:1,background:'#fff',border:'1px solid #e4e4e7',borderRadius:7,padding:'6px 0',fontFamily:'var(--font-sans)',fontSize:12,fontWeight:600,color:'#3f3f46',cursor:'pointer'}}>Baseline</button>
+                      <button onClick={()=>notifyChanges('send')} title="Send tier-change cards (capped at 5; test channel unless Live is on)"
+                        style={{flex:1,background:'#4f46e5',border:'none',borderRadius:7,padding:'6px 0',fontFamily:'var(--font-sans)',fontSize:12,fontWeight:600,color:'#fff',cursor:'pointer'}}>Send</button>
+                    </div>
                   </div>
                   <div style={{height:1,background:'#f4f4f5',margin:'5px 8px'}}/>
                   {/* Reset activations */}

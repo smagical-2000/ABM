@@ -1096,12 +1096,18 @@ def create_app() -> FastAPI:
         if not repo:
             raise HTTPException(status_code=503, detail="engagement store not available")
         ledger = json.loads(repo.get_setting("notified_tiers") or "{}")
-        due = engagement_notify.accounts_to_notify(_engaged_view(), ledger)
-        if seed:   # baseline every current tier as already-sent, no posts
-            for d in due:
-                ledger[d["account"]["account_id"]] = d["tier"]
+        board = _engaged_view()
+        if seed:   # baseline each account to its PRE-CUTOFF tier (events before the cutoff)
+            # so the notifier fires ONLY on tier changes on/after the cutoff: an account
+            # already Warm/Some before the cutoff won't re-fire — it waits for the NEXT rise
+            # (e.g. Warm-2-months-ago only pings when it becomes Hot post-cutoff).
+            cutoff = (repo.get_setting("activation_cutoff") or "").strip() or "2026-06-25"
+            pre = repo.scores_before(cutoff)
+            for a in board:
+                ledger[a["account_id"]] = engagement_scoring.tier_for(pre.get(a["account_id"], 0))
             repo.set_setting("notified_tiers", json.dumps(ledger))
-            return {"seeded": len(due), "posted": 0}
+            return {"seeded": len(board), "cutoff": cutoff}
+        due = engagement_notify.accounts_to_notify(board, ledger)
         live = _live_routing_state(repo)["enabled"]
         ids_override = None if live else {}   # None = env ids (ping); {} = plain @Name (test)
         fired, posted = [], 0

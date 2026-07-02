@@ -206,6 +206,17 @@ def test_engaging_contacts_helper_filters_and_dedupes():
     assert {c.get("email") for c in out} == {"o@x.com", "r@x.com", None}   # None = meeting row
 
 
+def test_scores_before_sums_only_pre_cutoff_events(tmp_path):
+    """The notifier's pre-cutoff baseline: only events strictly before the cutoff count,
+    so an account already Warm before the cutoff isn't re-notified for that tier."""
+    repo = _repo(tmp_path)
+    repo.add_event(_event("e1", "linkedin_tofu", 6, account_id="acc_z",
+                          at="2026-06-20T00:00:00+00:00"))    # before cutoff → counts
+    repo.add_event(_event("e2", "meeting_booked", 10, account_id="acc_z",
+                          at="2026-06-26T00:00:00+00:00"))    # after cutoff → excluded
+    assert repo.scores_before("2026-06-25") == {"acc_z": 6}
+
+
 def test_dedupe_contacts_merges_by_email_and_is_idempotent():
     contacts = [
         {"external_id": "sfdc-1", "source": "sfdc", "email": "a@x.com", "title": "CFO"},

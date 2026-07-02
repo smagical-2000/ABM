@@ -411,3 +411,27 @@ def test_card_no_intel_block_when_no_research():
     blob = json.dumps(card, ensure_ascii=False)
     assert "Account intel" not in blob
     assert not any(b.get("type") == "divider" for b in card["blocks"])
+
+
+def test_tier_role_routes_hot_to_ae_warm_some_to_sdr():
+    assert notify.tier_role("Hot") == "ae"
+    assert notify.tier_role("Warm") == "sdr"
+    assert notify.tier_role("Some") == "sdr"
+    assert notify.tier_role("Lower") is None
+    assert notify.tier_role(None) is None
+
+
+def test_accounts_to_notify_upward_only_and_hot_terminal():
+    """Fire only on an upward tier move; Hot is terminal; downward drift + Lower never fire."""
+    accounts = [
+        {"account_id": "new_some", "tier": "Some"},   # never notified → SDR
+        {"account_id": "up_warm", "tier": "Warm"},    # was Some → SDR (moved up)
+        {"account_id": "up_hot", "tier": "Hot"},      # was Warm → AE (moved up)
+        {"account_id": "still_hot", "tier": "Hot"},   # was Hot → terminal, no fire
+        {"account_id": "decayed", "tier": "Some"},    # was Warm → downward, no fire
+        {"account_id": "low", "tier": "Lower"},       # not notifiable
+    ]
+    ledger = {"up_warm": "Some", "up_hot": "Warm", "still_hot": "Hot", "decayed": "Warm"}
+    got = {d["account"]["account_id"]: d["role"]
+           for d in notify.accounts_to_notify(accounts, ledger)}
+    assert got == {"new_some": "sdr", "up_warm": "sdr", "up_hot": "ae"}

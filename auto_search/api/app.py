@@ -1081,6 +1081,52 @@ def create_app() -> FastAPI:
             return {"enabled": override == "1", "source": "override"}
         return {"enabled": engagement_notify.live_routing(), "source": "env"}
 
+    @app.post("/api/engagement/notify-changes")
+    def engagement_notify_changes(dry_run: bool = False, seed: bool = False, limit: int = 0):
+        """Auto AE/SDR push, TIER-CHANGE gated. Posts one card per account whose tier ROSE
+        above the last tier we notified it at: Some/Warm → SDR, Hot → AE. Hot is terminal;
+        downward drift never re-sends. Respects the live-routing toggle (OFF → private test
+        channel, plain names). Ledger = the `notified_tiers` setting (account_id -> tier).
+          dry_run=true → return what WOULD fire; no posts, no ledger change.
+          seed=true    → record current tiers as already-notified WITHOUT posting (run once
+                         so the first live run doesn't flood every existing account).
+          limit=N      → cap posts to N (small test batch)."""
+        import json
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=503, detail="engagement store not available")
+        ledger = json.loads(repo.get_setting("notified_tiers") or "{}")
+        due = engagement_notify.accounts_to_notify(_engaged_view(), ledger)
+        if seed:   # baseline every current tier as already-sent, no posts
+            for d in due:
+                ledger[d["account"]["account_id"]] = d["tier"]
+            repo.set_setting("notified_tiers", json.dumps(ledger))
+            return {"seeded": len(due), "posted": 0}
+        live = _live_routing_state(repo)["enabled"]
+        ids_override = None if live else {}   # None = env ids (ping); {} = plain @Name (test)
+        fired, posted = [], 0
+        for d in due:
+            a, tier, is_ae = d["account"], d["tier"], d["role"] == "ae"
+            owner = (engagement_notify.resolve_ae(a, ids=ids_override) if is_ae
+                     else engagement_notify.resolve_sdr(a, ids=ids_override))
+            entry = {"account": a.get("name"), "from": d["prev"], "to": tier,
+                     "role": "AE" if is_ae else "SDR", "owner": owner,
+                     "channel": (("AE" if is_ae else "SDR") + " channel") if live else "private-test"}
+            if not dry_run and (not limit or posted < limit):
+                webhook = engagement_notify.tier_webhook(is_ae=is_ae) if live else None
+                events = repo.events_for_account(a["account_id"])
+                ok = engagement_notify.activate_account(a, events, ae=owner,
+                                                        webhook=webhook, dm_limit=0)
+                entry["posted"] = bool(ok)
+                if ok:
+                    ledger[a["account_id"]] = tier
+                    posted += 1
+            fired.append(entry)
+        if not dry_run:
+            repo.set_setting("notified_tiers", json.dumps(ledger))
+        return {"due": len(due), "posted": posted, "live": live,
+                "dry_run": dry_run, "detail": fired[:60]}
+
     @app.get("/api/engagement/settings/live-routing")
     async def engagement_live_routing_get():
         """Whether activation cards go to the real AE/SDR channels with @-pings (live)

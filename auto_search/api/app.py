@@ -1092,6 +1092,7 @@ def create_app() -> FastAPI:
                          so the first live run doesn't flood every existing account).
           limit=N      → cap posts to N (small test batch)."""
         import json
+        from urllib.parse import quote
         repo = getattr(app.state, "engagement_repo", None)
         if not repo:
             raise HTTPException(status_code=503, detail="engagement store not available")
@@ -1110,6 +1111,7 @@ def create_app() -> FastAPI:
         due = engagement_notify.accounts_to_notify(board, ledger)
         live = _live_routing_state(repo)["enabled"]
         ids_override = None if live else {}   # None = env ids (ping); {} = plain @Name (test)
+        app_base = os.getenv("ENGAGEMENT_APP_URL")   # deep-link back to the ABM console
         fired, posted = [], 0
         for d in due:
             a, tier, is_ae = d["account"], d["tier"], d["role"] == "ae"
@@ -1120,8 +1122,11 @@ def create_app() -> FastAPI:
                      "channel": (("AE" if is_ae else "SDR") + " channel") if live else "private-test"}
             if not dry_run and (not limit or posted < limit):
                 webhook = engagement_notify.tier_webhook(is_ae=is_ae) if live else None
+                # "Open in console" deep-link → this account's drawer in the ABM platform
+                app_url = (f"{app_base}{'&' if '?' in app_base else '?'}"
+                           f"view=engagement&account={quote(a['account_id'])}") if app_base else None
                 events = repo.events_for_account(a["account_id"])
-                ok = engagement_notify.activate_account(a, events, ae=owner,
+                ok = engagement_notify.activate_account(a, events, ae=owner, app_url=app_url,
                                                         webhook=webhook, dm_limit=0)
                 entry["posted"] = bool(ok)
                 if ok:

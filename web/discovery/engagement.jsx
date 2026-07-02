@@ -143,19 +143,21 @@ const TX = {
 };
 
 function Sparkline({ series, color, w=92, h=30, fill=true, animate=true }){
+  const P=5;  // inset so the end dot (r≈4.5) + its glow stay inside the box (no leak)
   const max=Math.max(...series,1), min=Math.min(...series,0);
   const span=max-min||1;
   const pts=series.map((v,i)=>{
-    const x=(i/(series.length-1||1))*(w-4)+2;
-    const y=h-3-((v-min)/span)*(h-6);
+    const x=(i/(series.length-1||1))*(w-2*P)+P;
+    const y=h-P-((v-min)/span)*(h-2*P);
     return [x,y];
   });
   const line=pts.map((p,i)=>`${i?'L':'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
-  const area=`${line} L${(w-2).toFixed(1)},${h-1} L2,${h-1} Z`;
+  const area=`${line} L${(w-P).toFixed(1)},${(h-P).toFixed(1)} L${P.toFixed(1)},${(h-P).toFixed(1)} Z`;
   const last=pts[pts.length-1];
   const gid='sg'+Math.random().toString(36).slice(2,8);
   return (
-    <svg width={w} height={h} style={{display:'block',overflow:'visible'}}>
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}
+         style={{display:'block',maxWidth:'100%',overflow:'hidden'}}>
       <defs><linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%" stopColor={color} stopOpacity="0.16"/>
         <stop offset="100%" stopColor={color} stopOpacity="0"/>

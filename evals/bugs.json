@@ -207,6 +207,15 @@
       "root_cause": "The helper matched name/domain/tier keys against the RAW engaged_accounts SQL view, which carries only account_id + counters. Those fields exist only on the SHAPED board rows (_engaged_view()), so nothing ever matched.",
       "fix": "The endpoint passes _engaged_view() rows (names/tiers resolved) into the pure helper; the helper documents that contract.",
       "guard": "tests/ui/test_ui_smoke.py::test_ae_lookup_resolves_existing_account_no_spend (chip asserted in a real browser) + tests/test_lookup_api.py::test_engagement_context_matches_by_name_and_domain"
+    },
+    {
+      "id": "fit-score-blind-to-first-party-engagement",
+      "date": "2026-07-04",
+      "area": "auto_search/scoring (engine inputs) + engagement store",
+      "symptom": "A fit score could claim 'no public intent signals found' about an account that BOOKED A MEETING with us. Live: Synergy Orthopedic (engagement Hot, heat 22, meeting booked 2026-06-25) scored intent 4/10 'no signals'; Humana (heat 84, 3 booked meetings) scored intent 3/10. Audit found 3 such blindspots + 4 engaged accounts with unverified QA.",
+      "root_cause": "The scorer's inputs were public web research + carried DISCOVERY signals only; the ENGAGEMENT store (meetings, BOFU forms, ad engagement) was never fed in. The AE-lookup card showed the heat chip, but the score never saw the events \u2014 card and score contradicted each other.",
+      "fix": "engagement/intent_feed.to_intent_signals (events -> scorer signal dicts) + ScoringService(own_signals=...) merges them at SCORE time on every path (ae/promote/rescore/batch; no silent board-wide shifts \u2014 scores change only when a score runs). app.py provider matches by normalized-name key then domain via the shaped board (names drift, domains don't \u2014 the Riverview csv/AKA case). ae-lookup commits persist the signals for drawer provenance.",
+      "guard": "tests/test_intent_feed.py (mapping/collapse/orders + service merge dedupes + provider failure never blocks) ; live before/after: Synergy 16->22 (intent 4->9), Humana intent 3->8 citing '3 meetings booked'."
     }
   ]
 }

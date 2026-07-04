@@ -316,7 +316,7 @@ function ScoreDrawer({ account, onClose, onRescore, onOpenLanding }) {
               {/* Known facts — carried into the scorer so it does not re-research */}
               {a.firmographics && Object.keys(a.firmographics).length > 0 && (
                 <div className="mt-7">
-                  <SectionLabel>Known facts · {a.source === 'csv' ? 'from import' : 'from discovery'}</SectionLabel>
+                  <SectionLabel>Known facts · {a.source === 'csv' ? 'from import' : a.source === 'ae' ? 'from the AE lookup' : 'from discovery'}</SectionLabel>
                   <div className="rounded-xl border border-zinc-200 px-4 py-1">
                     {Object.entries(a.firmographics).map(([k, v]) => (
                       String(v).length > 48 ? (
@@ -330,20 +330,28 @@ function ScoreDrawer({ account, onClose, onRescore, onOpenLanding }) {
                 </div>
               )}
 
-              {/* Provenance */}
-              {a.source === 'discovery' && (
-                <div className="mt-7">
-                  <SectionLabel>Origin</SectionLabel>
-                  <a href={a.domain ? `https://${a.domain}` : '#'} onClick={(e) => { if (!a.domain) e.preventDefault(); }} target="_blank" rel="noreferrer"
-                    className="flex items-center justify-between gap-3 rounded-xl border border-zinc-200 px-4 py-3 transition-colors hover:bg-zinc-50 hover:border-zinc-300">
-                    <div className="flex items-center gap-2.5 text-[13px] text-zinc-600">
-                      <window.Icons.compass className="h-4 w-4 text-zinc-400" />
-                      From Discovery
-                    </div>
-                    <span className="inline-flex items-center gap-1 text-[12px] text-zinc-400">View discovery signals<Icons.arrowRight className="h-3.5 w-3.5" /></span>
-                  </a>
-                </div>
-              )}
+              {/* Provenance — discovery links its signals; an AE lookup links the
+                  identity evidence the resolve step verified the company with. */}
+              {(a.source === 'discovery' || a.source === 'ae') && (() => {
+                const isAe = a.source === 'ae';
+                const evidence = isAe ? (a.firmographics || {})['Identity evidence URL'] : null;
+                const href = isAe ? (evidence || (a.domain ? `https://${a.domain}` : '#'))
+                  : (a.domain ? `https://${a.domain}` : '#');
+                const OriginIcon = isAe ? window.Icons.search : window.Icons.compass;
+                return (
+                  <div className="mt-7">
+                    <SectionLabel>Origin</SectionLabel>
+                    <a href={href} onClick={(e) => { if (href === '#') e.preventDefault(); }} target="_blank" rel="noreferrer"
+                      className="flex items-center justify-between gap-3 rounded-xl border border-zinc-200 px-4 py-3 transition-colors hover:bg-zinc-50 hover:border-zinc-300">
+                      <div className="flex items-center gap-2.5 text-[13px] text-zinc-600">
+                        <OriginIcon className="h-4 w-4 text-zinc-400" />
+                        {isAe ? 'AE lookup — identity verified from web evidence' : 'From Discovery'}
+                      </div>
+                      <span className="inline-flex items-center gap-1 text-[12px] text-zinc-400">{isAe ? 'View evidence' : 'View discovery signals'}<Icons.arrowRight className="h-3.5 w-3.5" /></span>
+                    </a>
+                  </div>
+                );
+              })()}
             </div>
 
             {/* Action bar */}

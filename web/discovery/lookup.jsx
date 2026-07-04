@@ -34,6 +34,18 @@ function EngagementChip({ engagement }) {
   );
 }
 
+// The one paid-action button (both the confirm card and the manual fallback):
+// same title/cost hint, same disabled treatment — only the shade differs.
+function CommitButton({ onClick, disabled, dark, children }) {
+  return (
+    <button onClick={onClick} disabled={disabled}
+      title="Runs the full research pass on the segment rubric + an independent QA verification (~$0.35)"
+      className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-[13px] font-medium text-white transition-colors disabled:opacity-50 ${dark ? 'bg-zinc-900 hover:bg-zinc-800' : 'bg-indigo-600 shadow-sm hover:bg-indigo-700'}`}>
+      {children}
+    </button>
+  );
+}
+
 function SegmentSelect({ value, onChange, disabled }) {
   return (
     <select value={value || ''} onChange={(e) => onChange(e.target.value)} disabled={disabled}
@@ -84,15 +96,17 @@ function LookupBar({ pushToast, onOpenAccount, onStarted }) {
     if (!domain || !segment || committing) return;
     setCommitting(true);
     try {
+      // Alternates carry only name/domain/description, so the resolved-only
+      // fields fall out naturally as null — no pick-dependent branching.
       const res = await window.API.lookupScore({
         name: c.name || name.trim(),
         domain,
         segment,
-        sub_segment: pick === 0 ? c.sub_segment : null,
+        sub_segment: c.sub_segment || null,
         description: c.description || '',
-        hq: pick === 0 ? c.hq : null,
-        evidence_url: pick === 0 ? c.evidence_url : null,
-        approximate_employees: pick === 0 ? c.approximate_employees : null,
+        hq: c.hq || null,
+        evidence_url: c.evidence_url || null,
+        approximate_employees: c.approximate_employees != null ? c.approximate_employees : null,
       });
       if (res.status === 'already_scored') {
         pushToast('Already on the board — opening it.', 'success');
@@ -222,11 +236,9 @@ function LookupBar({ pushToast, onOpenAccount, onStarted }) {
               </div>
               <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
                 <SegmentSelect value={segment} onChange={setSegment} disabled={committing} />
-                <button onClick={() => handleCommit()} disabled={!canCommit}
-                  title="Runs the full research pass on the segment rubric + an independent QA verification (~$0.35)"
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 py-2 text-[13px] font-medium text-white shadow-sm transition-colors hover:bg-indigo-700 disabled:opacity-50">
+                <CommitButton onClick={() => handleCommit()} disabled={!canCommit}>
                   {committing ? 'Starting…' : 'Research & Score'}
-                </button>
+                </CommitButton>
               </div>
             </div>
           )}
@@ -249,11 +261,9 @@ function LookupBar({ pushToast, onOpenAccount, onStarted }) {
                   placeholder="company domain, e.g. acme.com"
                   className="w-56 rounded-lg border border-zinc-200 px-2.5 py-1.5 font-mono text-[12px] text-zinc-700 placeholder:font-sans placeholder:text-zinc-400 focus:border-indigo-400 focus:outline-none" />
                 <SegmentSelect value={segment} onChange={setSegment} disabled={committing} />
-                <button onClick={() => handleCommit(manualDomain)} disabled={!canCommit}
-                  title="Runs the full research pass + independent QA on the details you confirmed (~$0.35)"
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 px-3.5 py-2 text-[13px] font-medium text-white transition-colors hover:bg-zinc-800 disabled:opacity-50">
+                <CommitButton dark onClick={() => handleCommit(manualDomain)} disabled={!canCommit}>
                   {committing ? 'Starting…' : 'Score anyway'}
-                </button>
+                </CommitButton>
               </div>
             </div>
           )}

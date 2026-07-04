@@ -1074,7 +1074,7 @@ function buildAccountsCsv(accounts) {
     const analystTotal = (qa.applied && qa.analyst_total != null) ? qa.analyst_total : a.total;
     return [
       a.name, a.domain || '', segLabel(a.segment), a.sub_segment || '',
-      a.source === 'csv' ? 'CSV import' : 'Discovery', a.import_label || '',
+      window.sourceLabel(a.source), a.import_label || '',
       window.fitWord(tier.band), analystTotal, a.total, a.max_total,
       pill(0), pill(1), pill(2),
       a.recommendation || '', qa.status || '', qa.notes || '',
@@ -1381,7 +1381,7 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
               <Dropdown label="Fit" value={fitF} onChange={setFitF}
                 options={[{ value: 'all', label: 'All' }, { value: 'high', label: 'High' }, { value: 'medium', label: 'Medium' }, { value: 'low', label: 'Low' }, { value: 'out', label: 'Not a fit' }]} />
               <Dropdown label="Source" value={sourceF} onChange={setSourceF}
-                options={[{ value: 'all', label: 'All' }, { value: 'discovery', label: 'Discovery' }, { value: 'csv', label: 'CSV import' }]} />
+                options={[{ value: 'all', label: 'All' }, { value: 'discovery', label: 'Discovery' }, { value: 'csv', label: 'CSV import' }, { value: 'ae', label: 'AE lookup' }]} />
               <Dropdown label="Date" value={dateF} onChange={setDateF}
                 options={[{ value: 'all', label: 'All time' }, { value: 'today', label: 'Today' }, { value: '7d', label: 'Last 7 days' }, { value: '30d', label: 'Last 30 days' }]} />
               {imports.length > 0 && (

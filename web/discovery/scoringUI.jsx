@@ -146,14 +146,18 @@ function QABadge({ status, tierChanging = false, size = 'sm' }) {
 window.QABadge = QABadge;
 
 // ── SourceTag ────────────────────────────────────────────────────────────────
+// One label per account source — every provenance string in the UI (tags,
+// CSV export, landing-page footer) MUST come from here so a new source can
+// never be silently mislabeled as Discovery again.
+window.sourceLabel = (s) => (s === 'csv' ? 'CSV import' : s === 'ae' ? 'AE lookup' : 'Discovery');
+
 function SourceTag({ source }) {
-  const meta = source === 'csv' ? { Icon: window.Icons.doc, label: 'CSV import' }
-    : source === 'ae' ? { Icon: window.Icons.search, label: 'AE lookup' }
-      : { Icon: window.Icons.compass, label: 'Discovery' };
-  const Icon = meta.Icon;
+  const Icon = source === 'csv' ? window.Icons.doc
+    : source === 'ae' ? window.Icons.search
+      : window.Icons.compass;
   return (
     <span className="inline-flex items-center gap-1 text-[12px] text-zinc-400">
-      <Icon className="h-3.5 w-3.5" />{meta.label}
+      <Icon className="h-3.5 w-3.5" />{window.sourceLabel(source)}
     </span>
   );
 }

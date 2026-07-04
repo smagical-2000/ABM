@@ -18,6 +18,7 @@ unit-testable without network or DB.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import textwrap
 from typing import Any
@@ -33,8 +34,8 @@ logger = logging.getLogger(__name__)
 _MAX_TOKENS = 700
 _RESULTS = 5
 SEGMENTS = ("health_system", "payer", "specialty")   # scoreable rubrics
-_STATUSES = ("already_scored", "in_discovery", "new", "ambiguous",
-             "non_icp", "unresolved")                # resolve outcomes (UI contract)
+# resolve() statuses (the UI contract): already_scored | in_discovery | new |
+# ambiguous | non_icp | unresolved
 
 
 # ── question 1: what do we already have? ──────────────────────────────
@@ -144,7 +145,10 @@ def _gate(name: str, input_domain: str | None, ident: dict) -> dict:
         "reason": str(ident.get("reason") or "").strip(),
     }
     alternates = [
-        {"name": str(a.get("name") or ""), "domain": str(a.get("domain") or ""),
+        # Normalize like resolved.domain so the AE never sees www./URL noise on
+        # one option and a bare domain on another (build_account re-validates).
+        {"name": str(a.get("name") or ""),
+         "domain": exa.domain_of(str(a.get("domain") or "")),
          "description": str(a.get("description") or "")}
         for a in (ident.get("alternates") or []) if isinstance(a, dict)
     ]
@@ -195,7 +199,9 @@ async def resolve(name: str, website: str | None, *,
 
     query = f"{name} {domain} company" if domain else f"{name} company US healthcare"
     try:
-        results = search(query, num_results=_RESULTS)
+        # exa.search is sync httpx (25s timeout) — run it off the event loop so
+        # a slow search can't stall every other request on the async API.
+        results = await asyncio.to_thread(search, query, num_results=_RESULTS)
     except exa.ExaError as e:
         logger.warning("lookup: exa failed for %r: %s", name, e)
         return {"status": "unresolved", "error": str(e), "cost_usd": 0.0}

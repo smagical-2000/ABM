@@ -2177,11 +2177,16 @@ def create_app() -> FastAPI:
             # Use the EXISTING row's id (may be csv_*), never the freshly built
             # one — that id mismatch is exactly how twins would be born.
             existing_id = hit.get("account_id")
-            if hit.get("state") in ("queued", "error") and affordable:
-                _schedule_scoring(app, existing_id, op_type="ae_lookup")
-                return {"status": "scoring", "account_id": existing_id,
-                        "account": app.state.scoring.get(existing_id),
-                        "rekicked": True}
+            if hit.get("state") in ("queued", "error"):
+                if affordable:
+                    _schedule_scoring(app, existing_id, op_type="ae_lookup")
+                    return {"status": "scoring", "account_id": existing_id,
+                            "account": app.state.scoring.get(existing_id),
+                            "rekicked": True}
+                # Parked/failed row + no budget headroom: say so honestly —
+                # "already_scored" here would hide that the click did nothing.
+                return {"status": "queued", "account_id": existing_id,
+                        "account": hit, "budget_blocked": True}
             return {"status": "already_scored", "account_id": existing_id,
                     "account": hit}
 

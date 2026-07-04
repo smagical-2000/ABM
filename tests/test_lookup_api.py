@@ -158,6 +158,18 @@ def test_commit_rekicks_parked_row(env):
     assert scheduled == ["acc_parkedclinic"]     # the EXISTING id, no twin
 
 
+def test_commit_parked_row_over_budget_says_so(env, monkeypatch):
+    """No headroom + a parked row: the response must say budget_blocked (an
+    'already_scored' here would hide that the click did nothing)."""
+    c, scheduled = env
+    monkeypatch.setattr(_app_module.budget_guard, "remaining", lambda _s: 0.0)
+    out = c.post("/api/scoring/lookup/score", json={
+        "name": "Parked Clinic", "domain": "parked.com", "segment": "specialty"}).json()
+    assert out["status"] == "queued"
+    assert out["budget_blocked"] is True
+    assert scheduled == []                       # nothing spent
+
+
 def test_commit_discovery_company_redirects_to_promote(env):
     c, scheduled = env
     out = c.post("/api/scoring/lookup/score", json={

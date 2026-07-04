@@ -236,9 +236,31 @@ def _lookup_engagement_context(rows: list[dict], name: str, website: str | None)
     for a in rows or []:
         if (dom and (a.get("domain") or "").lower() == dom) or \
                 (key and normalize_company_name(a.get("name") or "") == key):
-            return {"tier": a.get("tier"), "heat": a.get("score"),
-                    "last_touch": a.get("last_touch")}
+            return {"account_id": a.get("account_id"), "tier": a.get("tier"),
+                    "heat": a.get("score"), "last_touch": a.get("last_touch")}
     return None
+
+
+def _engagement_intent_signals(engagement_repo, name: str,
+                               engagement_account_id: str | None = None) -> list[dict]:
+    """First-party intent for the fit scorer: the account's engagement events
+    (booked meetings, BOFU forms, ad engagement) as carried signals. Matches by
+    the shared normalized-name key (engagement ids are abm_/acc_ + key) or an
+    explicit id from the engagement-context match. Best-effort: [] on anything."""
+    if engagement_repo is None:
+        return []
+    from auto_search.engagement import intent_feed
+    key = normalize_company_name(name)
+    candidates = [engagement_account_id] if engagement_account_id else []
+    candidates += [f"abm_{key}", f"acc_{key}"] if key else []
+    try:
+        for aid in candidates:
+            events = engagement_repo.events_for_account(aid)
+            if events:
+                return intent_feed.to_intent_signals(events)
+    except Exception:  # noqa: BLE001 — intent garnish must never block a lookup
+        logger.exception("engagement intent signals failed for %s", name)
+    return []
 
 
 def _classify_import_row(name, account_id, *, get_company, exists):
@@ -361,7 +383,15 @@ async def lifespan(app: FastAPI):
         if callable(ensure):
             ensure()
     app.state.service = ReviewService(repo)
-    app.state.scoring = ScoringService(scoring_repo)
+
+    def _own_signals(account) -> list[dict]:
+        """First-party engagement intent, merged into EVERY score at score time
+        (ae lookups, promotes, re-scores, batches) — so no score can claim "no
+        intent signals" about an account that engaged with us."""
+        return _engagement_intent_signals(
+            getattr(app.state, "engagement_repo", None), account.name)
+
+    app.state.scoring = ScoringService(scoring_repo, own_signals=_own_signals)
     app.state.repo = repo
     app.state.scoring_repo = scoring_repo
     # Engagement store (Reply.io heat). Additive + isolated — never block startup.
@@ -2131,7 +2161,13 @@ def create_app() -> FastAPI:
         except Exception:  # noqa: BLE001 — garnish only, lookup never depends on it
             logger.exception("lookup engagement context failed")
             eng_rows = []
-        out["engagement"] = _lookup_engagement_context(eng_rows, name, website)
+        ctx = _lookup_engagement_context(eng_rows, name, website)
+        if ctx:
+            # Tell the AE their engagement history will inform the score.
+            ctx["signals"] = len(_engagement_intent_signals(
+                getattr(app.state, "engagement_repo", None), name,
+                ctx.get("account_id")))
+        out["engagement"] = ctx
         return out
 
     @app.post("/api/scoring/lookup/score")
@@ -2190,6 +2226,11 @@ def create_app() -> FastAPI:
             return {"status": "already_scored", "account_id": existing_id,
                     "account": hit}
 
+        # Persist the account's first-party engagement intent as carried signals
+        # so the drawer shows WHY intent scored (the score-time merge in
+        # ScoringService covers re-scores; this covers provenance).
+        account.discovery_signals = _engagement_intent_signals(
+            getattr(app.state, "engagement_repo", None), account.name)
         row = app.state.scoring.enqueue_account(
             account, state="scoring" if affordable else "queued")
         if affordable:

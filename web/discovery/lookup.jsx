@@ -235,6 +235,11 @@ function LookupBar({ pushToast, onOpenAccount, onStarted }) {
                 ))}
               </div>
               <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+                {r.engagement && r.engagement.signals > 0 && (
+                  <span className="mr-auto text-[11.5px] text-zinc-400">
+                    {r.engagement.signals} known engagement {r.engagement.signals === 1 ? 'signal' : 'signals'} (meetings, forms, ad activity) will inform the intent score.
+                  </span>
+                )}
                 <SegmentSelect value={segment} onChange={setSegment} disabled={committing} />
                 <CommitButton onClick={() => handleCommit()} disabled={!canCommit}>
                   {committing ? 'Starting…' : 'Research & Score'}

@@ -23,8 +23,15 @@ logger = logging.getLogger(__name__)
 
 
 class ScoringService:
-    def __init__(self, repo) -> None:
+    def __init__(self, repo, *, own_signals=None) -> None:
+        """`own_signals(account) -> list[dict]` (optional): first-party intent —
+        e.g. the account's engagement events (booked meetings, BOFU forms) —
+        merged into the signals the engine carries at SCORE time. This is what
+        keeps a score from claiming "no intent signals found" about a company
+        that literally booked a meeting with us. Best-effort: a provider
+        failure never blocks scoring."""
         self._repo = repo
+        self._own_signals = own_signals
 
     # ── enqueue ────────────────────────────────────────────────────────
 
@@ -57,6 +64,7 @@ class ScoringService:
         if row is None:
             return None
         account = _account_from_row(row)
+        self._merge_own_signals(account)
         fw = FRAMEWORKS.get(account.framework) or framework_for_segment(account.segment)
         # On a re-score, anchor to the prior official scores so they hold steady
         # unless new dated evidence turns up.
@@ -120,6 +128,24 @@ class ScoringService:
                     account.name, score.tier_label, score.total, score.max_total,
                     score.qa.status if score.qa else "—", score.cost_usd)
         return saved
+
+    def _merge_own_signals(self, account: Account) -> None:
+        """Fold first-party intent into the account's carried signals (prompt
+        input only — nothing is persisted here). Deduped so an ae-lookup account
+        that already stored its engagement signals doesn't repeat them."""
+        if self._own_signals is None:
+            return
+        try:
+            extra = self._own_signals(account) or []
+        except Exception:  # noqa: BLE001 — intent garnish must never block scoring
+            logger.exception("own-signals provider failed for %s", account.name)
+            return
+        if not extra:
+            return
+        seen = {(s.get("signal_type"), s.get("summary"))
+                for s in account.discovery_signals}
+        account.discovery_signals = account.discovery_signals + [
+            s for s in extra if (s.get("signal_type"), s.get("summary")) not in seen]
 
     async def _verify(self, account_id, account, score, fw) -> tuple[QAResult, float]:
         """Decide how much independent QA an account earns by fit tier, then run

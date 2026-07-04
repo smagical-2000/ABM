@@ -387,7 +387,12 @@ async def lifespan(app: FastAPI):
     def _own_signals(account) -> list[dict]:
         """First-party engagement intent, merged into EVERY score at score time
         (ae lookups, promotes, re-scores, batches) — so no score can claim "no
-        intent signals" about an account that engaged with us."""
+        intent signals" about an account that engaged with us. The full
+        provider (with the shaped-board domain fallback) is published by
+        create_app on app.state; the name-key probe is the fallback here."""
+        provider = getattr(app.state, "own_signals_provider", None)
+        if provider is not None:
+            return provider(account)
         return _engagement_intent_signals(
             getattr(app.state, "engagement_repo", None), account.name)
 
@@ -892,6 +897,27 @@ def create_app() -> FastAPI:
             })
         out.sort(key=lambda x: (x.get("score") or 0, x.get("last_touch") or ""), reverse=True)
         return out
+
+    def _own_signals_provider(account) -> list[dict]:
+        """The full own-signals provider for ScoringService (published on
+        app.state; the lifespan wires it in). Match order: normalized-name key
+        (abm_/acc_ + key), then DOMAIN via the shaped board — names drift (AKA
+        suffixes, csv_ imports; the Riverview case), domains don't."""
+        repo = getattr(app.state, "engagement_repo", None)
+        signals = _engagement_intent_signals(repo, account.name)
+        if not signals and account.domain:
+            try:
+                ctx = _lookup_engagement_context(_engaged_view(), account.name,
+                                                 account.domain)
+            except Exception:  # noqa: BLE001 — garnish; never block scoring
+                logger.exception("own-signals domain match failed for %s", account.name)
+                ctx = None
+            if ctx and ctx.get("account_id"):
+                signals = _engagement_intent_signals(repo, account.name,
+                                                     ctx["account_id"])
+        return signals
+
+    app.state.own_signals_provider = _own_signals_provider
 
     @app.get("/api/engagement")
     def get_engagement():

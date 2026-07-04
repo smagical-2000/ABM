@@ -1362,6 +1362,12 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
           </div>
         </div>
 
+        {/* AE one-off lookup: resolve (cheap) -> confirm card -> full score + QA.
+            onStarted arms the live poller so the new row's progress renders. */}
+        <window.LookupBar pushToast={pushToast}
+          onOpenAccount={(id) => { setOpenAcc(id); load(true); }}
+          onStarted={() => { wasActiveRef.current = true; load(true); }} />
+
         {stats && (stats.scored_count > 0 || queuedCount > 0 || stats.total_cost > 0) && (
           <CostMeter stats={stats} queuedCount={queuedCount}
             onScoreBatch={handleScoreAll} batchRunning={batchRunning} />

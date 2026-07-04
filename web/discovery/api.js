@@ -127,6 +127,15 @@ window.API = {
   // ── scoring phase ──────────────────────────────────────────────────────────
   frameworks: () => http('/api/scoring/frameworks'),
   scored: () => http('/api/scored'),
+  // AE one-off lookup. Step 1 resolves WHO the company is (existing account /
+  // live discovery / web-resolved identity) without scoring; step 2 is the
+  // confirmed commit that creates the account and runs the full score + QA.
+  lookup: (name, website) => http('/api/scoring/lookup', {
+    method: 'POST', body: JSON.stringify({ name, website }),
+  }),
+  lookupScore: (payload) => http('/api/scoring/lookup/score', {
+    method: 'POST', body: JSON.stringify(payload),
+  }),
   account: (id) => http(`/api/account/${encodeURIComponent(id)}`),
   scoreAccount: (id) => http(`/api/account/${encodeURIComponent(id)}/score`, { method: 'POST' }),
   // Kick the on-demand deep-research dossier; poll account(id) until ready.

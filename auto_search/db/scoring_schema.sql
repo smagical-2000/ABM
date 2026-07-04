@@ -8,10 +8,12 @@
 --   Source of an account:
 --     discovery  promoted from the Discovery panel (carries its signals)
 --     csv        imported from a Definitive Healthcare export
+--     ae         one-off AE lookup (search bar) — resolved via Exa, then scored
+--                by the same engine/QA as every other account
 -- ────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS scored_accounts (
     account_id            TEXT PRIMARY KEY,
-    source                TEXT NOT NULL CHECK (source IN ('discovery','csv')),
+    source                TEXT NOT NULL CHECK (source IN ('discovery','csv','ae')),
     discovery_company_key TEXT,
     name                  TEXT NOT NULL,
     segment               TEXT NOT NULL,
@@ -76,6 +78,11 @@ ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS dossier_generated_at TIMEST
 ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS dossier_error TEXT;
 -- warm-intro contacts + paths ({state, contacts: [...]}; NULL until generated)
 ALTER TABLE scored_accounts ADD COLUMN IF NOT EXISTS warm_intros JSONB;
+-- widen the source enum for AE one-off lookups (drop+add is the idempotent
+-- form: ADD CONSTRAINT has no IF NOT EXISTS, and the pair re-validates cheaply)
+ALTER TABLE scored_accounts DROP CONSTRAINT IF EXISTS scored_accounts_source_check;
+ALTER TABLE scored_accounts ADD CONSTRAINT scored_accounts_source_check
+    CHECK (source IN ('discovery','csv','ae'));
 
 
 -- ────────────────────────────────────────────────────────────────────

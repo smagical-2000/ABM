@@ -147,11 +147,13 @@ window.QABadge = QABadge;
 
 // ── SourceTag ────────────────────────────────────────────────────────────────
 function SourceTag({ source }) {
-  const isCsv = source === 'csv';
-  const Icon = isCsv ? window.Icons.doc : window.Icons.compass;
+  const meta = source === 'csv' ? { Icon: window.Icons.doc, label: 'CSV import' }
+    : source === 'ae' ? { Icon: window.Icons.search, label: 'AE lookup' }
+      : { Icon: window.Icons.compass, label: 'Discovery' };
+  const Icon = meta.Icon;
   return (
     <span className="inline-flex items-center gap-1 text-[12px] text-zinc-400">
-      <Icon className="h-3.5 w-3.5" />{isCsv ? 'CSV import' : 'Discovery'}
+      <Icon className="h-3.5 w-3.5" />{meta.label}
     </span>
   );
 }

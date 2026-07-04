@@ -63,6 +63,7 @@ from auto_search.run_control import RunControl
 from auto_search.runtime import is_production
 from auto_search.scoring import budget as budget_guard
 from auto_search.scoring import imports as csv_imports
+from auto_search.scoring import lookup as ae_lookup
 from auto_search.scoring import spend_guard
 from auto_search.scoring.frameworks import FRAMEWORKS, all_frameworks_public, resolve_tier
 from auto_search.scoring.service import ScoringService
@@ -222,6 +223,22 @@ def _import_label(filename: str | None) -> str:
     also disambiguates two uploads of the same filename."""
     name = (filename or "").strip() or "import.csv"
     return f"{name} · {datetime.now(UTC).strftime('%b %d, %H:%M')}"
+
+
+def _lookup_engagement_context(rows: list[dict], name: str, website: str | None) -> dict | None:
+    """Engagement garnish for the lookup card: if the typed company is already
+    engaging (Reply.io/SFDC/podcast/LinkedIn heat), say so. `rows` are the
+    SHAPED engagement-board rows (the app's _engaged_view() — name/tier/score
+    resolved), NOT the raw engaged_accounts view, which carries only counters."""
+    from auto_search.clients.exa import domain_of
+    dom = domain_of(website)
+    key = normalize_company_name(name)
+    for a in rows or []:
+        if (dom and (a.get("domain") or "").lower() == dom) or \
+                (key and normalize_company_name(a.get("name") or "") == key):
+            return {"tier": a.get("tier"), "heat": a.get("score"),
+                    "last_touch": a.get("last_touch")}
+    return None
 
 
 def _classify_import_row(name, account_id, *, get_company, exists):
@@ -2084,6 +2101,97 @@ def create_app() -> FastAPI:
         """The distinct CSV import batches (label + count), newest first — feeds
         the Import filter so a user can isolate and export their own upload."""
         return {"imports": app.state.scoring_repo.import_labels()}
+
+    @app.post("/api/scoring/lookup")
+    async def scoring_lookup(request: Request):
+        """AE one-off lookup, step 1 — resolve WHO the typed company is before
+        any deep-score spend. Free when we already have it (scored account or a
+        live Discovery company); otherwise one Exa search + one no-tools identity
+        pass (~$0.01, recorded as a spend op). Confidence is gated in code:
+        ambiguous/low/non-ICP outcomes come back as such — the AE always confirms
+        via the card; nothing auto-scores from here."""
+        body = await _json_body(request)
+        name = str(body.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=422, detail="company name is required")
+        website = str(body.get("website") or "").strip() or None
+        out = await ae_lookup.resolve(
+            name, website,
+            accounts=app.state.scoring.list_scored(),
+            get_company=svc(app).get_company)
+        cost = float(out.get("cost_usd") or 0)
+        if cost:   # paid path ran (Exa + identity) — audit it like every paid step
+            op = spend_guard.Operation(app.state.scoring_repo, "ae_lookup_resolve",
+                                       estimated_usd=cost, accounts_planned=1,
+                                       metadata={"name": name})
+            op.record(step="resolve", actual_usd=cost, company_key=normalize_company_name(name))
+            op.finish()
+        try:
+            eng_rows = _engaged_view()   # shaped board rows (names/tiers resolved)
+        except Exception:  # noqa: BLE001 — garnish only, lookup never depends on it
+            logger.exception("lookup engagement context failed")
+            eng_rows = []
+        out["engagement"] = _lookup_engagement_context(eng_rows, name, website)
+        return out
+
+    @app.post("/api/scoring/lookup/score")
+    async def scoring_lookup_score(request: Request):
+        """AE one-off lookup, step 2 — the AE confirmed the resolve card. Create
+        the account (source='ae') and run the NORMAL scoring pipeline on it:
+        same engine, same rubric, same independent QA, same spend caps — a
+        one-off score can never diverge from a batch score.
+
+        Budget-aware like promote: no headroom -> the account parks as 'queued'
+        (nothing spends) and the response says so. Race-safe: identity is
+        re-checked at commit; an existing queued/error row is re-kicked rather
+        than duplicated (a csv_/acc_ id mismatch can never create a twin)."""
+        body = await _json_body(request)
+        try:
+            account = ae_lookup.build_account(
+                name=str(body.get("name") or ""),
+                domain=str(body.get("domain") or ""),
+                segment=str(body.get("segment") or ""),
+                sub_segment=(str(body.get("sub_segment")).strip()
+                             if body.get("sub_segment") else None),
+                description=str(body.get("description") or "").strip(),
+                hq=(str(body.get("hq")).strip() if body.get("hq") else None),
+                evidence_url=(str(body.get("evidence_url")).strip()
+                              if body.get("evidence_url") else None),
+                approximate_employees=body.get("approximate_employees"))
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from None
+
+        kind, hit = ae_lookup.find_existing(
+            account.name, account.domain,
+            accounts=app.state.scoring.list_scored(),
+            get_company=svc(app).get_company)
+        if kind == "discovery":
+            # Belongs to the promote path (carries its live signals) — the UI
+            # calls POST /api/company/{key}/promote instead.
+            return {"status": "in_discovery",
+                    "company_key": getattr(hit, "company_key", None)}
+
+        summary = app.state.scoring_repo.cost_summary()
+        affordable = budget_guard.remaining(summary) >= budget_guard.EST_SCORE_COST
+        if kind == "scored":
+            # Use the EXISTING row's id (may be csv_*), never the freshly built
+            # one — that id mismatch is exactly how twins would be born.
+            existing_id = hit.get("account_id")
+            if hit.get("state") in ("queued", "error") and affordable:
+                _schedule_scoring(app, existing_id, op_type="ae_lookup")
+                return {"status": "scoring", "account_id": existing_id,
+                        "account": app.state.scoring.get(existing_id),
+                        "rekicked": True}
+            return {"status": "already_scored", "account_id": existing_id,
+                    "account": hit}
+
+        row = app.state.scoring.enqueue_account(
+            account, state="scoring" if affordable else "queued")
+        if affordable:
+            _schedule_scoring(app, row["account_id"], op_type="ae_lookup")
+        return {"status": "scoring" if affordable else "queued",
+                "account_id": row["account_id"], "account": row,
+                "budget_blocked": not affordable}
 
     @app.post("/api/scoring/score-queued")
     async def score_queued(request: Request):

@@ -361,6 +361,21 @@ def test_scored_drawer_shows_why_discovered_with_proof(page):
     assert page.locator("a:has-text('proof')").count() > 0  # the evidence link
 
 
+def test_ae_lookup_resolves_existing_account_no_spend(page):
+    """The AE lookup bar: typing an already-scored account resolves to the
+    'Already on the board' card (server round-trip, no Exa/LLM spend), shows the
+    engagement chip (the seeded account is Warm), and Open account jumps into
+    the drawer. Also proves lookup.jsx Babel-compiles."""
+    page.click("text=Scored")
+    page.wait_for_selector("text=UI Demo Health System", timeout=10_000)
+    page.fill('input[placeholder^="Research an account"]', "UI Demo Health System")
+    page.keyboard.press("Enter")
+    page.wait_for_selector("text=Already on the board", timeout=10_000)
+    assert page.get_by_text("Engaging", exact=False).count() > 0   # heat garnish
+    page.click("text=Open account")
+    page.wait_for_selector("text=Why discovered", timeout=10_000)  # drawer opened
+
+
 def test_unknown_framework_drawer_does_not_white_screen(page):
     """Regression: a scored account whose framework the UI config doesn't have
     (version skew) must still open its drawer, not crash the whole app."""

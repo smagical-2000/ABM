@@ -16,7 +16,10 @@ from pydantic import BaseModel, Field, field_validator
 from auto_search.normalize import parse_int_loose
 
 ScoreState = Literal["queued", "scoring", "scored", "error"]
-AccountSource = Literal["discovery", "csv"]
+# "ae" = a one-off AE lookup (search bar): resolved via Exa + identity pass,
+# then scored by the SAME engine/QA as discovery/csv. Gets the full search
+# budget (engine) and is never QA-skipped (service) — both branch on "csv".
+AccountSource = Literal["discovery", "csv", "ae"]
 # "skipped" = QA was deliberately not run (CSV trusted, or a low-fit account not
 # worth a verification spend). Distinct from "verified" so the UI never implies
 # an account was independently checked when it was not.

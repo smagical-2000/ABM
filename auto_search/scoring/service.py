@@ -39,6 +39,10 @@ class ScoringService:
         return [self._repo.upsert_account(a, state=state, import_label=import_label)
                 for a in accounts]
 
+    def enqueue_account(self, account: Account, *, state: str = "scoring") -> dict:
+        """Create/refresh one prebuilt account (the AE one-off lookup path)."""
+        return self._repo.upsert_account(account, state=state)
+
     # ── score ──────────────────────────────────────────────────────────
 
     async def run_scoring(self, account_id: str, *,

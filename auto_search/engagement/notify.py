@@ -332,20 +332,57 @@ def tier_role(tier: str | None) -> str | None:
     return None
 
 
-def accounts_to_notify(accounts: list[dict], notified: dict[str, str]) -> list[dict]:
-    """Accounts whose tier ROSE above the last tier we notified them at — the only ones
-    that should fire a handoff. PURE. `notified` maps account_id -> last-notified tier.
-    Returns [{account, tier, role, prev}] (prev = the tier we last sent, 'Lower' if none).
-    Upward-only + Hot-terminal fall out of the rank compare."""
+def _ledger_entry(v) -> tuple[str, str | None]:
+    """Normalize a `notified` ledger value to (tier, last-notified-touch).
+    Two shapes coexist: the new {"tier","touch"} dict, and the legacy bare tier
+    string (no touch). A missing touch is None."""
+    if isinstance(v, dict):
+        return (v.get("tier") or "Lower"), v.get("touch")
+    return (v or "Lower"), None
+
+
+def _touch_dt(ts):
+    """Parse an ISO touch timestamp to an aware datetime, or None. Robust to
+    mixed offsets ('+00:00' vs '-04:00') and a trailing 'Z' — a plain string
+    compare is wrong across offsets."""
+    if not ts:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def accounts_to_notify(accounts: list[dict], notified: dict) -> list[dict]:
+    """Accounts that should fire an AE/SDR handoff right now. PURE.
+    `notified` maps account_id -> {"tier","touch"} (or a legacy bare tier string).
+    Returns [{account, tier, role, prev, reason, touch}].
+
+    Two fire conditions:
+      - ROSE: the tier climbed above the last tier we notified (Some→Warm→Hot).
+        The only path for Some/Warm — same-tier activity never re-fires.
+      - HOT REACTIVATION (Galyna 2026-07-05): an account that is ALREADY Hot
+        re-fires when it gets NEW activity — its latest touch is newer than the
+        touch we last notified it on. Requires a recorded baseline touch, so a
+        never-seeded account can't back-fire its whole history on the first run
+        (missing baseline = treated as already acknowledged)."""
     out: list[dict] = []
     for a in accounts:
         tier = a.get("tier") or "Lower"
         role = tier_role(tier)
         if not role:                                   # Lower / unknown → no handoff
             continue
-        prev = notified.get(a.get("account_id")) or "Lower"
-        if _TIER_RANK.get(tier.lower(), 0) > _TIER_RANK.get(prev.lower(), 0):
-            out.append({"account": a, "tier": tier, "role": role, "prev": prev})
+        prev_tier, prev_touch = _ledger_entry(notified.get(a.get("account_id")))
+        rose = _TIER_RANK.get(tier.lower(), 0) > _TIER_RANK.get(str(prev_tier).lower(), 0)
+        reactivated = False
+        if not rose and tier.lower() == "hot":
+            cur_dt, prev_dt = _touch_dt(a.get("last_touch")), _touch_dt(prev_touch)
+            reactivated = cur_dt is not None and prev_dt is not None and cur_dt > prev_dt
+        if rose or reactivated:
+            out.append({"account": a, "tier": tier, "role": role, "prev": prev_tier,
+                        "reason": "rose" if rose else "hot_activity",
+                        "touch": a.get("last_touch")})
     return out
 
 

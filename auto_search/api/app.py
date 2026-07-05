@@ -1195,14 +1195,17 @@ def create_app() -> FastAPI:
 
     @app.post("/api/engagement/notify-changes")
     def engagement_notify_changes(dry_run: bool = False, seed: bool = False, limit: int = 0):
-        """Auto AE/SDR push, TIER-CHANGE gated. Posts one card per account whose tier ROSE
-        above the last tier we notified it at: Some/Warm → SDR, Hot → AE. Hot is terminal;
-        downward drift never re-sends. Respects the live-routing toggle (OFF → private test
-        channel, plain names). Ledger = the `notified_tiers` setting (account_id -> tier).
-          dry_run=true → return what WOULD fire; no posts, no ledger change.
-          seed=true    → record current tiers as already-notified WITHOUT posting (run once
-                         so the first live run doesn't flood every existing account).
-          limit=N      → cap posts to N (small test batch)."""
+        """Auto AE/SDR push. Posts a card when an account's tier ROSE above the last tier
+        we notified it at (Some/Warm → SDR, Hot → AE) — OR when an already-Hot account gets
+        NEW activity (Galyna 2026-07-05: a Hot account re-alerts on any new touch, old or
+        new). Downward drift never re-sends. Respects the live-routing toggle (OFF → private
+        test channel, plain names). Ledger = `notified_tiers` (account_id -> {tier, touch}).
+          dry_run=true  → return what WOULD fire; no posts, no ledger change.
+          seed=true     → baseline EVERY account to its CURRENT tier + latest touch WITHOUT
+                          posting — the go-forward line. Nothing fires until a tier rise or
+                          a NEW touch on a Hot account happens AFTER the seed. Run once when
+                          turning the rule on (this is what stops the backlog flooding).
+          limit=N       → cap posts to N (small test batch)."""
         import json
         from urllib.parse import quote
         repo = getattr(app.state, "engagement_repo", None)
@@ -1210,16 +1213,16 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=503, detail="engagement store not available")
         ledger = json.loads(repo.get_setting("notified_tiers") or "{}")
         board = _engaged_view()
-        if seed:   # baseline each account to its PRE-CUTOFF tier (events before the cutoff)
-            # so the notifier fires ONLY on tier changes on/after the cutoff: an account
-            # already Warm/Some before the cutoff won't re-fire — it waits for the NEXT rise
-            # (e.g. Warm-2-months-ago only pings when it becomes Hot post-cutoff).
-            cutoff = (repo.get_setting("activation_cutoff") or "").strip() or "2026-06-25"
-            pre = repo.scores_before(cutoff)
+        if seed:
+            # Baseline = the state as of NOW: each account's current tier AND its latest
+            # touch are recorded as "already notified". So a tier rise OR a strictly-newer
+            # touch on a Hot account (activity AFTER this seed) is the only thing that fires
+            # — nothing back-fires. This is the "go forward from here" line.
             for a in board:
-                ledger[a["account_id"]] = engagement_scoring.tier_for(pre.get(a["account_id"], 0))
+                ledger[a["account_id"]] = {"tier": a.get("tier") or "Lower",
+                                           "touch": a.get("last_touch")}
             repo.set_setting("notified_tiers", json.dumps(ledger))
-            return {"seeded": len(board), "cutoff": cutoff}
+            return {"seeded": len(board), "format": "tier+touch"}
         due = engagement_notify.accounts_to_notify(board, ledger)
         live = _live_routing_state(repo)["enabled"]
         ids_override = None if live else {}   # None = env ids (ping); {} = plain @Name (test)
@@ -1230,6 +1233,7 @@ def create_app() -> FastAPI:
             owner = (engagement_notify.resolve_ae(a, ids=ids_override) if is_ae
                      else engagement_notify.resolve_sdr(a, ids=ids_override))
             entry = {"account": a.get("name"), "from": d["prev"], "to": tier,
+                     "reason": d.get("reason"),
                      "role": "AE" if is_ae else "SDR", "owner": owner,
                      "channel": (("AE" if is_ae else "SDR") + " channel") if live else "private-test"}
             if not dry_run and (not limit or posted < limit):
@@ -1242,7 +1246,9 @@ def create_app() -> FastAPI:
                                                         webhook=webhook, dm_limit=0)
                 entry["posted"] = bool(ok)
                 if ok:
-                    ledger[a["account_id"]] = tier
+                    # Record BOTH tier and the touch we just notified on, so the same
+                    # activity can't re-fire but a genuinely newer touch (Hot) can.
+                    ledger[a["account_id"]] = {"tier": tier, "touch": d.get("touch")}
                     posted += 1
             fired.append(entry)
         if not dry_run:

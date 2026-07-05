@@ -118,8 +118,11 @@ function LookupBar({ pushToast, onOpenAccount, onStarted }) {
         pushToast('Monthly budget reached — account parked as queued (nothing spent).', 'danger');
         onStarted();
       } else {
-        pushToast(`Deep research started for ${res.account && res.account.name ? res.account.name : name}…`, 'success');
-        onStarted();
+        const who = res.account && res.account.name ? res.account.name : name;
+        pushToast(res.auto_brief
+          ? `Researching ${who} — the full AE brief will open when the score lands.`
+          : `Deep research started for ${who}…`, 'success');
+        onStarted(res.auto_brief ? res.account_id : null);
       }
       setName(''); setWebsite(''); reset();
     } catch (e) { pushToast(`Couldn't start: ${e.message}`, 'danger'); setCommitting(false); }

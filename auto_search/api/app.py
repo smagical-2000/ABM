@@ -129,6 +129,12 @@ def _claim_scoring(app: FastAPI, account_id: str) -> bool:
     return True
 
 
+def _ae_brief_auto() -> bool:
+    """One-flow AE brief kill switch — AE_BRIEF_AUTO=0 reverts to score-only
+    lookups (manual Generate button still works) without a redeploy."""
+    return os.getenv("AE_BRIEF_AUTO", "1") != "0"
+
+
 def _schedule_scoring(app: FastAPI, account_id: str, *, op_type: str = "score_one") -> None:
     """Background-score one account, guarded so the same account never doubles up.
 
@@ -144,10 +150,31 @@ def _schedule_scoring(app: FastAPI, account_id: str, *, op_type: str = "score_on
                                    estimated_usd=budget_guard.EST_SCORE_COST,
                                    accounts_planned=1)
         try:
-            await app.state.scoring.run_scoring(account_id, op=op)
+            saved = await app.state.scoring.run_scoring(account_id, op=op)
         finally:
             op.finish()
             app.state.scoring_inflight.discard(account_id)
+        # One-flow AE brief: an AE lookup continues straight into the full
+        # dossier so the AE lands on ONE readable brief, not a bare score.
+        # Revertible without a redeploy: set AE_BRIEF_AUTO=0 to turn off.
+        # Guarded like the manual button: scored + budget + not in flight.
+        if (op_type == "ae_lookup" and _ae_brief_auto()
+                and saved and saved.get("state") == "scored"
+                and saved.get("dossier_state") != "generating"):
+            try:
+                budget_guard.assert_affordable(app.state.scoring_repo.cost_summary(),
+                                               budget_guard.EST_DOSSIER_COST)
+            except budget_guard.BudgetExceeded:
+                logger.info("AE brief skipped for %s — monthly budget reached", account_id)
+                return
+            app.state.scoring_repo.set_dossier_state(account_id, "generating")
+            dop = spend_guard.Operation(app.state.scoring_repo, "dossier",
+                                        estimated_usd=budget_guard.EST_DOSSIER_COST,
+                                        accounts_planned=1)
+            try:
+                await app.state.scoring.generate_dossier(account_id, op=dop)
+            finally:
+                dop.finish()
 
     _schedule_coro(app, _run())
 
@@ -2244,7 +2271,7 @@ def create_app() -> FastAPI:
                     _schedule_scoring(app, existing_id, op_type="ae_lookup")
                     return {"status": "scoring", "account_id": existing_id,
                             "account": app.state.scoring.get(existing_id),
-                            "rekicked": True}
+                            "rekicked": True, "auto_brief": _ae_brief_auto()}
                 # Parked/failed row + no budget headroom: say so honestly —
                 # "already_scored" here would hide that the click did nothing.
                 return {"status": "queued", "account_id": existing_id,
@@ -2263,7 +2290,8 @@ def create_app() -> FastAPI:
             _schedule_scoring(app, row["account_id"], op_type="ae_lookup")
         return {"status": "scoring" if affordable else "queued",
                 "account_id": row["account_id"], "account": row,
-                "budget_blocked": not affordable}
+                "budget_blocked": not affordable,
+                "auto_brief": affordable and _ae_brief_auto()}
 
     @app.post("/api/scoring/score-queued")
     async def score_queued(request: Request):

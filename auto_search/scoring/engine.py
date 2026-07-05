@@ -130,10 +130,21 @@ def _system_prompt(fw: Framework) -> str:
 
         Use the web_search tool sparingly to research the company. You have a
         small search budget, so spend it only on what you do NOT already have:
-        competitor/automation vendors, pain signals, leadership changes, and
-        recent intent. When a fact is given to you as a KNOWN FACT (from a CSV
-        import), treat it as authoritative and do NOT search for it — those
-        CSV values are confirmed data, not "inferred".
+        competitor/automation vendors, pain signals, and recent intent. Intent
+        is ANY dated company news a seller would care about, not just hiring:
+        expansions / new locations / new service lines, M&A, leadership
+        changes, funding, payer-contract wins, EHR or technology
+        announcements, awards and notable press. When a fact is given to you
+        as a KNOWN FACT (from a CSV import), treat it as authoritative and do
+        NOT search for it — those CSV values are confirmed data, not
+        "inferred".
+
+        When you find NO public signals, the intent summary must SHOW the
+        diligence: name what you checked (hiring, leadership, expansion/news,
+        funding, technology) and state that nothing public surfaced in the
+        window — "no public signals found across hiring, leadership,
+        expansion news, funding, and technology announcements" reads as
+        research; "no signals" reads as an empty search.
 
         FLAGS on each dimension (not on individual CSV fields):
         - No flag: at least one named, dated public fact supports the score.

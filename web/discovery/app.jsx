@@ -1151,6 +1151,9 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
   // account finishes, so the resolved score lands without a manual reload.
   const wasActiveRef = useRef(false);
   const overheatRef = useRef(null);
+  // One-flow AE brief: the lookup account whose brief should auto-open once
+  // its score lands (the landing page then live-polls the dossier in).
+  const briefWaitRef = useRef(null);
   useEffect(() => {
     let alive = true;
     async function poll() {
@@ -1181,6 +1184,19 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
     return () => { alive = false; clearInterval(id); };
   }, []);
   useEffect(() => { onCount(accounts.filter((a) => a.state === 'scored').length); }, [accounts]);
+  // One-flow AE brief: as soon as the looked-up account is scored (its dossier
+  // is being generated server-side), open the brief — it fills in live. Opens
+  // once, and never hijacks a drawer the user is already reading.
+  useEffect(() => {
+    const id = briefWaitRef.current;
+    if (!id) return;
+    const a = accounts.find((x) => x.account_id === id);
+    if (!a) return;
+    if (a.state === 'error') { briefWaitRef.current = null; return; }
+    if (a.state !== 'scored') return;
+    briefWaitRef.current = null;
+    if (openAcc == null && openLanding == null) setOpenLanding(id);
+  }, [accounts]);
 
   async function handleScore(id) {
     const a = accounts.find((x) => x.account_id === id);
@@ -1363,10 +1379,15 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
         </div>
 
         {/* AE one-off lookup: resolve (cheap) -> confirm card -> full score + QA.
-            onStarted arms the live poller so the new row's progress renders. */}
+            onStarted arms the live poller; with the one-flow brief on it also
+            remembers the account so the brief auto-opens as it assembles. */}
         <window.LookupBar pushToast={pushToast}
           onOpenAccount={(id) => { setOpenAcc(id); load(true); }}
-          onStarted={() => { wasActiveRef.current = true; load(true); }} />
+          onStarted={(briefId) => {
+            wasActiveRef.current = true;
+            if (briefId) briefWaitRef.current = briefId;
+            load(true);
+          }} />
 
         {stats && (stats.scored_count > 0 || queuedCount > 0 || stats.total_cost > 0) && (
           <CostMeter stats={stats} queuedCount={queuedCount}

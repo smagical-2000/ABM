@@ -128,7 +128,8 @@ def _system_prompt(has_people: bool) -> str:
 
         Spend web_search only on what is not already provided:
           - recent, dated news (EHR go-lives, M&A, leadership moves, funding,
-            awards, expansions);
+            awards, expansions / new locations / new service lines,
+            payer-contract wins, technology announcements);
           - specific service lines / specialties and payer mix;
           - RCM complexity drivers (multi-site, multi-service-line, VBC/CIN,
             M&A integration).

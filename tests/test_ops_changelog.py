@@ -58,6 +58,60 @@ def test_poster_failure_never_raises(monkeypatch):
     assert changelog.post_change(changelog.ChangeEntry(what="x")) is False
 
 
+# ── Notion mirror ─────────────────────────────────────────────────────
+
+
+def test_notion_properties_map_the_schema():
+    e = changelog.ChangeEntry(
+        what="Hot reactivation rule", why="Galyna: re-alert on new activity",
+        area="automation_logic", who="Sunny", status="completed",
+        summary="ledger stores tier+touch")
+    p = changelog.notion_properties(e)
+    assert p["What changed"]["title"][0]["text"]["content"] == "Hot reactivation rule"
+    assert p["Status"]["select"]["name"] == "Completed"        # label, not "completed"
+    assert p["Area"]["select"]["name"] == "Automation logic"   # label, not the key
+    assert p["Why it changed"]["rich_text"][0]["text"]["content"].startswith("Galyna")
+    assert p["Change ref"]["rich_text"][0]["text"]["content"] == e.change_id
+    assert p["When implemented"]["date"]["start"] == e.created_at
+
+
+def test_notion_omits_empty_optionals():
+    p = changelog.notion_properties(changelog.ChangeEntry(what="x"))
+    assert "Why it changed" not in p and "Summary" not in p   # nothing empty written
+
+
+def test_notion_post_needs_token_and_db(monkeypatch):
+    monkeypatch.delenv("NOTION_TOKEN", raising=False)
+    monkeypatch.delenv("NOTION_CHANGELOG_DB_ID", raising=False)
+
+    def boom(*_a, **_k):
+        raise AssertionError("must not call Notion without token+db")
+    monkeypatch.setattr(changelog.httpx, "post", boom)
+    assert changelog.post_to_notion(changelog.ChangeEntry(what="x")) is False
+
+
+def test_notion_post_success_and_failure(monkeypatch):
+    monkeypatch.setenv("NOTION_TOKEN", "secret_x")
+    monkeypatch.setenv("NOTION_CHANGELOG_DB_ID", "db123")
+    seen = {}
+
+    class _R:
+        def raise_for_status(self):
+            pass
+
+    def ok(url, timeout=None, headers=None, json=None):
+        seen.update(url=url, parent=json["parent"], hdr=headers["Notion-Version"])
+        return _R()
+    monkeypatch.setattr(changelog.httpx, "post", ok)
+    assert changelog.post_to_notion(changelog.ChangeEntry(what="x")) is True
+    assert seen["parent"] == {"database_id": "db123"} and seen["hdr"] == "2022-06-28"
+
+    def boom(*_a, **_k):
+        raise RuntimeError("notion down")
+    monkeypatch.setattr(changelog.httpx, "post", boom)
+    assert changelog.post_to_notion(changelog.ChangeEntry(what="x")) is False
+
+
 # ── endpoints ─────────────────────────────────────────────────────────
 
 

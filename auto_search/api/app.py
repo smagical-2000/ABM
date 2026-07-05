@@ -1292,9 +1292,13 @@ def create_app() -> FastAPI:
         entries = json.loads(repo.get_setting("automation_changelog") or "[]")
         entries.append(entry.model_dump())
         repo.set_setting("automation_changelog", json.dumps(entries))
+        # One log call fans out: Postgres (above) + Slack + the Notion mirror.
+        # Both destinations are best-effort — a Slack/Notion hiccup never fails
+        # the log itself.
         posted = changelog_mod.post_change(entry)
+        notion_posted = changelog_mod.post_to_notion(entry)
         return {"entry": entry.model_dump(), "slack_posted": posted,
-                "total": len(entries)}
+                "notion_posted": notion_posted, "total": len(entries)}
 
     @app.post("/api/engagement/classify")
     async def engagement_classify(dry_run: bool = True, limit: int = 60):

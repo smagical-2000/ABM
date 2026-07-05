@@ -128,3 +128,62 @@ def post_change(entry: ChangeEntry, *, webhook: str | None = None) -> bool:
     except Exception as e:  # noqa: BLE001 — a Slack hiccup must not fail the change
         logger.warning("changelog post failed for %s: %s", entry.change_id, e)
         return False
+
+
+# ── Notion mirror ─────────────────────────────────────────────────────
+# The same entry, written as a row in the "ABM Automation Change Log" Notion
+# database so the team's docs stay in sync automatically. Needs a Notion
+# integration token (NOTION_TOKEN) whose integration is shared with the DB, and
+# the DB id (NOTION_CHANGELOG_DB_ID). Stable API version so a standard internal
+# integration token works.
+_NOTION_VERSION = "2022-06-28"
+_NOTION_PAGES_URL = "https://api.notion.com/v1/pages"
+
+
+def _rt(text: str) -> dict:
+    return {"rich_text": [{"text": {"content": (text or "")[:1900]}}]}
+
+
+def notion_properties(entry: ChangeEntry) -> dict:
+    """Pure: a change entry -> the Notion page `properties` map, matching the
+    change-log database schema (What changed / Why it changed / Status / Area /
+    Who made the change / When implemented / Summary / Change ref)."""
+    props = {
+        "What changed": {"title": [{"text": {"content": entry.what[:1900]}}]},
+        "Status": {"select": {"name": _STATUS_LABEL.get(entry.status, entry.status)}},
+        "Area": {"select": {"name": _AREA_LABEL.get(entry.area, entry.area)}},
+        "Who made the change": _rt(entry.who),
+        "Change ref": _rt(entry.change_id),
+    }
+    if entry.why:
+        props["Why it changed"] = _rt(entry.why)
+    if entry.summary:
+        props["Summary"] = _rt(entry.summary)
+    if entry.created_at:
+        props["When implemented"] = {"date": {"start": entry.created_at}}
+    return props
+
+
+def post_to_notion(entry: ChangeEntry, *, token: str | None = None,
+                   database_id: str | None = None) -> bool:
+    """Create a row for this change in the Notion change-log database. Best-effort:
+    no token/db configured -> logs + returns False (never raises), so a missing
+    Notion setup never breaks the change itself."""
+    tok = token or os.getenv("NOTION_TOKEN")
+    db = database_id or os.getenv("NOTION_CHANGELOG_DB_ID")
+    if not (tok and db):
+        logger.info("changelog: NOTION_TOKEN/NOTION_CHANGELOG_DB_ID unset — "
+                    "not mirroring %s to Notion", entry.change_id)
+        return False
+    try:
+        r = httpx.post(_NOTION_PAGES_URL, timeout=15,
+                       headers={"Authorization": f"Bearer {tok}",
+                                "Notion-Version": _NOTION_VERSION,
+                                "Content-Type": "application/json"},
+                       json={"parent": {"database_id": db},
+                             "properties": notion_properties(entry)})
+        r.raise_for_status()
+        return True
+    except Exception as e:  # noqa: BLE001 — a Notion hiccup must not fail the change
+        logger.warning("changelog Notion mirror failed for %s: %s", entry.change_id, e)
+        return False

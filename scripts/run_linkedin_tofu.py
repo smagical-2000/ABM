@@ -23,6 +23,7 @@ import argparse
 import asyncio
 import logging
 import os
+import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,6 +44,31 @@ _DEFAULT_CSV = (Path(__file__).resolve().parent.parent
                 / "auto_search" / "engagement" / "linkedin_tofu_shares.csv")
 
 _SYNC_SOURCE = "linkedin_tofu"   # sync_state key for the cost-guard throttle
+
+
+def _within_active_hours(now: datetime | None = None) -> bool:
+    """Cost gate for a fast cadence: scan only during selling hours.
+
+    The reactions actor re-bills a post's WHOLE reaction list on every scan, so
+    the cadence is the cost multiplier — a 2am scan spends the same money for a
+    Slack ping nobody reads. LINKEDIN_TOFU_ACTIVE_HOURS_UTC="13-23" (start
+    inclusive, end exclusive) + LINKEDIN_TOFU_WEEKDAYS_ONLY=1 confine spend to
+    the window. Unset window = always active (old behavior)."""
+    now = now or datetime.now(UTC)
+    if os.getenv("LINKEDIN_TOFU_WEEKDAYS_ONLY") == "1" and now.weekday() >= 5:
+        return False
+    window = (os.getenv("LINKEDIN_TOFU_ACTIVE_HOURS_UTC") or "").strip()
+    if not window:
+        return True
+    try:
+        start_s, end_s = window.split("-", 1)
+        start, end = int(start_s), int(end_s)
+    except (ValueError, TypeError):
+        logger.warning("bad LINKEDIN_TOFU_ACTIVE_HOURS_UTC %r — ignoring", window)
+        return True
+    if start <= end:
+        return start <= now.hour < end
+    return now.hour >= start or now.hour < end   # window wraps midnight
 
 
 def _hours_since(ts) -> float | None:
@@ -85,6 +111,10 @@ def main() -> int:
     # re-scraping + re-enriching every tick was ~$12/day of Apify. Do the real work only
     # every LINKEDIN_TOFU_MIN_INTERVAL_HOURS (default 6); other ticks skip BEFORE any spend.
     # --dry-run and --force bypass it.
+    if not (args.dry_run or args.force) and not _within_active_hours():
+        print("[run_linkedin_tofu] outside active hours — no-op. (--force to override)",
+              flush=True)
+        return 0
     min_h = float(os.getenv("LINKEDIN_TOFU_MIN_INTERVAL_HOURS", "6"))
     if not (args.dry_run or args.force) and min_h > 0:
         last = (engagement_repo.get_sync_state(source=_SYNC_SOURCE) or {}).get("last_synced_at")
@@ -122,6 +152,19 @@ def main() -> int:
                                        stats=summary["stats"], last_synced_at=datetime.now(UTC))
     print(f"[run_linkedin_tofu] {'dry-run ' if args.dry_run else ''}ok: {summary['stats']}",
           flush=True)
+    # Event-driven handoff: this sync just WROTE new engagement events, so the
+    # condition hit — push the tier-change notifier NOW instead of waiting for
+    # the daily cron. The endpoint's notified_tiers ledger keeps it idempotent
+    # (a like on an already-notified account posts nothing), and the push is a
+    # no-op unless ENGAGEMENT_NOTIFY_ENABLED=1. Never fails the sync.
+    if not args.dry_run and summary["stats"].get("heat_events", 0) > 0:
+        print(f"[run_linkedin_tofu] {summary['stats']['heat_events']} new engagement "
+              "event(s) — triggering tier-change notify", flush=True)
+        rc = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve().parent / "run_engagement_notify.py")],
+        ).returncode
+        if rc:
+            print(f"[run_linkedin_tofu] notify push rc={rc} (non-fatal)", flush=True)
     return 0
 
 

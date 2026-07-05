@@ -43,6 +43,7 @@ from auto_search.abm import (
     states_from_locations,
 )
 from auto_search.api.auth import install_basic_auth
+from auto_search.clients import cms_aco
 from auto_search.db import get_repository
 from auto_search.db.engagement_repository import (
     dedupe_contacts,
@@ -2284,6 +2285,15 @@ def create_app() -> FastAPI:
         # ScoringService covers re-scores; this covers provenance).
         account.discovery_signals = _engagement_intent_signals(
             getattr(app.state, "engagement_repo", None), account.name)
+        # CMS MSSP ACO participation (providers only): a strong value-based-care
+        # signal + leadership names, injected as KNOWN FACTS for the score +
+        # brief. Best-effort, cached daily, never blocks the lookup.
+        if account.segment in ("health_system", "specialty"):
+            try:
+                account.firmographics.update(
+                    await asyncio.to_thread(cms_aco.aco_known_facts, account.name))
+            except Exception:  # noqa: BLE001 — enrichment garnish
+                logger.exception("CMS ACO enrichment failed for %s", account.name)
         row = app.state.scoring.enqueue_account(
             account, state="scoring" if affordable else "queued")
         if affordable:

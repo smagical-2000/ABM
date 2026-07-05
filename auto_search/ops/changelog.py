@@ -26,13 +26,23 @@ logger = logging.getLogger(__name__)
 
 # The lifecycle a change moves through. `initiated` and `completed` are the two
 # the ticket requires a Slack post on; `rolled_back` covers a reverted change.
+# Display labels use the ticket's exact wording (non-technical reader first).
 STATUSES = ("initiated", "completed", "rolled_back")
-_STATUS_LABEL = {"initiated": "Change initiated",
-                 "completed": "Change completed",
-                 "rolled_back": "Change rolled back"}
+_STATUS_LABEL = {"initiated": "In progress",
+                 "completed": "Completed",
+                 "rolled_back": "Rolled back"}
+_STATUS_HEADLINE = {"initiated": "Change started",
+                    "completed": "Change completed",
+                    "rolled_back": "Change rolled back"}
 # Change categories from the ticket (kept open — any string is accepted).
 AREAS = ("automation_logic", "campaign_rules", "integration_behavior",
          "cadence_scheduling", "scoring", "other")
+_AREA_LABEL = {"automation_logic": "Automation logic",
+               "campaign_rules": "Campaign rules",
+               "integration_behavior": "Integration behavior",
+               "cadence_scheduling": "Cadence or scheduling",
+               "scoring": "Scoring",
+               "other": "Other"}
 
 
 class ChangeEntry(BaseModel):
@@ -72,28 +82,33 @@ def _short_date(iso: str) -> str:
 
 
 def build_change_card(entry: ChangeEntry) -> dict:
-    """Pure: a change entry -> a Slack Block Kit payload. No emoji (matches the
-    house style); the status is a plain-text tag so the channel stays scannable."""
-    tag = _STATUS_LABEL.get(entry.status, entry.status)
-    header = f"[{entry.status.upper()}] {entry.what}"[:150]
-    fields = [
-        f"*Status:* {tag}",
-        f"*Area:* {entry.area}",
-        f"*Who:* {entry.who}",
-        f"*When:* {_short_date(entry.created_at)}",
-    ]
-    body = [f"*What:* {entry.what}"]
+    """Pure: a change entry -> a Slack Block Kit payload, written for a
+    NON-TECHNICAL reader using the ticket's exact field structure:
+    What changed / Why it changed / When it was implemented / Who made the
+    change / Status (In progress / Completed / Rolled back). No emoji."""
+    headline = _STATUS_HEADLINE.get(entry.status, entry.status)
+    header = f"{headline}: {entry.what}"[:150]
+    body = [f"*What changed:* {entry.what}"]
     if entry.why:
-        body.append(f"*Why:* {entry.why}")
+        body.append(f"*Why it changed:* {entry.why}")
     if entry.summary:
-        body.append(f"*Summary:* {entry.summary}")
-    body.append(f"_id: {entry.change_id}_")
+        body.append(f"*In short:* {entry.summary}")
+    fields = [
+        f"*Status:* {_STATUS_LABEL.get(entry.status, entry.status)}",
+        f"*Area:* {_AREA_LABEL.get(entry.area, entry.area)}",
+        f"*Who made the change:* {entry.who}",
+        f"*When it was implemented:* {_short_date(entry.created_at)}",
+    ]
     return {
         "blocks": [
             {"type": "header", "text": {"type": "plain_text", "text": header}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(body)}},
             {"type": "section", "fields": [
                 {"type": "mrkdwn", "text": f} for f in fields]},
-            {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(body)}},
+            {"type": "context", "elements": [
+                {"type": "mrkdwn",
+                 "text": f"Change ref: {entry.change_id} — the started and completed "
+                         "messages for one change share this ref."}]},
         ]
     }
 

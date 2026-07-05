@@ -150,10 +150,11 @@ To answer "did account X trigger a notification, and why/why not":
   channel being spammed.
 - **Cutoff:** only status changes on/after the go-live cutoff are handed off, so
   the already-worked backlog (Jan–Jun) was never dumped into the channel.
-- **Hot reactivation (agreed 2026-07-05, being added):** a **Hot** account — old
-  or new — re-fires its Slack notification whenever it gets **any new activity**
-  going forward. So a like on a long-standing Hot account after go-forward will
-  re-alert the AE, while accounts with no new activity stay quiet.
+- **Hot reactivation (LIVE 2026-07-05):** a **Hot** account — old or new —
+  re-fires its Slack notification whenever it gets **any new activity** going
+  forward. So a like on a long-standing Hot account re-alerts the AE, while
+  accounts with no new activity stay quiet. Rolled out with a baseline set to
+  "now", so nothing back-fired (verified: zero notifications due at rollout).
 - **Kill switch:** the whole handoff is off unless `ENGAGEMENT_NOTIFY_ENABLED=1`,
   and capped per run, so it can never flood the channel.
 

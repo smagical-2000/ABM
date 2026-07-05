@@ -1256,6 +1256,46 @@ def create_app() -> FastAPI:
         return {"due": len(due), "posted": posted, "live": live,
                 "dry_run": dry_run, "detail": fired[:60]}
 
+    @app.get("/api/ops/changelog")
+    def ops_changelog_list(limit: int = 100):
+        """The automation change log — one centralized place for every change to
+        automation logic / campaign rules / integrations / cadence (MAR2).
+        Newest first."""
+        import json
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=503, detail="store not available")
+        entries = json.loads(repo.get_setting("automation_changelog") or "[]")
+        return {"entries": entries[-max(1, limit):][::-1], "total": len(entries)}
+
+    @app.post("/api/ops/changelog")
+    async def ops_changelog_add(request: Request):
+        """Record an automation change AND push it to the changelog Slack channel.
+        Body: {what (required), why, area, who, status, summary, change_id?}.
+        Post one entry with status=initiated when starting a change, then another
+        with the SAME change_id and status=completed (or rolled_back) when done —
+        Slack gets a card each time (the ticket's two notifications)."""
+        import json
+
+        from auto_search.ops import changelog as changelog_mod
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=503, detail="store not available")
+        body = await _json_body(request)
+        try:
+            entry = changelog_mod.ChangeEntry(**{
+                k: v for k, v in body.items()
+                if k in ("change_id", "what", "why", "area", "who", "status", "summary")
+                and v is not None})
+        except Exception as e:  # noqa: BLE001 — pydantic validation → 422
+            raise HTTPException(status_code=422, detail=str(e)) from None
+        entries = json.loads(repo.get_setting("automation_changelog") or "[]")
+        entries.append(entry.model_dump())
+        repo.set_setting("automation_changelog", json.dumps(entries))
+        posted = changelog_mod.post_change(entry)
+        return {"entry": entry.model_dump(), "slack_posted": posted,
+                "total": len(entries)}
+
     @app.post("/api/engagement/classify")
     async def engagement_classify(dry_run: bool = True, limit: int = 60):
         """Claude-classify engaged accounts that have NO scored framework, from name+domain.

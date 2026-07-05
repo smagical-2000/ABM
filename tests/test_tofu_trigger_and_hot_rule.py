@@ -6,7 +6,6 @@ Endpoint: seeding can never pre-suppress Hot (baseline caps at Warm), and
 hot_reset re-arms previously-seeded Hot ledgers except already-sent accounts."""
 
 import importlib.util
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 

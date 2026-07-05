@@ -18,6 +18,12 @@ the sales/marketing operator. Fit x Intent, like 6sense/Demandbase: one pipeline
   Reply.io, Podcast, Airtable), score into heat buckets, cross to scored accounts, feed back
   into intent. **Spec: `docs/ENGAGEMENT_ARCHITECTURE.md`.** Tickets: the Linear project
   "ABM Engagement Intelligence" (team AGT).
+- **Phase 3 (BUILT, ships dark):** Campaign Automation — auto-enroll scored + in-market
+  accounts' Reply.io contacts into the ICP's email sequence (the WRITE side of the loop;
+  Reply.io does all sending). Testing mode + auto-enroll OFF by default; sequences must be
+  authored in the Reply.io UI and mapped in the Campaigns tab before anything can send.
+  **Spec: `docs/CAMPAIGN_AUTOMATION_ARCHITECTURE.md`.** Tickets: Linear project
+  "ABM Campaign Automation" (team MAR2).
 
 ## Hard constraints — read before you touch code
 
@@ -76,6 +82,7 @@ Agentic discipline, not vibe coding. Plan more than you build. Per feature, scal
 | Spend guard + monthly budgets | `auto_search/scoring/spend_guard.py`, `budget.py` |
 | ABM target-sheet matching | `auto_search/abm/` |
 | Warm intros (Apollo, free) | `auto_search/intros/` |
+| Campaign automation (eligibility rule, ICP->sequence catalog, Reply.io enroll runner) | `auto_search/campaigns/` (`enroll.py`, `catalog.py`, `runner.py`), ledger `auto_search/db/campaign_repository.py` + `campaign_schema.sql`, tab `web/discovery/campaigns.jsx` |
 | All HTTP endpoints + the panel annotation (intent, watch-list filter, TTL) | `auto_search/api/app.py` |
 | Web UI | `web/discovery/` — `app.jsx` (shell+nav), `panel.jsx` (rows), `parked.jsx` (Watch list), `scoringUI.jsx`, `drawer.jsx`, `news.jsx`, `ui.jsx` (shared components + `Icons`) |
 | Data layer | `auto_search/db/` (`repository.py` JSON, `postgres_repository.py`, `schema.sql`) |

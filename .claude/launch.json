@@ -17,9 +17,8 @@
     {
       "name": "ui-pg",
       "runtimeExecutable": "sh",
-      "runtimeArgs": ["-c", "DATABASE_URL=postgresql://localhost/abm_discovery python3 -m uvicorn auto_search.api.app:app --host 127.0.0.1 --port 8137"],
-      "port": 8137,
-      "autoPort": false
+      "runtimeArgs": ["-c", "DATABASE_URL=postgresql://localhost/abm_discovery python3 -m uvicorn auto_search.api.app:app --host 127.0.0.1 --port $PORT"],
+      "autoPort": true
     }
   ]
 }

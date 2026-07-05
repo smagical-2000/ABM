@@ -98,6 +98,26 @@ window.API = {
     method: 'POST', body: JSON.stringify({ cutoff }),
   }),
 
+  // ── campaigns (Phase 3: enroll accounts into Reply.io sequences) ────────────
+  campaignsBoard: () => http('/api/campaigns/board'),
+  campaignsReplyio: () => http('/api/campaigns/replyio-campaigns'),
+  // {dry_run:false} for a live pass (requires Live mode); default is a preview.
+  campaignsRun: (body = {}) => http('/api/campaigns/run', {
+    method: 'POST', body: JSON.stringify(body),
+  }),
+  // Manually enroll one account: {account_id, dry_run?}.
+  campaignsEnroll: (body) => http('/api/campaigns/enroll', {
+    method: 'POST', body: JSON.stringify(body),
+  }),
+  // Assign a Reply.io campaign to a sequence key: {sequence_key, campaign_id, campaign_name}.
+  campaignsMapping: (body) => http('/api/campaigns/mapping', {
+    method: 'POST', body: JSON.stringify(body),
+  }),
+  // Toggles: {auto_enroll?, live?, run_cap?}.
+  campaignsSettings: (body) => http('/api/campaigns/settings', {
+    method: 'POST', body: JSON.stringify(body),
+  }),
+
   // ── watch list: lone-standard-hire leads kept out of Discovery ──────────────
   parked: () => http('/api/discovery/parked'),                       // not yet qualified
   watchlistLeads: () => http('/api/panel?status=qualified&watchlist=only'),  // qualified, low intent

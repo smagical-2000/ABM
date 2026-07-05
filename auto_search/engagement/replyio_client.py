@@ -82,6 +82,30 @@ class ReplyioClient:
                                    params={"top": top, "skip": 0})
         return data.get("items") or []
 
+    async def list_campaigns(self) -> list[dict]:
+        """Every campaign (id, name, status) — read-only, for the Campaigns tab's
+        sequence-mapping picker. Lives on the v1 surface (x-api-key), same as the
+        add-and-push write; the v3 API has no campaigns list. Same 429/5xx backoff."""
+        url = f"{V1_BASE}/campaigns"
+        headers = {"x-api-key": self._key, "Content-Type": "application/json"}
+        resp = None
+        for attempt in range(1, _MAX_RETRIES + 1):
+            if self._http is not None:
+                resp = await self._http.request("GET", url, headers=headers)
+            else:
+                async with httpx.AsyncClient(timeout=self._timeout) as client:
+                    resp = await client.request("GET", url, headers=headers)
+            if (resp.status_code == 429 or resp.status_code >= 500) and attempt < _MAX_RETRIES:
+                await asyncio.sleep(_retry_after(resp, attempt))
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            rows = data if isinstance(data, list) else data.get("items") or []
+            return [{"id": r.get("id"), "name": r.get("name"), "status": r.get("status")}
+                    for r in rows if isinstance(r, dict)]
+        resp.raise_for_status()   # exhausted retries on 429/5xx
+        return []
+
     # ── transport ──────────────────────────────────────────────────────
 
     async def _paginate(self, method: str, path: str, *, params: dict,

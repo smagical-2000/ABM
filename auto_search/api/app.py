@@ -43,8 +43,12 @@ from auto_search.abm import (
     states_from_locations,
 )
 from auto_search.api.auth import install_basic_auth
+from auto_search.campaigns import catalog as campaigns_catalog
+from auto_search.campaigns import enroll as campaigns_enroll
+from auto_search.campaigns import runner as campaigns_runner
 from auto_search.clients import cms_aco
 from auto_search.db import get_repository
+from auto_search.db.campaign_repository import get_campaign_repository
 from auto_search.db.engagement_repository import (
     dedupe_contacts,
     engaging_contacts,
@@ -435,6 +439,14 @@ async def lifespan(app: FastAPI):
         logger.exception("engagement init failed")
         app.state.engagement_repo = None
     app.state.engagement_running = False           # one sync at a time
+    # Campaign automation store (Phase 3). Additive + isolated — never block startup.
+    try:
+        app.state.campaign_repo = get_campaign_repository()
+        app.state.campaign_repo.ensure_schema()
+    except Exception:  # noqa: BLE001
+        logger.exception("campaign store init failed")
+        app.state.campaign_repo = None
+    app.state.campaigns_running = False            # one enrollment run at a time
     app.state.abm_index = _load_abm_index(repo)   # ABM target list -> match index
     _seed_social_targets(repo)                    # ensure Magical is always monitored
     app.state.social_running = False              # one social poll at a time
@@ -473,7 +485,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        for r in (repo, scoring_repo):
+        for r in (repo, scoring_repo, getattr(app.state, "campaign_repo", None)):
             close = getattr(r, "close", None)
             if callable(close):
                 close()
@@ -1467,6 +1479,12 @@ def create_app() -> FastAPI:
         async def _run() -> None:
             try:
                 await _sync_all_sources(since=since, max_contacts=max_contacts)
+                # Phase 3: the day-one auto-enroll rule fires after fresh heat lands.
+                # Best-effort — enrollment must never fail a sync.
+                try:
+                    await _auto_enroll_after_sync()
+                except Exception:  # noqa: BLE001
+                    logger.exception("auto-enroll after sync failed")
             finally:
                 app.state.engagement_running = False
 
@@ -1521,6 +1539,255 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=f"LinkedIn TOFU run failed: {e}") from e
         finally:
             app.state.engagement_running = False
+
+    # ── Campaign automation (Phase 3) ─────────────────────────────────────────
+    # The WRITE side of the engagement loop: enroll scored + in-market accounts'
+    # matched Reply.io contacts into the ICP's email sequence. The app is the
+    # brain (who / which sequence / when); Reply.io does all sending. Spec:
+    # docs/CAMPAIGN_AUTOMATION_ARCHITECTURE.md. Settings ride on the engagement
+    # settings store (same runtime-settings pattern as live-routing).
+
+    def _campaign_settings() -> dict:
+        erepo = getattr(app.state, "engagement_repo", None)
+        get = erepo.get_setting if erepo else (lambda _k: None)
+        try:
+            cap = int(get("campaigns_run_cap") or campaigns_runner.DEFAULT_ACCOUNT_CAP)
+        except (TypeError, ValueError):
+            cap = campaigns_runner.DEFAULT_ACCOUNT_CAP
+        return {"auto_enroll": get("campaigns_auto_enroll") == "1",
+                "live": get("campaigns_live") == "1",
+                "run_cap": max(1, cap)}
+
+    def _enroll_notify_sync(summary: dict) -> None:
+        """One-line Slack heads-up per enrolled account. Always the private
+        engagement webhook — enrollment is an ops event, not an AE/SDR handoff."""
+        n = summary.get("enrolled", 0)
+        seq = summary.get("campaign_name") or summary.get("sequence_label") or "sequence"
+        why = ", ".join(summary.get("reasons") or [])
+        engagement_notify.post_card({
+            "text": (f"Campaign automation: enrolled {summary.get('name')} — "
+                     f"{n} contact{'' if n == 1 else 's'} into {seq}"
+                     + (f" ({why})" if why else ""))})
+
+    def _enroll_notify(summary: dict):
+        return asyncio.to_thread(_enroll_notify_sync, summary)   # awaited by the runner
+
+    def _persist_last_run(res: dict, *, trigger: str) -> None:
+        """Store a trimmed last-run record for the board (settings key)."""
+        erepo = getattr(app.state, "engagement_repo", None)
+        if not erepo:
+            return
+        slim = {"ran_at": res.get("ran_at"), "dry_run": res.get("dry_run"),
+                "trigger": trigger, "stats": res.get("stats"),
+                "capped": res.get("capped"), "eligible_total": res.get("eligible_total"),
+                "accounts": [{k: a.get(k) for k in
+                              ("account_id", "name", "sequence_key", "sequence_label",
+                               "campaign_name", "planned", "enrolled", "skipped_409",
+                               "failed", "status")}
+                             for a in (res.get("accounts") or [])[:50]]}
+        erepo.set_setting("campaigns_last_run", json.dumps(slim))
+
+    async def _auto_enroll_after_sync() -> None:
+        """The locked day-one rule: after each engagement sync lands fresh heat,
+        auto-enroll every account that now qualifies. Gated by the auto-enroll
+        toggle. In Testing (Live off) it runs a DRY pass and stores the preview,
+        so the operator sees exactly what WOULD have been enrolled."""
+        crepo = getattr(app.state, "campaign_repo", None)
+        erepo = getattr(app.state, "engagement_repo", None)
+        if not (crepo and erepo):
+            return
+        s = _campaign_settings()
+        if not s["auto_enroll"] or getattr(app.state, "campaigns_running", False):
+            return
+        app.state.campaigns_running = True
+        try:
+            client = None
+            if s["live"]:
+                from auto_search.engagement.replyio_client import ReplyioClient
+                client = ReplyioClient()
+            res = await campaigns_runner.run(
+                campaign_repo=crepo, engagement_repo=erepo,
+                scoring_repo=app.state.scoring_repo, replyio_client=client,
+                dry_run=not s["live"], account_cap=s["run_cap"], trigger="auto",
+                notify_fn=_enroll_notify if s["live"] else None)
+            _persist_last_run(res, trigger="auto_after_sync")
+        finally:
+            app.state.campaigns_running = False
+
+    @app.get("/api/campaigns/board")
+    def campaigns_board():
+        """Everything the Campaigns tab needs in one read: settings, the sequence
+        mapping (catalog x stored), the ready-to-enroll preview WITH reasons, the
+        enrollment ledger, and the last run."""
+        crepo = getattr(app.state, "campaign_repo", None)
+        erepo = getattr(app.state, "engagement_repo", None)
+        if not (crepo and erepo):
+            raise HTTPException(status_code=503, detail="campaign store not available")
+        settings = _campaign_settings()
+
+        stored = {r["sequence_key"]: r for r in crepo.sequences()}
+        sequences = [{"sequence_key": key, **meta,
+                      "campaign_id": (stored.get(key) or {}).get("campaign_id"),
+                      "campaign_name": (stored.get(key) or {}).get("campaign_name")}
+                     for key, meta in campaigns_catalog.SEQUENCE_KEYS.items()]
+        mapped = {s["sequence_key"]: s for s in sequences if s.get("campaign_id")}
+
+        # Ready-to-enroll preview: the same pure rule the runner uses.
+        scored = app.state.scoring_repo.list_accounts()
+        heat = campaigns_runner.heat_by_id(erepo)
+        contacts_by_acct = campaigns_runner.contacts_by_account(erepo)
+        eligibles = campaigns_enroll.eligible_accounts(
+            scored, heat, exclude_ids=crepo.accounts_enrolled())
+        eligible_rows = []
+        for e in eligibles:
+            seq = mapped.get(e.sequence_key)
+            already = (crepo.enrolled_for(e.account_id, seq["campaign_id"])
+                       if seq else set())
+            planned, skipped = campaigns_enroll.plan_contacts(
+                contacts_by_acct.get(e.account_id) or [], already=already)
+            eligible_rows.append({**e.as_dict(), "mapped": bool(seq),
+                                  "campaign_name": (seq or {}).get("campaign_name"),
+                                  "contacts_ready": len(planned),
+                                  "contacts_skipped": {k: v for k, v in skipped.items() if v}})
+
+        enrollments = crepo.enrollments(limit=300)
+        last_run = None
+        raw = erepo.get_setting("campaigns_last_run")
+        if raw:
+            try:
+                last_run = json.loads(raw)
+            except (TypeError, ValueError):
+                last_run = None
+        return {
+            "settings": settings, "sequences": sequences,
+            "eligible": eligible_rows, "enrollments": enrollments,
+            "enrolled_accounts": len(crepo.accounts_enrolled()),
+            "last_run": last_run,
+            "running": bool(getattr(app.state, "campaigns_running", False)),
+            "replyio_configured": bool(os.getenv("REPLYIO_API_KEY")),
+        }
+
+    @app.get("/api/campaigns/replyio-campaigns")
+    async def campaigns_replyio_list():
+        """Live Reply.io campaign list (read-only) for the mapping picker."""
+        if not os.getenv("REPLYIO_API_KEY"):
+            raise HTTPException(status_code=503, detail="REPLYIO_API_KEY not set")
+        from auto_search.engagement.replyio_client import ReplyioClient
+        try:
+            rows = await ReplyioClient().list_campaigns()
+        except Exception as e:  # noqa: BLE001 — surface a clean 502, not a stack
+            raise HTTPException(status_code=502,
+                                detail=f"Reply.io campaigns fetch failed: {e}") from e
+        return {"campaigns": rows}
+
+    @app.post("/api/campaigns/mapping")
+    async def campaigns_mapping_set(request: Request):
+        """Assign (or clear) the Reply.io campaign for one sequence key."""
+        crepo = getattr(app.state, "campaign_repo", None)
+        if not crepo:
+            raise HTTPException(status_code=503, detail="campaign store not available")
+        body = await _json_body(request)
+        key = str(body.get("sequence_key") or "")
+        if key not in campaigns_catalog.SEQUENCE_KEYS:
+            raise HTTPException(status_code=400, detail=f"unknown sequence_key: {key}")
+        campaign_id = str(body.get("campaign_id") or "").strip() or None
+        crepo.upsert_sequence(key, campaign_id=campaign_id,
+                              campaign_name=(body.get("campaign_name") or None))
+        return {"ok": True, "sequences": crepo.sequences()}
+
+    @app.post("/api/campaigns/settings")
+    async def campaigns_settings_set(request: Request):
+        """Flip the campaign toggles: auto_enroll, live, run_cap. Flipping sends
+        nothing on its own (same contract as the live-routing toggle)."""
+        erepo = getattr(app.state, "engagement_repo", None)
+        if not erepo:
+            raise HTTPException(status_code=503, detail="settings store not available")
+        body = await _json_body(request)
+        if "auto_enroll" in body:
+            erepo.set_setting("campaigns_auto_enroll", "1" if body["auto_enroll"] else "0")
+        if "live" in body:
+            erepo.set_setting("campaigns_live", "1" if body["live"] else "0")
+        if "run_cap" in body:
+            try:
+                erepo.set_setting("campaigns_run_cap", str(max(1, int(body["run_cap"]))))
+            except (TypeError, ValueError) as e:
+                raise HTTPException(status_code=400, detail="run_cap must be a number") from e
+        return {"ok": True, "settings": _campaign_settings()}
+
+    @app.post("/api/campaigns/run")
+    async def campaigns_run(request: Request):
+        """One enrollment pass over every eligible account (capped). Body:
+        {dry_run?: bool} — defaults TRUE. A live pass additionally requires Live
+        mode ON (defense in depth). Dry runs return inline; a live pass runs in
+        the background (Reply.io writes take time) and lands in last_run."""
+        crepo = getattr(app.state, "campaign_repo", None)
+        erepo = getattr(app.state, "engagement_repo", None)
+        if not (crepo and erepo):
+            raise HTTPException(status_code=503, detail="campaign store not available")
+        if getattr(app.state, "campaigns_running", False):
+            return {"started": False, "busy": True}
+        body = await _json_body(request)
+        dry = body.get("dry_run") is not False
+        s = _campaign_settings()
+        if dry:
+            res = await campaigns_runner.run(
+                campaign_repo=crepo, engagement_repo=erepo,
+                scoring_repo=app.state.scoring_repo, replyio_client=None,
+                dry_run=True, account_cap=s["run_cap"], trigger="manual")
+            return {"started": True, "dry_run": True, "result": res}
+        if not s["live"]:
+            raise HTTPException(status_code=400,
+                                detail="Live mode is off — enable it in settings "
+                                       "before a live enrollment run")
+        from auto_search.engagement.replyio_client import ReplyioClient
+        client = ReplyioClient()                    # raises clearly if the key is absent
+        app.state.campaigns_running = True
+
+        async def _run() -> None:
+            try:
+                res = await campaigns_runner.run(
+                    campaign_repo=crepo, engagement_repo=erepo,
+                    scoring_repo=app.state.scoring_repo, replyio_client=client,
+                    dry_run=False, account_cap=s["run_cap"], trigger="manual",
+                    notify_fn=_enroll_notify)
+                _persist_last_run(res, trigger="manual")
+            except Exception:  # noqa: BLE001 — never crash the loop
+                logger.exception("live enrollment run failed")
+            finally:
+                app.state.campaigns_running = False
+
+        _schedule_coro(app, _run())
+        return {"started": True, "dry_run": False}
+
+    @app.post("/api/campaigns/enroll")
+    async def campaigns_enroll_one(request: Request):
+        """Manually enroll ONE scored account (the human override / demo path).
+        Body: {account_id, dry_run?}. Respects mapping, opt-outs, and the ledger;
+        bypasses the heat/intent trigger (a human override is a deliberate act).
+        Executes live only when Live mode is on; otherwise returns the dry plan."""
+        crepo = getattr(app.state, "campaign_repo", None)
+        erepo = getattr(app.state, "engagement_repo", None)
+        if not (crepo and erepo):
+            raise HTTPException(status_code=503, detail="campaign store not available")
+        body = await _json_body(request)
+        account_id = str(body.get("account_id") or "")
+        if not account_id:
+            raise HTTPException(status_code=400, detail="account_id required")
+        s = _campaign_settings()
+        dry = (body.get("dry_run") is not False) or not s["live"]
+        client = None
+        if not dry:
+            from auto_search.engagement.replyio_client import ReplyioClient
+            client = ReplyioClient()
+        res = await campaigns_runner.run(
+            campaign_repo=crepo, engagement_repo=erepo,
+            scoring_repo=app.state.scoring_repo, replyio_client=client,
+            dry_run=dry, account_cap=None, only_account_id=account_id,
+            trigger="manual", notify_fn=_enroll_notify if not dry else None)
+        accounts = res.get("accounts") or []
+        return {"dry_run": dry, "live": s["live"],
+                "result": accounts[0] if accounts else None,
+                "stats": res.get("stats")}
 
     @app.get("/api/abm/summary")
     def abm_summary():

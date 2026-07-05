@@ -419,7 +419,7 @@ def test_social_listening_panel_opens(page):
 def test_every_tab_mounts_without_console_errors(page):
     """Each nav tab renders cleanly — catches a white-screen on any tab, including
     the new Watch list (a fresh babel-compiled file)."""
-    for tab in ("Discovery", "Scored", "News", "Watch list", "Engagement"):
+    for tab in ("Discovery", "Scored", "News", "Watch list", "Engagement", "Campaigns"):
         page.click(f"text={tab}")
         page.wait_for_timeout(700)
         real = [e for e in page.console_errors
@@ -433,6 +433,45 @@ def test_engagement_tab_shows_account(page):
     page.click("text=Engagement")
     page.wait_for_selector("text=UI Demo Health System", timeout=10_000)
     assert page.get_by_text("Warm", exact=False).count() > 0
+
+
+# ── Phase 3: campaign automation ──────────────────────────────────────────────
+
+
+def test_campaigns_tab_ready_list_with_reasons(page):
+    """The Campaigns tab (fresh babel-compiled campaigns.jsx) renders the
+    ready-to-enroll worklist: the seeded account qualifies (High fit + Warm heat
+    16), shows its reasons, and — with no Reply.io campaign mapped yet — is
+    flagged as blocked on sequence setup rather than enrollable."""
+    page.click("text=Campaigns")
+    page.wait_for_selector("text=Ready to enroll", timeout=10_000)
+    page.wait_for_selector("text=UI Demo Health System", timeout=10_000)
+    assert page.get_by_text("Tier 1", exact=False).count() > 0        # fit chip (seed label)
+    assert page.get_by_text("Warm", exact=False).count() > 0          # heat reason chip
+    assert page.get_by_text("sequence not set up yet", exact=False).count() > 0
+    real = [e for e in page.console_errors
+            if not any(x in e.lower() for x in ("favicon", "tailwind", "cdn", "font"))]
+    assert not real, f"console errors: {real[:5]}"
+
+
+def test_campaigns_sequences_tab_and_preview_run(page):
+    """The Sequences mapping editor renders every catalog group with its state,
+    and a Preview run (dry) round-trips the whole backend path — reporting the
+    eligible account as blocked on sequence setup, sending nothing. The Reply.io
+    campaign list is stubbed (no network in tests)."""
+    page.route("**/api/campaigns/replyio-campaigns",
+               lambda route: route.fulfill(json={"campaigns": [
+                   {"id": 111, "name": "Outbound HS (test)", "status": 0}]}))
+    page.click("text=Campaigns")
+    page.wait_for_selector("text=Ready to enroll", timeout=10_000)
+    page.click("text=Sequences")
+    page.wait_for_selector("text=Health Systems", timeout=10_000)
+    assert page.get_by_text("needs a campaign", exact=False).count() > 0
+    assert page.get_by_text("written in Reply.io", exact=False).count() > 0
+    # Preview run: dry, inline — the seeded eligible account is blocked on setup.
+    page.click("text=Preview run")
+    page.wait_for_selector("text=blocked on sequence setup", timeout=10_000)
+    assert page.get_by_text("Nothing was sent", exact=False).count() > 0
 
 
 def test_watch_list_tab_shows_qualified_and_parked(page):

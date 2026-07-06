@@ -264,6 +264,38 @@ async def test_manual_enroll_bypasses_trigger_but_not_the_ledger(crepo):
     assert res2["stats"] == {"not_scored": 1}
 
 
+# ── routing rules ─────────────────────────────────────────────────────
+
+
+def test_custom_rule_routes_before_group_and_falls_back():
+    from auto_search.campaigns import rules
+    e = enroll.Eligible(account_id="a1", name="X", segment="specialty",
+                        sequence_key="ortho", fit_band="high", fit_label="High",
+                        heat_score=25, heat_tier="Hot", intent_tier=None)
+    email_map = {"ortho": {"campaign_id": "111", "campaign_name": "Ortho"}}
+    hot = rules.normalize({"name": "Hot fast-track", "heat_min": "hot",
+                           "campaign_id": "999", "campaign_name": "Fast"})
+    r = rules.resolve_route(e, [hot], email_map, {})
+    assert r["email"]["campaign_id"] == "999" and r["route_label"] == "Hot fast-track"
+    # warm account does not match a hot-only rule -> group fallback
+    e2 = enroll.Eligible(account_id="a2", name="Y", segment="specialty",
+                         sequence_key="ortho", fit_band="high", fit_label="High",
+                         heat_score=15, heat_tier="Warm", intent_tier=None)
+    r2 = rules.resolve_route(e2, [hot], email_map, {})
+    assert r2["email"]["campaign_id"] == "111" and r2["rule"] is None
+    # disabled rules never match; rule without campaign falls back but keeps label
+    off = dict(hot, enabled=False)
+    assert rules.resolve_route(e, [off], email_map, {})["rule"] is None
+    named = rules.normalize({"name": "No campaign yet", "heat_min": "hot"})
+    r3 = rules.resolve_route(e, [named], email_map, {})
+    assert r3["email"]["campaign_id"] == "111" and r3["route_label"] == "No campaign yet"
+    # intent-hot satisfies a hot rule even with low heat score
+    e4 = enroll.Eligible(account_id="a4", name="Z", segment="specialty",
+                         sequence_key="ortho", fit_band="high", fit_label="High",
+                         heat_score=0, heat_tier="Lower", intent_tier="hot")
+    assert rules.resolve_route(e4, [hot], email_map, {})["rule"] is not None
+
+
 # ── LinkedIn leg (HeyReach) ───────────────────────────────────────────
 
 

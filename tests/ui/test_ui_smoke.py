@@ -472,16 +472,14 @@ def test_campaigns_sequences_tab_and_preview_run(page):
     page.wait_for_selector("text=Ready to enroll", timeout=10_000)
     page.click("text=Sequences")
     page.wait_for_selector("text=Health Systems", timeout=10_000)
-    assert page.get_by_text("needs a campaign", exact=False).count() > 0
-    assert page.get_by_text("written in Reply.io", exact=False).count() > 0
-    # Auto-detect: the unconnected campaign surfaces with its suggested group.
-    assert page.get_by_text("Detected in Reply.io", exact=False).count() > 0
-    assert page.get_by_text("looks like Health Systems", exact=False).count() > 0
-    assert page.get_by_text("Check Reply.io for new sequences", exact=False).count() > 0
-    # LinkedIn channel: the per-group HeyReach mapping renders, with the
-    # no-seat-connected warning (0 senders in the stub).
-    assert page.get_by_text("LinkedIn channel", exact=False).count() > 0
-    assert page.get_by_text("No LinkedIn account is connected", exact=False).count() > 0
+    assert page.get_by_text("Emails live in Reply.io", exact=False).count() > 0
+    # Routing-rules layout: custom rules on top (first match wins), the 7 fixed
+    # group cards with email + LinkedIn pickers, and the dormant-LinkedIn note.
+    assert page.get_by_text("first match wins", exact=False).count() > 0
+    assert page.get_by_text("Add rule", exact=False).count() > 0
+    assert page.get_by_text("Custom rules", exact=False).count() > 0
+    assert page.get_by_text("the fallback route", exact=False).count() > 0
+    assert page.get_by_text("dormant until an account is connected", exact=False).count() > 0
     # Preview run: dry, inline — the seeded eligible account is blocked on setup.
     page.click("text=Preview run")
     page.wait_for_selector("text=blocked on sequence setup", timeout=10_000)

@@ -45,6 +45,7 @@ from auto_search.abm import (
 from auto_search.api.auth import install_basic_auth
 from auto_search.campaigns import catalog as campaigns_catalog
 from auto_search.campaigns import enroll as campaigns_enroll
+from auto_search.campaigns import rules as campaigns_rules
 from auto_search.campaigns import runner as campaigns_runner
 from auto_search.campaigns import stoprules as campaigns_stoprules
 from auto_search.clients import cms_aco
@@ -1556,6 +1557,11 @@ def create_app() -> FastAPI:
     # docs/CAMPAIGN_AUTOMATION_ARCHITECTURE.md. Settings ride on the engagement
     # settings store (same runtime-settings pattern as live-routing).
 
+    def _custom_rules() -> list[dict]:
+        erepo = getattr(app.state, "engagement_repo", None)
+        return campaigns_rules.parse(
+            erepo.get_setting(campaigns_rules.SETTING_KEY) if erepo else None)
+
     def _campaign_settings() -> dict:
         erepo = getattr(app.state, "engagement_repo", None)
         get = erepo.get_setting if erepo else (lambda _k: None)
@@ -1602,7 +1608,7 @@ def create_app() -> FastAPI:
             reply = ReplyioClient()
         await campaigns_stoprules.sweep(
             campaign_repo=crepo, engagement_repo=erepo,
-            heyreach_client=_heyreach_or_none(), replyio_client=reply)
+            heyreach_client=_heyreach_or_none(), custom_rules=_custom_rules(), replyio_client=reply)
 
     def _persist_last_run(res: dict, *, trigger: str) -> None:
         """Store a trimmed last-run record for the board (settings key)."""
@@ -1640,7 +1646,7 @@ def create_app() -> FastAPI:
             res = await campaigns_runner.run(
                 campaign_repo=crepo, engagement_repo=erepo,
                 scoring_repo=app.state.scoring_repo, replyio_client=client,
-                heyreach_client=_heyreach_or_none(),
+                heyreach_client=_heyreach_or_none(), custom_rules=_custom_rules(),
                 dry_run=not s["live"], account_cap=s["run_cap"], trigger="auto",
                 notify_fn=_enroll_notify if s["live"] else None)
             _persist_last_run(res, trigger="auto_after_sync")
@@ -1671,15 +1677,21 @@ def create_app() -> FastAPI:
         contacts_by_acct = campaigns_runner.contacts_by_account(erepo)
         eligibles = campaigns_enroll.eligible_accounts(
             scored, heat, exclude_ids=crepo.accounts_enrolled())
+        custom = _custom_rules()
+        li_map = {r["sequence_key"]: r for r in crepo.channel_sequences()
+                  if r.get("channel") == "linkedin" and r.get("campaign_id")}
         eligible_rows = []
         for e in eligibles:
-            seq = mapped.get(e.sequence_key)
+            route = campaigns_rules.resolve_route(e, custom, mapped, li_map)
+            seq = route["email"]
             already = (crepo.enrolled_for(e.account_id, seq["campaign_id"])
                        if seq else set())
             planned, skipped = campaigns_enroll.plan_contacts(
                 contacts_by_acct.get(e.account_id) or [], already=already)
             eligible_rows.append({**e.as_dict(), "mapped": bool(seq),
                                   "campaign_name": (seq or {}).get("campaign_name"),
+                                  "route": route["route_label"],
+                                  "rule_id": (route["rule"] or {}).get("id"),
                                   "contacts_ready": len(planned),
                                   "contacts_skipped": {k: v for k, v in skipped.items() if v}})
 
@@ -1699,6 +1711,7 @@ def create_app() -> FastAPI:
             "stops": crepo.stops()[:50],
             "last_run": last_run,
             "running": bool(getattr(app.state, "campaigns_running", False)),
+            "custom_rules": custom,
             "replyio_configured": bool(os.getenv("REPLYIO_API_KEY")),
             "heyreach_configured": bool(os.getenv("HEYREACH_API_KEY")),
         }
@@ -1748,6 +1761,21 @@ def create_app() -> FastAPI:
                for c in campaigns]
         out.sort(key=lambda r: (r.get("id") or 0), reverse=True)
         return {"campaigns": out, "senders": senders}
+
+    @app.post("/api/campaigns/rules")
+    async def campaigns_rules_set(request: Request):
+        """Save the CUSTOM routing rules (full-list replace). Rules refine WHERE
+        a qualifying account is sent (first match wins, group rule is the
+        fallback) — they never widen WHO qualifies."""
+        erepo = getattr(app.state, "engagement_repo", None)
+        if not erepo:
+            raise HTTPException(status_code=503, detail="settings store not available")
+        body = await _json_body(request)
+        rows = [r for r in (campaigns_rules.normalize(x)
+                            for x in (body.get("rules") or []) if isinstance(x, dict))
+                if r]
+        erepo.set_setting(campaigns_rules.SETTING_KEY, json.dumps(rows))
+        return {"ok": True, "custom_rules": rows}
 
     @app.post("/api/campaigns/channel-mapping")
     async def campaigns_channel_mapping_set(request: Request):
@@ -1871,7 +1899,7 @@ def create_app() -> FastAPI:
             res = await campaigns_runner.run(
                 campaign_repo=crepo, engagement_repo=erepo,
                 scoring_repo=app.state.scoring_repo, replyio_client=None,
-                heyreach_client=_heyreach_or_none(),
+                heyreach_client=_heyreach_or_none(), custom_rules=_custom_rules(),
                 dry_run=True, account_cap=s["run_cap"], trigger="manual")
             return {"started": True, "dry_run": True, "result": res}
         if not s["live"]:
@@ -1887,7 +1915,7 @@ def create_app() -> FastAPI:
                 res = await campaigns_runner.run(
                     campaign_repo=crepo, engagement_repo=erepo,
                     scoring_repo=app.state.scoring_repo, replyio_client=client,
-                    heyreach_client=_heyreach_or_none(),
+                    heyreach_client=_heyreach_or_none(), custom_rules=_custom_rules(),
                     dry_run=False, account_cap=s["run_cap"], trigger="manual",
                     notify_fn=_enroll_notify)
                 _persist_last_run(res, trigger="manual")
@@ -1922,7 +1950,7 @@ def create_app() -> FastAPI:
         res = await campaigns_runner.run(
             campaign_repo=crepo, engagement_repo=erepo,
             scoring_repo=app.state.scoring_repo, replyio_client=client,
-            heyreach_client=_heyreach_or_none(),
+            heyreach_client=_heyreach_or_none(), custom_rules=_custom_rules(),
             dry_run=dry, account_cap=None, only_account_id=account_id,
             trigger="manual", notify_fn=_enroll_notify if not dry else None)
         accounts = res.get("accounts") or []

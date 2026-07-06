@@ -102,6 +102,10 @@ window.API = {
   campaignsBoard: () => http('/api/campaigns/board'),
   campaignsReplyio: () => http('/api/campaigns/replyio-campaigns'),
   campaignsHeyreach: () => http('/api/campaigns/heyreach-campaigns'),
+  // Custom routing rules (full-list replace): {rules:[...]}.
+  campaignsRules: (body) => http('/api/campaigns/rules', {
+    method: 'POST', body: JSON.stringify(body),
+  }),
   // Per-channel mapping (linkedin/sms): {sequence_key, channel, campaign_id, campaign_name}.
   campaignsChannelMapping: (body) => http('/api/campaigns/channel-mapping', {
     method: 'POST', body: JSON.stringify(body),

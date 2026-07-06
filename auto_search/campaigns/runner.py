@@ -26,6 +26,7 @@ from collections import Counter
 from datetime import UTC, datetime
 
 from auto_search.campaigns import catalog, enroll
+from auto_search.campaigns import rules as rules_mod
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,7 @@ async def run(*, campaign_repo, engagement_repo, scoring_repo,
               account_cap: int | None = DEFAULT_ACCOUNT_CAP,
               contact_cap: int | None = None,
               only_account_id: str | None = None,
+              custom_rules: list[dict] | None = None,
               trigger: str = "auto",
               fit_bands: tuple[str, ...] = enroll.DEFAULT_FIT_BANDS,
               heat_tiers: tuple[str, ...] = enroll.DEFAULT_HEAT_TIERS,
@@ -154,11 +156,16 @@ async def run(*, campaign_repo, engagement_repo, scoring_repo,
 
     capped = account_cap is not None and len(eligibles) > account_cap
     todo = eligibles[:account_cap] if account_cap is not None else eligibles
+    routes = {e.account_id: rules_mod.resolve_route(e, custom_rules or [],
+                                                    seq_map, li_map)
+              for e in todo}
 
     for e in todo:
         stats["accounts_considered"] += 1
-        seq = seq_map.get(e.sequence_key)
+        route = routes[e.account_id]
+        seq = route["email"]
         summary = {**e.as_dict(), "channel": "email",
+                   "route": route["route_label"],
                    "campaign_id": None, "campaign_name": None,
                    "planned": 0, "enrolled": 0, "skipped_409": 0, "failed": 0,
                    "skipped": {}, "status": "unmapped"}
@@ -194,7 +201,9 @@ async def run(*, campaign_repo, engagement_repo, scoring_repo,
                    "contact_ext": p["contact_ext"], "email": p["email"],
                    "channel": CHANNEL, "sequence_key": e.sequence_key,
                    "campaign_id": campaign_id, "trigger": trigger,
-                   "enrolled_at": now}
+                   "enrolled_at": now,
+                   "detail": ({"rule": route["rule"]["name"]}
+                              if route.get("rule") else {})}
             try:
                 res = await replyio_client.add_to_campaign(
                     campaign_id=int(campaign_id), email=p["email"],
@@ -234,7 +243,7 @@ async def run(*, campaign_repo, engagement_repo, scoring_repo,
     #    executor. Leads = the account's warm-intro decision-makers WITH a
     #    LinkedIn URL, round-robined across connected seats. ──────────────────
     for e in todo:
-        li_seq = li_map.get(e.sequence_key)
+        li_seq = routes[e.account_id]["linkedin"]
         if not li_seq or heyreach_client is None:
             continue                               # channel not mapped / not configured
         li_campaign = li_seq["campaign_id"]
@@ -242,6 +251,7 @@ async def run(*, campaign_repo, engagement_repo, scoring_repo,
         leads, no_url = linkedin_leads_for(
             scored_by_id.get(e.account_id) or {}, already=already_li, cap=contact_cap)
         li_summary = {**e.as_dict(), "channel": "linkedin",
+                      "route": routes[e.account_id]["route_label"],
                       "campaign_id": li_campaign,
                       "campaign_name": li_seq.get("campaign_name"),
                       "planned": len(leads), "enrolled": 0, "skipped_409": 0,

@@ -46,6 +46,7 @@ from auto_search.api.auth import install_basic_auth
 from auto_search.campaigns import catalog as campaigns_catalog
 from auto_search.campaigns import enroll as campaigns_enroll
 from auto_search.campaigns import runner as campaigns_runner
+from auto_search.campaigns import stoprules as campaigns_stoprules
 from auto_search.clients import cms_aco
 from auto_search.db import get_repository
 from auto_search.db.campaign_repository import get_campaign_repository
@@ -516,7 +517,10 @@ def create_app() -> FastAPI:
     # spend-bearing API. Localhost (no production markers) stays frictionless.
     # /api/health is exempt for the platform healthcheck. Added after CORS so it
     # runs outermost.
-    auth_enabled = install_basic_auth(app, exempt_paths=("/api/health",))
+    # Webhook receivers can't do Basic auth — they carry their own shared-secret
+    # query param instead (403 inside the handler on mismatch).
+    auth_enabled = install_basic_auth(
+        app, exempt_paths=("/api/health", "/api/campaigns/webhooks/heyreach"))
     if not auth_enabled and is_production():
         raise RuntimeError(
             "Refusing to start in production without auth: set BASIC_AUTH_USER "
@@ -1485,6 +1489,11 @@ def create_app() -> FastAPI:
                     await _auto_enroll_after_sync()
                 except Exception:  # noqa: BLE001
                     logger.exception("auto-enroll after sync failed")
+                # Then the cross-channel stop rules (reply anywhere -> pause others).
+                try:
+                    await _stop_sweep_after_sync()
+                except Exception:  # noqa: BLE001
+                    logger.exception("stop-rule sweep after sync failed")
             finally:
                 app.state.engagement_running = False
 
@@ -1572,6 +1581,29 @@ def create_app() -> FastAPI:
     def _enroll_notify(summary: dict):
         return asyncio.to_thread(_enroll_notify_sync, summary)   # awaited by the runner
 
+    def _heyreach_or_none():
+        """A HeyReachClient when the key is configured, else None — every caller
+        degrades gracefully (the LinkedIn leg just reports itself unconfigured)."""
+        if not os.getenv("HEYREACH_API_KEY"):
+            return None
+        from auto_search.engagement.heyreach_client import HeyReachClient
+        return HeyReachClient()
+
+    async def _stop_sweep_after_sync() -> None:
+        """Cross-channel stop rules after fresh replies land: reply anywhere ->
+        pause the account's other channels. Best-effort; never fails a sync."""
+        crepo = getattr(app.state, "campaign_repo", None)
+        erepo = getattr(app.state, "engagement_repo", None)
+        if not (crepo and erepo):
+            return
+        reply = None
+        if os.getenv("REPLYIO_API_KEY"):
+            from auto_search.engagement.replyio_client import ReplyioClient
+            reply = ReplyioClient()
+        await campaigns_stoprules.sweep(
+            campaign_repo=crepo, engagement_repo=erepo,
+            heyreach_client=_heyreach_or_none(), replyio_client=reply)
+
     def _persist_last_run(res: dict, *, trigger: str) -> None:
         """Store a trimmed last-run record for the board (settings key)."""
         erepo = getattr(app.state, "engagement_repo", None)
@@ -1608,6 +1640,7 @@ def create_app() -> FastAPI:
             res = await campaigns_runner.run(
                 campaign_repo=crepo, engagement_repo=erepo,
                 scoring_repo=app.state.scoring_repo, replyio_client=client,
+                heyreach_client=_heyreach_or_none(),
                 dry_run=not s["live"], account_cap=s["run_cap"], trigger="auto",
                 notify_fn=_enroll_notify if s["live"] else None)
             _persist_last_run(res, trigger="auto_after_sync")
@@ -1660,11 +1693,14 @@ def create_app() -> FastAPI:
                 last_run = None
         return {
             "settings": settings, "sequences": sequences,
+            "channel_sequences": crepo.channel_sequences(),
             "eligible": eligible_rows, "enrollments": enrollments,
             "enrolled_accounts": len(crepo.accounts_enrolled()),
+            "stops": crepo.stops()[:50],
             "last_run": last_run,
             "running": bool(getattr(app.state, "campaigns_running", False)),
             "replyio_configured": bool(os.getenv("REPLYIO_API_KEY")),
+            "heyreach_configured": bool(os.getenv("HEYREACH_API_KEY")),
         }
 
     @app.get("/api/campaigns/replyio-campaigns")
@@ -1690,6 +1726,97 @@ def create_app() -> FastAPI:
                for r in rows]
         out.sort(key=lambda r: (r.get("id") or 0), reverse=True)   # newest first
         return {"campaigns": out}
+
+    @app.get("/api/campaigns/heyreach-campaigns")
+    async def campaigns_heyreach_list():
+        """Live HeyReach campaign + sender list (read-only) for the LinkedIn
+        channel mapping picker. Senders empty until a LinkedIn seat is connected."""
+        client = _heyreach_or_none()
+        if client is None:
+            raise HTTPException(status_code=503, detail="HEYREACH_API_KEY not set")
+        try:
+            campaigns = await client.list_campaigns()
+            senders = await client.list_senders()
+        except Exception as e:  # noqa: BLE001 — clean 502, not a stack
+            raise HTTPException(status_code=502,
+                                detail=f"HeyReach fetch failed: {e}") from e
+        crepo = getattr(app.state, "campaign_repo", None)
+        mapped = {str(r.get("campaign_id")) for r in (crepo.channel_sequences() if crepo else [])
+                  if r.get("channel") == "linkedin" and r.get("campaign_id")}
+        out = [{**c, "mapped": str(c.get("id")) in mapped,
+                "suggested_key": campaigns_catalog.suggest_sequence_key(c.get("name"))}
+               for c in campaigns]
+        out.sort(key=lambda r: (r.get("id") or 0), reverse=True)
+        return {"campaigns": out, "senders": senders}
+
+    @app.post("/api/campaigns/channel-mapping")
+    async def campaigns_channel_mapping_set(request: Request):
+        """Assign (or clear) a channel's campaign for one sequence key —
+        {sequence_key, channel: linkedin|sms, campaign_id, campaign_name}."""
+        crepo = getattr(app.state, "campaign_repo", None)
+        if not crepo:
+            raise HTTPException(status_code=503, detail="campaign store not available")
+        body = await _json_body(request)
+        key = str(body.get("sequence_key") or "")
+        channel = str(body.get("channel") or "")
+        if key not in campaigns_catalog.SEQUENCE_KEYS:
+            raise HTTPException(status_code=400, detail=f"unknown sequence_key: {key}")
+        if channel not in ("linkedin", "sms"):
+            raise HTTPException(status_code=400, detail=f"unknown channel: {channel}")
+        campaign_id = str(body.get("campaign_id") or "").strip() or None
+        crepo.upsert_channel_sequence(key, channel, campaign_id=campaign_id,
+                                      campaign_name=(body.get("campaign_name") or None))
+        return {"ok": True, "channel_sequences": crepo.channel_sequences()}
+
+    @app.post("/api/campaigns/webhooks/heyreach")
+    async def campaigns_heyreach_webhook(request: Request, secret: str = ""):
+        """HeyReach event receiver (auth-exempt; guarded by a shared secret).
+        CONNECTION_REQUEST_ACCEPTED -> +2 heat · reply events -> +6 heat AND the
+        cross-channel stop sweep. Only tracked (matched) companies are stored,
+        same policy as every other engagement source."""
+        want = os.getenv("HEYREACH_WEBHOOK_SECRET")
+        if not want:
+            raise HTTPException(status_code=503, detail="webhook secret not configured")
+        if secret != want:
+            raise HTTPException(status_code=403, detail="bad webhook secret")
+        erepo = getattr(app.state, "engagement_repo", None)
+        if not erepo:
+            raise HTTPException(status_code=503, detail="engagement store not available")
+        body = await _json_body(request)
+        event_type = str(body.get("eventType") or body.get("event_type") or "").upper()
+        kind = {"CONNECTION_REQUEST_ACCEPTED": "linkedin_connect",
+                "MESSAGE_REPLY_RECEIVED": "linkedin_reply",
+                "EVERY_MESSAGE_REPLY_RECEIVED": "linkedin_reply",
+                "INMAIL_REPLY_RECEIVED": "linkedin_reply"}.get(event_type)
+        if not kind:
+            return {"ok": True, "ignored": event_type or "unknown"}
+        lead = body.get("lead") or {}
+        profile = str(lead.get("profileUrl") or lead.get("profile_url") or "")
+        company = lead.get("companyName") or lead.get("company")
+        index = engagement_sync_mod.build_index(app.state.scoring_repo, app.state.repo)
+        m = index.match(company=company, email=lead.get("emailAddress"))
+        if not m:
+            return {"ok": True, "matched": False}       # untracked company — dropped
+        now_iso = datetime.now(UTC).isoformat()
+        erepo.upsert_contact({
+            "source": "heyreach", "external_id": f"li:{profile or company}",
+            "email": lead.get("emailAddress"), "company": company,
+            "company_key": normalize_company_name(company or ""),
+            "title": lead.get("position"), "account_id": m.account_id,
+            "match_tier": m.tier, "matched_lists": list(m.lists)})
+        erepo.add_event({
+            "source": "heyreach",
+            "external_id": f"linkedin:{kind}:{profile or company}",
+            "channel": "linkedin", "kind": kind,
+            "points": engagement_scoring.points_for(kind),
+            "contact_ext": f"li:{profile or company}", "company": company,
+            "account_id": m.account_id,
+            "campaign": str(body.get("campaignId") or ""),
+            "occurred_at": now_iso,
+            "raw": {"eventType": event_type, "profileUrl": profile}})
+        if kind == "linkedin_reply":                     # reply -> pause other channels
+            _schedule_coro(app, _stop_sweep_after_sync())
+        return {"ok": True, "matched": True, "kind": kind}
 
     @app.post("/api/campaigns/mapping")
     async def campaigns_mapping_set(request: Request):
@@ -1744,6 +1871,7 @@ def create_app() -> FastAPI:
             res = await campaigns_runner.run(
                 campaign_repo=crepo, engagement_repo=erepo,
                 scoring_repo=app.state.scoring_repo, replyio_client=None,
+                heyreach_client=_heyreach_or_none(),
                 dry_run=True, account_cap=s["run_cap"], trigger="manual")
             return {"started": True, "dry_run": True, "result": res}
         if not s["live"]:
@@ -1759,6 +1887,7 @@ def create_app() -> FastAPI:
                 res = await campaigns_runner.run(
                     campaign_repo=crepo, engagement_repo=erepo,
                     scoring_repo=app.state.scoring_repo, replyio_client=client,
+                    heyreach_client=_heyreach_or_none(),
                     dry_run=False, account_cap=s["run_cap"], trigger="manual",
                     notify_fn=_enroll_notify)
                 _persist_last_run(res, trigger="manual")
@@ -1793,6 +1922,7 @@ def create_app() -> FastAPI:
         res = await campaigns_runner.run(
             campaign_repo=crepo, engagement_repo=erepo,
             scoring_repo=app.state.scoring_repo, replyio_client=client,
+            heyreach_client=_heyreach_or_none(),
             dry_run=dry, account_cap=None, only_account_id=account_id,
             trigger="manual", notify_fn=_enroll_notify if not dry else None)
         accounts = res.get("accounts") or []

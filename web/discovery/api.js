@@ -101,6 +101,11 @@ window.API = {
   // ── campaigns (Phase 3: enroll accounts into Reply.io sequences) ────────────
   campaignsBoard: () => http('/api/campaigns/board'),
   campaignsReplyio: () => http('/api/campaigns/replyio-campaigns'),
+  campaignsHeyreach: () => http('/api/campaigns/heyreach-campaigns'),
+  // Per-channel mapping (linkedin/sms): {sequence_key, channel, campaign_id, campaign_name}.
+  campaignsChannelMapping: (body) => http('/api/campaigns/channel-mapping', {
+    method: 'POST', body: JSON.stringify(body),
+  }),
   // {dry_run:false} for a live pass (requires Live mode); default is a preview.
   campaignsRun: (body = {}) => http('/api/campaigns/run', {
     method: 'POST', body: JSON.stringify(body),

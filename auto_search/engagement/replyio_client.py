@@ -150,6 +150,31 @@ class ReplyioClient:
 
     # ── write (LinkedIn TOFU flow only) ─────────────────────────────────
 
+    async def remove_from_campaign(self, *, campaign_id: int, email: str) -> bool:
+        """Pull a contact out of a campaign — the cross-channel stop rule's email
+        lever (a LinkedIn reply pauses the email drip). WRITE (v1, x-api-key),
+        same actions family as add_to_campaign. Best-effort by contract: True on
+        2xx, False (logged) on anything else — a stop sweep must never raise.
+        NOTE: endpoint from Reply.io's v1 actions family; verify on first live
+        stop (a 404 here means the path needs the by-id variant instead)."""
+        url = (f"{V1_BASE}/actions/removepersonfromcampaignbyemail"
+               f"?email={(email or '').strip()}&campaignId={int(campaign_id)}")
+        headers = {"x-api-key": self._key}
+        try:
+            if self._http is not None:
+                resp = await self._http.request("POST", url, headers=headers)
+            else:
+                async with httpx.AsyncClient(timeout=self._timeout) as client:
+                    resp = await client.request("POST", url, headers=headers)
+            if 200 <= resp.status_code < 300:
+                return True
+            logger.warning("reply.io remove_from_campaign %s -> %s: %s",
+                           email, resp.status_code, resp.text[:120])
+            return False
+        except httpx.HTTPError as e:
+            logger.warning("reply.io remove_from_campaign failed for %s: %s", email, e)
+            return False
+
     async def add_to_campaign(self, *, campaign_id: int, email: str,
                               first_name: str | None = None, last_name: str | None = None,
                               company: str | None = None, title: str | None = None,

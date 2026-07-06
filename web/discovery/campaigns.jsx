@@ -162,8 +162,12 @@ function LedgerView({ enrollments, sequences }){
   );
 }
 
-// ── SEQUENCES (map each group to its Reply.io campaign) ───────────────────────
-function SequencesView({ sequences, replyio, replyioErr, onSave, saving, onRefresh, refreshing }){
+// ── SEQUENCES (map each group to its Reply.io + HeyReach campaigns) ───────────
+function SequencesView({ sequences, replyio, replyioErr, onSave, saving, onRefresh, refreshing, heyreach, channelMap, onSaveChannel }){
+  const liByKey=useMemo(()=>{ const m={}; (channelMap||[]).forEach(r=>{ if(r.channel==='linkedin') m[r.sequence_key]=r; }); return m; },[channelMap]);
+  const liOpts=((heyreach&&heyreach.campaigns)||[]).slice().sort((a,b)=>String(a.name||'').localeCompare(String(b.name||'')));
+  const liSenders=(heyreach&&heyreach.senders)||[];
+  const [liDraft,setLiDraft]=useState({});
   const opts=(replyio||[]).slice().sort((a,b)=>String(a.name||'').localeCompare(String(b.name||'')));
   const [draft,setDraft]=useState({});   // sequence_key -> campaign id chosen in the picker
   const seqByKey=useMemo(()=>{ const m={}; sequences.forEach(s=>{m[s.sequence_key]=s;}); return m; },[sequences]);
@@ -188,6 +192,15 @@ function SequencesView({ sequences, replyio, replyioErr, onSave, saving, onRefre
       {replyioErr&&(
         <div style={{padding:'10px 28px',borderBottom:'1px solid #fef3c7',background:'rgba(255,251,235,.6)',fontSize:12.5,color:'#92400e'}}>
           Could not load the Reply.io campaign list: {replyioErr}. You can still paste a campaign id below.
+        </div>
+      )}
+      {heyreach&&liSenders.length===0&&(
+        <div style={{display:'flex',alignItems:'flex-start',gap:8,padding:'10px 28px',borderBottom:'1px solid #fef3c7',background:'rgba(255,251,235,.6)'}}>
+          <Icon name="info" size={13} style={{color:'#b45309',marginTop:1,flexShrink:0}}/>
+          <span style={{fontSize:12.5,color:'#92400e',lineHeight:1.4}}>
+            No LinkedIn account is connected in HeyReach yet, so LinkedIn campaigns cannot be created or send.
+            Once a LinkedIn seat is connected (own or rented — the open decision), campaigns can be built and picked here.
+          </span>
         </div>
       )}
       {/* Auto-detected: newest campaigns in Reply.io not connected to any group yet */}
@@ -252,6 +265,40 @@ function SequencesView({ sequences, replyio, replyioErr, onSave, saving, onRefre
           </div>
         );
       })}
+      {/* LinkedIn channel mapping (HeyReach) — parallel to the email rows above */}
+      {heyreach&&(
+        <div style={{borderTop:'1px solid #f4f4f5'}}>
+          <div style={{padding:'10px 28px 4px',...TX.label,color:'#0a66c2'}}>LinkedIn channel · HeyReach campaign per group</div>
+          {sequences.map(s=>{
+            const cur=liByKey[s.sequence_key]||{};
+            const chosen=liDraft[s.sequence_key]!==undefined?liDraft[s.sequence_key]:(cur.campaign_id||'');
+            const dirty=String(chosen||'')!==String(cur.campaign_id||'');
+            return (
+              <div key={'li-'+s.sequence_key} style={{display:'flex',alignItems:'center',gap:18,padding:'9px 28px',borderBottom:'1px solid #fafafa'}}>
+                <div style={{flex:1,minWidth:0,display:'flex',alignItems:'center',gap:8}}>
+                  <span style={TX.body}>{s.label}</span>
+                  {cur.campaign_id
+                    ? <Chip fg='#047857' bg='#ecfdf5' ring='#a7f3d0'><Icon name="check" size={10}/>connected</Chip>
+                    : <span style={{...TX.meta,fontStyle:'italic'}}>not connected</span>}
+                </div>
+                <select value={chosen} onChange={ev=>setLiDraft(d=>({...d,[s.sequence_key]:ev.target.value}))}
+                  style={{appearance:'none',minWidth:260,maxWidth:320,borderRadius:8,border:'1px solid #e4e4e7',background:'#fff',padding:'6px 26px 6px 10px',fontFamily:'var(--font-sans)',fontSize:12.5,color:'#3f3f46'}}>
+                  <option value="">{liOpts.length?'Not set — pick a HeyReach campaign':'No HeyReach campaigns yet'}</option>
+                  {liOpts.map(c=><option key={c.id} value={String(c.id)}>{c.name}</option>)}
+                </select>
+                <button onClick={()=>{
+                    const c=liOpts.find(x=>String(x.id)===String(chosen));
+                    onSaveChannel(s.sequence_key,'linkedin',chosen||null,c?c.name:null);
+                  }}
+                  disabled={!dirty||saving}
+                  style={{background:dirty?'#0a66c2':'#fafafa',border:'none',fontFamily:'var(--font-sans)',fontSize:12,fontWeight:600,color:dirty?'#fff':'#d4d4d8',cursor:dirty?'pointer':'default',padding:'7px 14px',borderRadius:7,minWidth:64}}>
+                  Save
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </>
   );
 }
@@ -270,11 +317,16 @@ function CampaignsView({ pushToast }){
   function load(){ return window.API.campaignsBoard().then(b=>{ setBoard(b); setLoading(false); }); }
   useEffect(()=>{ load().catch(e=>{ setLoading(false); pushToast&&pushToast(`Couldn't load campaigns: ${e.message}`,'danger'); }); },[]);
 
-  // lazy-load the Reply.io campaign list the first time Sequences opens
+  // lazy-load the Reply.io + HeyReach campaign lists the first time Sequences opens
+  const [heyreach,setHeyreach]=useState(null);
   useEffect(()=>{
-    if(tab!=='sequences'||replyio!==null) return;
-    window.API.campaignsReplyio().then(r=>setReplyio(r.campaigns||[]))
-      .catch(e=>{ setReplyio([]); setReplyioErr(e.message); });
+    if(tab!=='sequences') return;
+    if(replyio===null)
+      window.API.campaignsReplyio().then(r=>setReplyio(r.campaigns||[]))
+        .catch(e=>{ setReplyio([]); setReplyioErr(e.message); });
+    if(heyreach===null)
+      window.API.campaignsHeyreach().then(r=>setHeyreach(r))
+        .catch(()=>setHeyreach({campaigns:[],senders:[]}));
   },[tab]);  // eslint-disable-line
 
   // on-demand re-check, so a sequence Galyna created a minute ago shows up
@@ -379,6 +431,14 @@ function CampaignsView({ pushToast }){
     window.API.campaignsMapping({sequence_key:key,campaign_id,campaign_name}).then(()=>{
       setSaving(false);
       pushToast&&pushToast(campaign_id?'Sequence connected — accounts in this group can now enroll':'Sequence cleared','success');
+      load();
+    }).catch(e=>{ setSaving(false); pushToast&&pushToast(`Couldn't save: ${e.message}`,'danger'); });
+  }
+  function saveChannelMapping(key, channel, campaign_id, campaign_name){
+    setSaving(true);
+    window.API.campaignsChannelMapping({sequence_key:key,channel,campaign_id,campaign_name}).then(()=>{
+      setSaving(false);
+      pushToast&&pushToast(campaign_id?`${channel==='linkedin'?'LinkedIn':'SMS'} channel connected for this group`:'Channel mapping cleared','success');
       load();
     }).catch(e=>{ setSaving(false); pushToast&&pushToast(`Couldn't save: ${e.message}`,'danger'); });
   }
@@ -496,7 +556,7 @@ function CampaignsView({ pushToast }){
           </div>
           {tab==='ready'&&<ReadyView eligible={eligible} live={settings.live} onEnroll={enrollOne}/>}
           {tab==='enrolled'&&<LedgerView enrollments={enrollments} sequences={sequences}/>}
-          {tab==='sequences'&&<SequencesView sequences={sequences} replyio={replyio} replyioErr={replyioErr} onSave={saveMapping} saving={saving} onRefresh={refreshReplyio} refreshing={refreshing}/>}
+          {tab==='sequences'&&<SequencesView sequences={sequences} replyio={replyio} replyioErr={replyioErr} onSave={saveMapping} saving={saving} onRefresh={refreshReplyio} refreshing={refreshing} heyreach={heyreach} channelMap={board&&board.channel_sequences} onSaveChannel={saveChannelMapping}/>}
         </div>
         </>}
       </main>

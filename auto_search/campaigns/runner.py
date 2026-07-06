@@ -58,8 +58,38 @@ def _sequence_map(campaign_repo) -> dict[str, dict]:
             if r.get("campaign_id")}
 
 
+def linkedin_leads_for(account: dict, *, already: set[str],
+                       cap: int | None = None) -> tuple[list[dict], int]:
+    """HeyReach lead payloads for one scored account: its warm-intro decision-
+    makers that carry a LinkedIn profile URL (HeyReach's identity key). Email
+    contacts without a LinkedIn URL can't ride this channel — expected, not an
+    error. Returns (leads, skipped_no_url). Dedup by URL + the stop/enroll ledger."""
+    wi = account.get("warm_intros") or {}
+    contacts = wi.get("contacts") if isinstance(wi, dict) else None
+    leads: list[dict] = []
+    skipped_no_url = 0
+    seen: set[str] = set()
+    for c in contacts or []:
+        url = (c.get("linkedin_url") or "").strip()
+        if not url:
+            skipped_no_url += 1
+            continue
+        ext = f"li:{url}"
+        if url in seen or ext in already:
+            continue
+        if cap is not None and len(leads) >= cap:
+            break
+        seen.add(url)
+        name = (c.get("name") or "").strip()
+        first, _, last = name.partition(" ")
+        leads.append({"profileUrl": url, "firstName": first or name,
+                      "lastName": last, "companyName": account.get("name"),
+                      "position": c.get("title")})
+    return leads, skipped_no_url
+
+
 async def run(*, campaign_repo, engagement_repo, scoring_repo,
-              replyio_client=None, dry_run: bool = True,
+              replyio_client=None, heyreach_client=None, dry_run: bool = True,
               account_cap: int | None = DEFAULT_ACCOUNT_CAP,
               contact_cap: int | None = None,
               only_account_id: str | None = None,
@@ -79,9 +109,23 @@ async def run(*, campaign_repo, engagement_repo, scoring_repo,
     results: list[dict] = []
 
     scored = scoring_repo.list_accounts()
+    scored_by_id = {a.get("account_id"): a for a in scored}
     heat = heat_by_id(engagement_repo)
     seq_map = _sequence_map(campaign_repo)
     contacts_by_acct = contacts_by_account(engagement_repo)
+
+    # LinkedIn channel (HeyReach): per-key mapping + the connected sender seats.
+    # No client / no mapping / no senders each degrade to a reported skip, never
+    # an error — the leg lights up the moment MAR2-6 lands a seat.
+    li_map = {r["sequence_key"]: r for r in campaign_repo.channel_sequences()
+              if r.get("channel") == "linkedin" and r.get("campaign_id")}
+    li_senders: list[int] = []
+    if heyreach_client is not None and li_map and not dry_run:
+        try:
+            li_senders = [s["id"] for s in await heyreach_client.list_senders()
+                          if s.get("id") and s.get("active") is not False]
+        except Exception:  # noqa: BLE001 — LinkedIn leg degrades, email continues
+            logger.exception("heyreach list_senders failed — linkedin leg skipped")
 
     if only_account_id:
         rows = [a for a in scored
@@ -114,7 +158,8 @@ async def run(*, campaign_repo, engagement_repo, scoring_repo,
     for e in todo:
         stats["accounts_considered"] += 1
         seq = seq_map.get(e.sequence_key)
-        summary = {**e.as_dict(), "campaign_id": None, "campaign_name": None,
+        summary = {**e.as_dict(), "channel": "email",
+                   "campaign_id": None, "campaign_name": None,
                    "planned": 0, "enrolled": 0, "skipped_409": 0, "failed": 0,
                    "skipped": {}, "status": "unmapped"}
         if not seq:
@@ -184,6 +229,60 @@ async def run(*, campaign_repo, engagement_repo, scoring_repo,
                     await res
             except Exception:  # noqa: BLE001
                 logger.warning("enrollment Slack notify failed for %s", e.account_id)
+
+    # ── LinkedIn leg (parallel channel): same eligible accounts, HeyReach as the
+    #    executor. Leads = the account's warm-intro decision-makers WITH a
+    #    LinkedIn URL, round-robined across connected seats. ──────────────────
+    for e in todo:
+        li_seq = li_map.get(e.sequence_key)
+        if not li_seq or heyreach_client is None:
+            continue                               # channel not mapped / not configured
+        li_campaign = li_seq["campaign_id"]
+        already_li = campaign_repo.enrolled_for(e.account_id, li_campaign)
+        leads, no_url = linkedin_leads_for(
+            scored_by_id.get(e.account_id) or {}, already=already_li, cap=contact_cap)
+        li_summary = {**e.as_dict(), "channel": "linkedin",
+                      "campaign_id": li_campaign,
+                      "campaign_name": li_seq.get("campaign_name"),
+                      "planned": len(leads), "enrolled": 0, "skipped_409": 0,
+                      "failed": 0, "skipped": ({"no_linkedin_url": no_url} if no_url else {}),
+                      "status": "dry_run" if dry_run else "no_leads"}
+        if not leads:
+            li_summary["status"] = "no_leads"
+            stats["linkedin_no_leads"] += 1
+            results.append(li_summary)
+            continue
+        if dry_run:
+            stats["linkedin_would_enroll_accounts"] += 1
+            stats["linkedin_would_enroll_leads"] += len(leads)
+            results.append(li_summary)
+            continue
+        if not li_senders:
+            li_summary["status"] = "no_sender"     # seat not connected yet (MAR2-6)
+            stats["linkedin_no_sender"] += 1
+            results.append(li_summary)
+            continue
+        try:
+            res = await heyreach_client.add_leads_to_campaign(
+                campaign_id=int(li_campaign), leads=leads, sender_ids=li_senders)
+            added = int(res.get("addedLeadsCount") or 0)
+            li_summary["enrolled"] = added
+            li_summary["status"] = "enrolled" if added else "failed"
+            stats["linkedin_leads_enrolled"] += added
+            for lead in leads:
+                campaign_repo.add_enrollment({
+                    "account_id": e.account_id, "account_name": e.name,
+                    "contact_ext": f"li:{lead['profileUrl']}", "email": None,
+                    "channel": "linkedin", "sequence_key": e.sequence_key,
+                    "campaign_id": li_campaign, "trigger": trigger,
+                    "status": "enrolled", "enrolled_at": now,
+                    "detail": {"profile_url": lead["profileUrl"]}})
+        except Exception as exc:  # noqa: BLE001 — LinkedIn leg must not sink the run
+            logger.warning("heyreach enroll failed for %s: %s", e.account_id, exc)
+            li_summary["status"] = "failed"
+            li_summary["failed"] = len(leads)
+            stats["linkedin_failed"] += 1
+        results.append(li_summary)
 
     out = {"dry_run": dry_run, "ran_at": now, "stats": dict(stats),
            "accounts": results, "capped": capped,

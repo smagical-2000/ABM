@@ -463,6 +463,11 @@ def test_campaigns_sequences_tab_and_preview_run(page):
                lambda route: route.fulfill(json={"campaigns": [
                    {"id": 111, "name": "Outbound Health Systems (test)", "status": 0,
                     "mapped": False, "suggested_key": "health_system"}]}))
+    page.route("**/api/campaigns/heyreach-campaigns",
+               lambda route: route.fulfill(json={"campaigns": [
+                   {"id": 900, "name": "ABM - Ortho - LinkedIn Connect", "status": 0,
+                    "senders": 0, "mapped": False, "suggested_key": "ortho"}],
+                   "senders": []}))
     page.click("text=Campaigns")
     page.wait_for_selector("text=Ready to enroll", timeout=10_000)
     page.click("text=Sequences")
@@ -473,6 +478,10 @@ def test_campaigns_sequences_tab_and_preview_run(page):
     assert page.get_by_text("Detected in Reply.io", exact=False).count() > 0
     assert page.get_by_text("looks like Health Systems", exact=False).count() > 0
     assert page.get_by_text("Check Reply.io for new sequences", exact=False).count() > 0
+    # LinkedIn channel: the per-group HeyReach mapping renders, with the
+    # no-seat-connected warning (0 senders in the stub).
+    assert page.get_by_text("LinkedIn channel", exact=False).count() > 0
+    assert page.get_by_text("No LinkedIn account is connected", exact=False).count() > 0
     # Preview run: dry, inline — the seeded eligible account is blocked on setup.
     page.click("text=Preview run")
     page.wait_for_selector("text=blocked on sequence setup", timeout=10_000)

@@ -11,6 +11,21 @@
 > OFF by default; nothing can send until the Reply.io sequences are authored (UI-only) and
 > mapped in the tab, and Live is switched on. P4 (persona/sequence-type routing) and P5
 > (HeyReach LinkedIn) remain. Iteration 1 = **email only** (Reply.io).
+>
+> **Update (2026-07-05, same day):** multichannel orchestration shipped — the LGM-style
+> parallel model. LinkedIn channel via HeyReach (`engagement/heyreach_client.py`, per-channel
+> mapping `campaign_channel_sequences`, runner LinkedIn leg fed by warm-intro decision-makers
+> with LinkedIn URLs, round-robined across connected seats). Cross-channel **stop rules**
+> (`campaigns/stoprules.py` + `campaign_stops` claim ledger): email reply → HeyReach
+> `StopLeadInCampaign`; LinkedIn reply (webhook `/api/campaigns/webhooks/heyreach`, shared-
+> secret, auth-exempt) → Reply.io remove-from-campaign (best-effort; verify the v1 path on
+> first live stop). Heat: `linkedin_reply` +6 / `linkedin_connect` +2. HeyReach blockers:
+> campaign creation requires ≥1 connected LinkedIn seat (MAR2-6 own-vs-rent pending) — the
+> three per-vertical lead lists exist (769506–8) and the campaign-create script (Galyna's
+> copy, connect→accepted→follow-up) is ready to re-run. **SMS (Twilio): channel slot + mapping
+> shipped; the executor is deliberately NOT built yet** — no Twilio account/credentials exist
+> to verify against, and the engaged-only trigger + copy need Galyna's input. It is the named
+> next PR once creds land.
 > **Owner:** Sunny Dsouza · **Primary user:** Galyna · **Linear:** project "ABM Campaign
 > Automation" (team MAR2), tickets MAR2-4/5/6/7/8.
 

@@ -7,7 +7,7 @@ runs on the real JSON impl so both sides of the dual-repo contract stay honest.
 
 import pytest
 
-from auto_search.campaigns import catalog, enroll, runner
+from auto_search.campaigns import catalog, enroll, runner, stoprules
 from auto_search.db.campaign_repository import CampaignJsonRepository
 
 # ── fixtures ──────────────────────────────────────────────────────────
@@ -264,6 +264,158 @@ async def test_manual_enroll_bypasses_trigger_but_not_the_ledger(crepo):
     assert res2["stats"] == {"not_scored": 1}
 
 
+# ── LinkedIn leg (HeyReach) ───────────────────────────────────────────
+
+
+class _FakeHeyReach:
+    def __init__(self, senders=(), fail=False):
+        self._senders = list(senders)
+        self._fail = fail
+        self.added = []          # (campaign_id, [profileUrls])
+        self.stopped = []        # (campaign_id, profileUrl)
+
+    async def list_senders(self):
+        return [{"id": s, "active": True} for s in self._senders]
+
+    async def add_leads_to_campaign(self, *, campaign_id, leads, sender_ids):
+        if self._fail:
+            raise RuntimeError("heyreach down")
+        self.added.append((campaign_id, [lead["profileUrl"] for lead in leads]))
+        return {"addedLeadsCount": len(leads), "updatedLeadsCount": 0,
+                "failedLeadsCount": 0}
+
+    async def stop_lead(self, *, campaign_id, profile_url):
+        self.stopped.append((campaign_id, profile_url))
+        return True
+
+
+def _scored_with_warm(**kw):
+    a = _scored(**kw)
+    a["warm_intros"] = {"state": "ready", "contacts": [
+        {"name": "Jane Roe", "title": "CFO",
+         "linkedin_url": "https://linkedin.com/in/jane-roe"},
+        {"name": "John Doe", "title": "COO",
+         "linkedin_url": "https://linkedin.com/in/john-doe"},
+        {"name": "No Url", "title": "CEO"},                # no LinkedIn — skipped
+    ]}
+    return a
+
+
+def test_linkedin_leads_from_warm_intros():
+    leads, no_url = runner.linkedin_leads_for(
+        _scored_with_warm(), already={"li:https://linkedin.com/in/john-doe"})
+    assert [x["profileUrl"] for x in leads] == ["https://linkedin.com/in/jane-roe"]
+    assert leads[0]["firstName"] == "Jane" and leads[0]["companyName"]
+    assert no_url == 1
+
+
+@pytest.mark.asyncio
+async def test_linkedin_leg_enrolls_when_seat_connected(crepo):
+    crepo.upsert_channel_sequence("ortho", "linkedin",
+                                  campaign_id="900", campaign_name="ABM Ortho LI")
+    scoring = _FakeScoring([_scored_with_warm()])
+    engagement = _FakeEngagement(
+        engaged=[{"account_id": "acc_rothman", "score": 15}],
+        contacts=[_contact("c1", "cfo@rothman.com", "acc_rothman")])
+    hey = _FakeHeyReach(senders=[71])
+    res = await runner.run(campaign_repo=crepo, engagement_repo=engagement,
+                           scoring_repo=scoring, replyio_client=_FakeReply(),
+                           heyreach_client=hey, dry_run=False)
+    li = [a for a in res["accounts"] if a.get("channel") == "linkedin"]
+    assert li and li[0]["status"] == "enrolled" and li[0]["enrolled"] == 2
+    assert hey.added and hey.added[0][0] == 900
+    rows = [r for r in crepo.enrollments() if r["channel"] == "linkedin"]
+    assert len(rows) == 2 and all(r["campaign_id"] == "900" for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_linkedin_leg_reports_no_sender_and_no_mapping(crepo):
+    scoring = _FakeScoring([_scored_with_warm()])
+    engagement = _FakeEngagement(engaged=[{"account_id": "acc_rothman", "score": 15}],
+                                 contacts=[_contact("c1", "cfo@rothman.com", "acc_rothman")])
+    # no linkedin mapping at all -> no linkedin rows in the result
+    res = await runner.run(campaign_repo=crepo, engagement_repo=engagement,
+                           scoring_repo=scoring, replyio_client=_FakeReply(),
+                           heyreach_client=_FakeHeyReach(), dry_run=False)
+    assert not [a for a in res["accounts"] if a.get("channel") == "linkedin"]
+    # mapping present but ZERO connected seats -> reported, nothing sent, no ledger
+    crepo.upsert_channel_sequence("ortho", "linkedin", campaign_id="900")
+    res = await runner.run(campaign_repo=crepo, engagement_repo=engagement,
+                           scoring_repo=scoring, replyio_client=_FakeReply(),
+                           heyreach_client=_FakeHeyReach(senders=[]), dry_run=False,
+                           only_account_id="acc_rothman")
+    li = [a for a in res["accounts"] if a.get("channel") == "linkedin"]
+    assert li and li[0]["status"] == "no_sender"
+    assert not [r for r in crepo.enrollments() if r["channel"] == "linkedin"]
+
+
+# ── stop rules (reply anywhere -> pause everywhere) ───────────────────
+
+
+class _FakeReplyRemove(_FakeReply):
+    def __init__(self):
+        super().__init__()
+        self.removed = []
+
+    async def remove_from_campaign(self, *, campaign_id, email):
+        self.removed.append((campaign_id, email))
+        return True
+
+
+class _FakeEngagementEvents(_FakeEngagement):
+    def __init__(self, events, **kw):
+        super().__init__(**kw)
+        self._events = events
+        self.settings = {}
+
+    def recent_events(self, *, limit=200):
+        return self._events
+
+    def get_setting(self, key):
+        return self.settings.get(key)
+
+    def set_setting(self, key, value):
+        self.settings[key] = value
+
+
+@pytest.mark.asyncio
+async def test_email_reply_stops_linkedin_and_is_idempotent(crepo):
+    crepo.add_enrollment({"account_id": "a1", "contact_ext": "li:https://x/in/p1",
+                          "email": None, "channel": "linkedin", "sequence_key": "ortho",
+                          "campaign_id": "900", "status": "enrolled",
+                          "detail": {"profile_url": "https://x/in/p1"}})
+    eng = _FakeEngagementEvents([{"kind": "reply", "account_id": "a1",
+                                  "occurred_at": "2026-07-05T10:00:00+00:00",
+                                  "external_id": "email:reply:c1"}])
+    hey = _FakeHeyReach(senders=[71])
+    res = await stoprules.sweep(campaign_repo=crepo, engagement_repo=eng,
+                                heyreach_client=hey, replyio_client=_FakeReplyRemove())
+    assert res["stopped_linkedin"] == 1
+    assert hey.stopped == [(900, "https://x/in/p1")]
+    assert eng.settings[stoprules.CURSOR_KEY] == "2026-07-05T10:00:00+00:00"
+    # Re-sweep: cursor + the stop claim both hold — nothing re-fires.
+    res2 = await stoprules.sweep(campaign_repo=crepo, engagement_repo=eng,
+                                 heyreach_client=hey, replyio_client=_FakeReplyRemove())
+    assert res2["checked"] == 0 and len(hey.stopped) == 1
+
+
+@pytest.mark.asyncio
+async def test_linkedin_reply_removes_email_contacts(crepo):
+    crepo.add_enrollment({"account_id": "a1", "contact_ext": "c1",
+                          "email": "cfo@x.com", "channel": "email",
+                          "sequence_key": "ortho", "campaign_id": "111",
+                          "status": "enrolled"})
+    eng = _FakeEngagementEvents([{"kind": "linkedin_reply", "account_id": "a1",
+                                  "occurred_at": "2026-07-05T11:00:00+00:00",
+                                  "external_id": "linkedin:linkedin_reply:p1"}])
+    reply = _FakeReplyRemove()
+    res = await stoprules.sweep(campaign_repo=crepo, engagement_repo=eng,
+                                heyreach_client=_FakeHeyReach(), replyio_client=reply)
+    assert res["stopped_email"] == 1
+    assert reply.removed == [(111, "cfo@x.com")]
+    assert crepo.stops(account_id="a1")[0]["reason"] == "reply:linkedin"
+
+
 # ── ledger repo (JSON impl) ───────────────────────────────────────────
 
 
@@ -285,5 +437,17 @@ def test_repo_roundtrip_and_upsert(tmp_path):
     r.upsert_sequence("payer", campaign_id=None)            # clear
     seq = {s["sequence_key"]: s for s in r.sequences()}
     assert seq["payer"]["campaign_id"] is None
+    # per-channel mapping + the stop ledger
+    r.upsert_channel_sequence("ortho", "linkedin", campaign_id="900",
+                              campaign_name="ABM Ortho LI")
+    with pytest.raises(ValueError):
+        r.upsert_channel_sequence("ortho", "fax", campaign_id="1")
+    assert r.channel_sequences()[0]["channel"] == "linkedin"
+    assert r.add_stop({"account_id": "a1", "channel": "linkedin",
+                       "reason": "reply:email"}) is True
+    assert r.add_stop({"account_id": "a1", "channel": "linkedin",
+                       "reason": "reply:email"}) is False   # idempotent claim
+    assert len(r.stops()) == 1
     assert r.delete_all() == 1
     assert r.enrollments() == [] and r.sequences() == []
+    assert r.channel_sequences() == [] and r.stops() == []

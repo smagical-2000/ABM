@@ -46,6 +46,26 @@ class CampaignRepository(Protocol):
         """Every stored mapping row: {sequence_key, campaign_id, campaign_name}."""
         ...
 
+    def upsert_channel_sequence(self, sequence_key: str, channel: str, *,
+                                campaign_id: str | None,
+                                campaign_name: str | None = None) -> None:
+        """Per-channel mapping (linkedin/sms): assign the executor tool's
+        campaign id for one (sequence key, channel)."""
+        ...
+
+    def channel_sequences(self) -> list[dict]:
+        """Every stored per-channel mapping row."""
+        ...
+
+    def add_stop(self, row: dict) -> bool:
+        """Record one stop-rule action (account, stopped channel, reason).
+        Returns True only when NEWLY recorded — the sweep's idempotency claim."""
+        ...
+
+    def stops(self, *, account_id: str | None = None) -> list[dict]:
+        """Stop-rule actions taken, newest first."""
+        ...
+
     def add_enrollment(self, row: dict) -> bool:
         """Upsert one ledger row by (account_id, contact_ext, campaign_id).
         Returns True if newly inserted, False if it updated an existing row."""
@@ -130,6 +150,39 @@ class CampaignJsonRepository:
     def sequences(self) -> list[dict]:
         return list(self._store["sequences"].values())
 
+    def upsert_channel_sequence(self, sequence_key, channel, *, campaign_id,
+                                campaign_name=None) -> None:
+        if channel not in ("linkedin", "sms"):
+            raise ValueError(f"bad channel: {channel!r}")
+        self._store["channel_sequences"][f"{sequence_key}|{channel}"] = {
+            "sequence_key": sequence_key, "channel": channel,
+            "campaign_id": (str(campaign_id) if campaign_id else None),
+            "campaign_name": campaign_name, "updated_at": _now(),
+        }
+        self._flush()
+
+    def channel_sequences(self) -> list[dict]:
+        return list(self._store["channel_sequences"].values())
+
+    def add_stop(self, row) -> bool:
+        key = f"{row['account_id']}|{row['channel']}|{row['reason']}"
+        if key in self._store["stops"]:
+            return False
+        self._store["stops"][key] = {
+            "account_id": row["account_id"], "channel": row["channel"],
+            "reason": row["reason"], "detail": row.get("detail") or {},
+            "stopped_at": row.get("stopped_at") or _now(),
+        }
+        self._flush()
+        return True
+
+    def stops(self, *, account_id=None) -> list[dict]:
+        rows = list(self._store["stops"].values())
+        if account_id is not None:
+            rows = [r for r in rows if r.get("account_id") == account_id]
+        rows.sort(key=lambda r: r.get("stopped_at") or "", reverse=True)
+        return rows
+
     def add_enrollment(self, row) -> bool:
         r = _enrollment_row(row)
         key = f"{r['account_id']}|{r['contact_ext']}|{r['campaign_id']}"
@@ -189,7 +242,7 @@ class CampaignJsonRepository:
 
 
 def _empty_store() -> dict:
-    return {"sequences": {}, "enrollments": {}}
+    return {"sequences": {}, "enrollments": {}, "channel_sequences": {}, "stops": {}}
 
 
 # ── Postgres ──────────────────────────────────────────────────────────
@@ -233,6 +286,52 @@ class CampaignPostgresRepository:
     def sequences(self) -> list[dict]:
         with self._pool.connection() as conn:
             rows = conn.execute("SELECT * FROM campaign_sequences").fetchall()
+        return [_norm(dict(r)) for r in rows]
+
+    def upsert_channel_sequence(self, sequence_key, channel, *, campaign_id,
+                                campaign_name=None) -> None:
+        if channel not in ("linkedin", "sms"):
+            raise ValueError(f"bad channel: {channel!r}")
+        with self._pool.connection() as conn:
+            conn.execute(
+                """INSERT INTO campaign_channel_sequences
+                     (sequence_key, channel, campaign_id, campaign_name, updated_at)
+                   VALUES (%s, %s, %s, %s, now())
+                   ON CONFLICT (sequence_key, channel) DO UPDATE SET
+                     campaign_id = EXCLUDED.campaign_id,
+                     campaign_name = EXCLUDED.campaign_name,
+                     updated_at = now()""",
+                (sequence_key, channel,
+                 (str(campaign_id) if campaign_id else None), campaign_name),
+            )
+
+    def channel_sequences(self) -> list[dict]:
+        with self._pool.connection() as conn:
+            rows = conn.execute("SELECT * FROM campaign_channel_sequences").fetchall()
+        return [_norm(dict(r)) for r in rows]
+
+    def add_stop(self, row) -> bool:
+        from psycopg.types.json import Json
+        with self._pool.connection() as conn:
+            out = conn.execute(
+                """INSERT INTO campaign_stops (account_id, channel, reason, detail)
+                   VALUES (%s, %s, %s, %s)
+                   ON CONFLICT (account_id, channel, reason) DO NOTHING
+                   RETURNING id""",
+                (row["account_id"], row["channel"], row["reason"],
+                 Json(row.get("detail") or {})),
+            ).fetchone()
+        return out is not None
+
+    def stops(self, *, account_id=None) -> list[dict]:
+        with self._pool.connection() as conn:
+            if account_id is not None:
+                rows = conn.execute(
+                    "SELECT * FROM campaign_stops WHERE account_id = %s "
+                    "ORDER BY stopped_at DESC", (account_id,)).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM campaign_stops ORDER BY stopped_at DESC").fetchall()
         return [_norm(dict(r)) for r in rows]
 
     def add_enrollment(self, row) -> bool:
@@ -295,6 +394,8 @@ class CampaignPostgresRepository:
         with self._pool.connection() as conn:
             n = conn.execute("DELETE FROM campaign_enrollments").rowcount or 0
             conn.execute("DELETE FROM campaign_sequences")
+            conn.execute("DELETE FROM campaign_channel_sequences")
+            conn.execute("DELETE FROM campaign_stops")
         return n
 
 

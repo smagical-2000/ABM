@@ -25,6 +25,8 @@ POINTS: dict[str, int] = {
     "tradeshow": 10,        # SFDC tradeshow lead that booked a meeting (Status=Qualified)
     "low_intent_lead": 6,   # SFDC TOFU lead — filled in a TOFU form (LeadSource '… | TOFU')
     "linkedin_tofu": 6,     # reaction on a Magical TOFU LinkedIn ad → Airtable (TOFU engagement)
+    "linkedin_reply": 6,    # replied to our HeyReach outreach DM (≈ email reply weight)
+    "linkedin_connect": 2,  # accepted our connection request (matrix: LinkedIn_Connect 2)
 }
 
 # Touches we record for rates + the timeline but that score zero — kept explicit

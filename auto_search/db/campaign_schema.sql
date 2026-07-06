@@ -62,3 +62,31 @@ CREATE INDEX IF NOT EXISTS idx_enroll_account
     ON campaign_enrollments (account_id, enrolled_at DESC);
 CREATE INDEX IF NOT EXISTS idx_enroll_recent
     ON campaign_enrollments (enrolled_at DESC);
+
+
+-- ── PER-CHANNEL SEQUENCE MAPPING (multichannel orchestration) ────────────────
+-- campaign_sequences above stays the EMAIL mapping (unchanged, zero migration).
+-- Other channels (linkedin via HeyReach, sms via Twilio later) map here:
+-- one row per (sequence key, channel) -> the executor tool's campaign/flow id.
+CREATE TABLE IF NOT EXISTS campaign_channel_sequences (
+    sequence_key   TEXT NOT NULL,
+    channel        TEXT NOT NULL CHECK (channel IN ('linkedin','sms')),
+    campaign_id    TEXT,                    -- HeyReach campaign id / Twilio flow id
+    campaign_name  TEXT,
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (sequence_key, channel)
+);
+
+
+-- ── STOP-RULE LEDGER (reply anywhere -> pause everywhere) ────────────────────
+-- One row per stop ACTION taken, so cross-channel pauses are auditable and the
+-- sweep is idempotent (won't re-fire for the same account+channel+reason).
+CREATE TABLE IF NOT EXISTS campaign_stops (
+    id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    account_id   TEXT NOT NULL,
+    channel      TEXT NOT NULL,             -- the channel that was STOPPED
+    reason       TEXT NOT NULL,             -- e.g. 'reply:email' | 'reply:linkedin'
+    detail       JSONB NOT NULL DEFAULT '{}'::jsonb,
+    stopped_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_campaign_stop UNIQUE (account_id, channel, reason)
+);

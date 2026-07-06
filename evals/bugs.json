@@ -80,7 +80,7 @@
       "symptom": "Engagement sync 500'd. POST /v3/reporting/emails with a from/to that carried a timezone offset ('2026-05-15T00:00:00+00:00') returned 500 Internal Server Error; date-only ('2026-05-15') and Z-suffixed datetimes returned 200.",
       "root_cause": "datetime.isoformat() emits a '+00:00' offset, which Reply.io's report endpoint cannot parse. The reporting window is day-granular, so a bare date is the right shape.",
       "guard": "tests/test_engagement_replyio_client.py::test_reporting_window_is_date_only_not_offset_datetime",
-      "lesson": "Send the reporting from/to as a bare 'YYYY-MM-DD' date. Verify connectors against the LIVE API, not just mocks \u2014 a mock happily accepts the bad format; only the real endpoint reveals the 500."
+      "lesson": "Send the reporting from/to as a bare 'YYYY-MM-DD' date. Verify connectors against the LIVE API, not just mocks — a mock happily accepts the bad format; only the real endpoint reveals the 500."
     },
     {
       "id": "retier-missed-nested-tier-object",
@@ -113,7 +113,7 @@
       "id": "consolidated-sync-fires-real-io-in-tests",
       "date": "2026-06-24",
       "area": "auto_search/api/app.py _sync_all_sources (the one Sync button)",
-      "symptom": "Folding every source (Reply.io, SFDC, podcast, LinkedIn TOFU) into POST /api/engagement/sync meant the background job could fire real SFDC/Apify/Reply.io calls during tests, since the sync handler schedules the coro on the live lifespan loop \u2014 only run_sync was stubbed.",
+      "symptom": "Folding every source (Reply.io, SFDC, podcast, LinkedIn TOFU) into POST /api/engagement/sync meant the background job could fire real SFDC/Apify/Reply.io calls during tests, since the sync handler schedules the coro on the live lifespan loop — only run_sync was stubbed.",
       "root_cause": "The shared client fixture stubbed run_sync but not run_sfdc_sync / run_podcast_url_sync / linkedin_ads_runner.run, and the new orchestrator calls all of them in the background.",
       "guard": "tests/test_engagement_api.py::test_sync_runs_all_sources_best_effort",
       "lesson": "When a background job grows new legs, stub EVERY leg in the fixture (no leg makes real network I/O in tests) and assert best-effort: a leg raising must not skip the rest."
@@ -122,61 +122,61 @@
       "id": "retired-sao-still-scored-and-shown",
       "date": "2026-06-24",
       "area": "engagement heat view + repos + UI/Slack labels (sales_accepted_opportunity)",
-      "symptom": "SAO was 'dropped' in the 2026-06 review (sync stopped pulling it), but 18 of the top 40 accounts still showed 'Sales accepted opp' (+10) in heat, drawer, momentum, and Slack \u2014 because historical SAO events stayed in storage with points baked in, and the heat SQL view + label maps still counted them.",
+      "symptom": "SAO was 'dropped' in the 2026-06 review (sync stopped pulling it), but 18 of the top 40 accounts still showed 'Sales accepted opp' (+10) in heat, drawer, momentum, and Slack — because historical SAO events stayed in storage with points baked in, and the heat SQL view + label maps still counted them.",
       "root_cause": "Dropping a signal at the INGEST layer (sync) doesn't remove already-stored events. Heat is summed in the engaged_accounts SQL view from stored points, so retired-but-stored kinds keep counting until excluded at the READ layer.",
       "guard": "tests/test_engagement_repository.py::test_deprecated_sao_excluded_from_heat_and_drawer",
-      "lesson": "Retiring a signal needs a READ-layer exclusion (DEPRECATED_KINDS), not just stopping ingest. Apply it everywhere heat/events are read \u2014 the SQL view (re-applied via ensure_schema on deploy), both repos' events/series/recent, plus the UI/Slack label maps \u2014 so stored history stays for audit but never counts or shows."
+      "lesson": "Retiring a signal needs a READ-layer exclusion (DEPRECATED_KINDS), not just stopping ingest. Apply it everywhere heat/events are read — the SQL view (re-applied via ensure_schema on deploy), both repos' events/series/recent, plus the UI/Slack label maps — so stored history stays for audit but never counts or shows."
     },
     {
       "id": "activation-dedup-client-side-only",
       "date": "2026-06-24",
       "area": "engagement activation (POST /api/engagement/{id}/activate)",
-      "symptom": "Before a multi-AE/SDR rollout: the 'already activated' dedup lived only in the browser (localStorage), so two reps (or the auto-route loop across browsers/reloads) could activate the SAME Hot account \u2192 it posted to Slack twice and double-spent enrichment. Same root cause as the FullEnrich credit incident.",
+      "symptom": "Before a multi-AE/SDR rollout: the 'already activated' dedup lived only in the browser (localStorage), so two reps (or the auto-route loop across browsers/reloads) could activate the SAME Hot account → it posted to Slack twice and double-spent enrichment. Same root cause as the FullEnrich credit incident.",
       "root_cause": "Per-browser dedup is per-user, not global, and the in-process run-locks don't cover per-account activation. No server-side record of what was already activated.",
       "guard": "tests/test_engagement_api.py::test_activate_dedups_across_users",
-      "lesson": "Dedup that guards spend/external posts must be SERVER-SIDE and race-safe: claim the resource atomically (INSERT \u2026 ON CONFLICT DO NOTHING) BEFORE any paid/visible work, short-circuit the loser, and release the claim if the work fails so it can retry. Client-side dedup is a convenience, never the authority."
+      "lesson": "Dedup that guards spend/external posts must be SERVER-SIDE and race-safe: claim the resource atomically (INSERT … ON CONFLICT DO NOTHING) BEFORE any paid/visible work, short-circuit the loser, and release the claim if the work fails so it can retry. Client-side dedup is a convenience, never the authority."
     },
     {
       "id": "airtable-upsert-422-on-duplicate-rows",
       "date": "2026-06-24",
-      "area": "auto_search/engagement/airtable_client.py upsert (LinkedIn TOFU \u2192 Airtable)",
-      "symptom": "Live LinkedIn TOFU runs reported airtable_failed and leads never landed in Airtable \u2014 every write 422'd. Not auth (key worked) and not bad columns (all field names matched). The table already had 2 rows per Email (a Clay workflow also writes it).",
+      "area": "auto_search/engagement/airtable_client.py upsert (LinkedIn TOFU → Airtable)",
+      "symptom": "Live LinkedIn TOFU runs reported airtable_failed and leads never landed in Airtable — every write 422'd. Not auth (key worked) and not bad columns (all field names matched). The table already had 2 rows per Email (a Clay workflow also writes it).",
       "root_cause": "upsert used Airtable's native performUpsert with fieldsToMergeOn=[Email], which returns HTTP 422 when MORE THAN ONE existing row matches the merge key. A second writer (Clay) had created duplicate Email rows, so the merge could not resolve to one record.",
       "guard": "tests/test_engagement_airtable_client.py::test_upsert_tolerates_duplicate_rows",
-      "lesson": "Don't rely on a vendor's merge-on-key upsert when another system also writes the table \u2014 it assumes \u22641 match. Do an explicit find-then-update-first-or-create (dup-tolerant), which never 422s and never adds another duplicate. When a 4xx says 'unprocessable', capture the response BODY \u2014 422 means data/semantics rejected, distinct from 401/403 auth."
+      "lesson": "Don't rely on a vendor's merge-on-key upsert when another system also writes the table — it assumes ≤1 match. Do an explicit find-then-update-first-or-create (dup-tolerant), which never 422s and never adds another duplicate. When a 4xx says 'unprocessable', capture the response BODY — 422 means data/semantics rejected, distinct from 401/403 auth."
     },
     {
       "id": "activation-claim-leak-on-pre-post-exception",
       "date": "2026-06-24",
       "area": "auto_search/api/app.py engagement_activate (server-side dedup)",
       "symptom": "An account could get stuck permanently 'already_activated' with no Slack post: claim_activation() inserted the ledger row, but if _engaged_one()/enrichment/resolve threw BEFORE the Slack post, the claim was never released (release only ran on the Slack-failed path). Every future click then returned already_activated with no spend and no post; only force=true could recover it.",
-      "root_cause": "The atomic claim was taken before a block of work that wasn't all under a try/except that releases on failure \u2014 only the explicit Slack-post-failed branch released. Any earlier exception leaked the claim.",
+      "root_cause": "The atomic claim was taken before a block of work that wasn't all under a try/except that releases on failure — only the explicit Slack-post-failed branch released. Any earlier exception leaked the claim.",
       "guard": "tests/test_engagement_api.py::test_activate_releases_claim_on_slack_failure",
-      "lesson": "When you CLAIM a resource before doing work, the ENTIRE work block (not just the last step) must run under a guard that releases the claim on ANY failure. A claim-before-work pattern needs claim \u2192 try/except-release \u2192 succeed."
+      "lesson": "When you CLAIM a resource before doing work, the ENTIRE work block (not just the last step) must run under a guard that releases the claim on ANY failure. A claim-before-work pattern needs claim → try/except-release → succeed."
     },
     {
       "id": "airtable-formula-apostrophe-escaping",
       "date": "2026-06-24",
       "area": "auto_search/engagement/airtable_client.py _find_id (filterByFormula)",
-      "symptom": "A merge value containing an apostrophe (e.g. o'brien@x.com) built a malformed Airtable formula \u2014 the dup-tolerant upsert's lookup would miss the existing row and CREATE a duplicate, defeating the dedup it exists to provide.",
+      "symptom": "A merge value containing an apostrophe (e.g. o'brien@x.com) built a malformed Airtable formula — the dup-tolerant upsert's lookup would miss the existing row and CREATE a duplicate, defeating the dedup it exists to provide.",
       "root_cause": "The formula wrapped the value in single quotes and SQL-style-escaped embedded quotes (\\'), which Airtable's formula grammar does not honor.",
       "guard": "tests/test_engagement_airtable_client.py::test_upsert_escapes_apostrophe_in_merge_value",
-      "lesson": "Each query language has its own string-literal escaping \u2014 don't assume SQL rules. Airtable formulas: wrap the literal in DOUBLE quotes and escape only \\ and \"; an apostrophe is then literal. Match the target grammar, not a familiar one."
+      "lesson": "Each query language has its own string-literal escaping — don't assume SQL rules. Airtable formulas: wrap the literal in DOUBLE quotes and escape only \\ and \"; an apostrophe is then literal. Match the target grammar, not a familiar one."
     },
     {
       "id": "ci-red-test-depends-on-local-dotenv",
       "date": "2026-06-25",
       "area": "tests/test_engagement_api.py client fixture (consolidated sync tests)",
-      "symptom": "CI lint-and-test went red on every push: test_sync_runs_all_sources_best_effort failed with 'AIRTABLE_BASE_ID / AIRTABLE_LINKEDIN_TABLE not set' \u2014 the LinkedIn sync leg crashed constructing AirtableClient before reaching the mocked runner, so 'linkedin' was never recorded. It PASSED locally and only failed in CI.",
-      "root_cause": "The fixture stubbed linkedin_ads_runner.run but NOT the AirtableClient/ReplyioClient that _linkedin_tofu constructs BEFORE calling the runner. Those constructors need AIRTABLE_*/REPLYIO env, which exists locally via .env (load_dotenv) but not in CI \u2014 a hidden env dependency that 'works on my machine' masked.",
+      "symptom": "CI lint-and-test went red on every push: test_sync_runs_all_sources_best_effort failed with 'AIRTABLE_BASE_ID / AIRTABLE_LINKEDIN_TABLE not set' — the LinkedIn sync leg crashed constructing AirtableClient before reaching the mocked runner, so 'linkedin' was never recorded. It PASSED locally and only failed in CI.",
+      "root_cause": "The fixture stubbed linkedin_ads_runner.run but NOT the AirtableClient/ReplyioClient that _linkedin_tofu constructs BEFORE calling the runner. Those constructors need AIRTABLE_*/REPLYIO env, which exists locally via .env (load_dotenv) but not in CI — a hidden env dependency that 'works on my machine' masked.",
       "guard": "tests/test_engagement_api.py::test_sync_runs_all_sources_best_effort (fixture now stubs AirtableClient + ReplyioClient)",
-      "lesson": "Tests must be env-independent: stub EVERY external client a code path constructs, not just the one that does I/O. 'Passes locally' is worthless when local .env supplies vars CI lacks \u2014 reproduce CI by moving .env aside. And verify the way CI does (ruff check . over the whole repo + bare pytest), not a narrower scoped command."
+      "lesson": "Tests must be env-independent: stub EVERY external client a code path constructs, not just the one that does I/O. 'Passes locally' is worthless when local .env supplies vars CI lacks — reproduce CI by moving .env aside. And verify the way CI does (ruff check . over the whole repo + bare pytest), not a narrower scoped command."
     },
     {
       "id": "engagement-route-collision-single-segment",
       "date": "2026-06-25",
       "area": "auto_search/api/app.py engagement routes",
-      "symptom": "A new GET /api/engagement/live-routing returned {'detail':'account not found'} \u2014 it was matched by the earlier GET /api/engagement/{id} account route (id='live-routing'), not the new handler.",
+      "symptom": "A new GET /api/engagement/live-routing returned {'detail':'account not found'} — it was matched by the earlier GET /api/engagement/{id} account route (id='live-routing'), not the new handler.",
       "root_cause": "FastAPI matches routes in registration order; a single-segment path under /api/engagement/ collides with the /api/engagement/{id} catch-all unless registered BEFORE it (like inbox/sync are). The new route was defined after {id}.",
       "guard": "tests/test_engagement_api.py::test_live_routing_toggle_get_and_set",
       "lesson": "Don't add a single-segment route after a sibling /{id} catch-all. Either register it earlier, or use a 2-segment namespaced path (e.g. /api/engagement/settings/live-routing, like /api/engagement/activations/reset) so {id} can't swallow it."
@@ -185,7 +185,7 @@
       "id": "future-dated-sfdc-meeting",
       "date": "2026-06-25",
       "area": "auto_search/engagement/sfdc.py parse() meeting occurred_at + db/engagement_repository.py _event_row",
-      "symptom": "A Salesforce meeting SCHEDULED in the future (StartDateTime 2026-07-09 while today was 2026-06-25) was stored with that future occurred_at. It showed a future timeline entry ('Meeting booked Jul 9'), inflated current heat, and trivially passed the June-25 send cutoff (future >= cutoff) \u2014 so under permanent-live it would have pushed the account to AEs/SDRs off a meeting that had not happened.",
+      "symptom": "A Salesforce meeting SCHEDULED in the future (StartDateTime 2026-07-09 while today was 2026-06-25) was stored with that future occurred_at. It showed a future timeline entry ('Meeting booked Jul 9'), inflated current heat, and trivially passed the June-25 send cutoff (future >= cutoff) — so under permanent-live it would have pushed the account to AEs/SDRs off a meeting that had not happened.",
       "root_cause": "parse() used StartDateTime (the meeting time, which can be in the future for a scheduled meeting) as the engagement signal date. The signal (a meeting was booked) actually occurs at CreatedDate.",
       "guard": "tests/test_engagement_sfdc.py::test_meeting_scheduled_in_future_dates_to_booking_not_meeting_time; tests/test_engagement_repository.py::test_future_occurred_at_is_clamped_to_now",
       "lesson": "An engagement signal's date is when the SIGNAL happened, not a scheduled future time. Use CreatedDate (booking) when StartDateTime is in the future, AND clamp occurred_at to now at the storage layer so no source can ever persist a future date. Future dates silently corrupt every date-gated rule downstream (send cutoff, momentum windows, recency)."
@@ -213,9 +213,18 @@
       "date": "2026-07-04",
       "area": "auto_search/scoring (engine inputs) + engagement store",
       "symptom": "A fit score could claim 'no public intent signals found' about an account that BOOKED A MEETING with us. Live: Synergy Orthopedic (engagement Hot, heat 22, meeting booked 2026-06-25) scored intent 4/10 'no signals'; Humana (heat 84, 3 booked meetings) scored intent 3/10. Audit found 3 such blindspots + 4 engaged accounts with unverified QA.",
-      "root_cause": "The scorer's inputs were public web research + carried DISCOVERY signals only; the ENGAGEMENT store (meetings, BOFU forms, ad engagement) was never fed in. The AE-lookup card showed the heat chip, but the score never saw the events \u2014 card and score contradicted each other.",
-      "fix": "engagement/intent_feed.to_intent_signals (events -> scorer signal dicts) + ScoringService(own_signals=...) merges them at SCORE time on every path (ae/promote/rescore/batch; no silent board-wide shifts \u2014 scores change only when a score runs). app.py provider matches by normalized-name key then domain via the shaped board (names drift, domains don't \u2014 the Riverview csv/AKA case). ae-lookup commits persist the signals for drawer provenance.",
+      "root_cause": "The scorer's inputs were public web research + carried DISCOVERY signals only; the ENGAGEMENT store (meetings, BOFU forms, ad engagement) was never fed in. The AE-lookup card showed the heat chip, but the score never saw the events — card and score contradicted each other.",
+      "fix": "engagement/intent_feed.to_intent_signals (events -> scorer signal dicts) + ScoringService(own_signals=...) merges them at SCORE time on every path (ae/promote/rescore/batch; no silent board-wide shifts — scores change only when a score runs). app.py provider matches by normalized-name key then domain via the shaped board (names drift, domains don't — the Riverview csv/AKA case). ae-lookup commits persist the signals for drawer provenance.",
       "guard": "tests/test_intent_feed.py (mapping/collapse/orders + service merge dedupes + provider failure never blocks) ; live before/after: Synergy 16->22 (intent 4->9), Humana intent 3->8 citing '3 meetings booked'."
+    },
+    {
+      "id": "anesthesia-regex-us-spelling",
+      "date": "2026-07-05",
+      "area": "campaigns / catalog (ICP -> sequence routing + Reply.io auto-detect)",
+      "symptom": "\"Engagement Anesthesiology\" got no suggested sequence in the Campaigns tab; American-spelled anesthesia accounts would route to specialty_other instead of the anesthesia sequence.",
+      "root_cause": "The vertical regex was an[ae]esthes — a character CLASS demands one letter between \"an\" and \"esthes\", which matches British \"anaesthes\" but never American \"anesthes\". Wanted an optional letter (ana?esthes), wrote a mandatory one.",
+      "guard": "tests/test_campaigns.py::test_suggest_sequence_key_from_campaign_names (both spellings) + test_catalog_routes_by_segment_then_subvertical (US sub_segment)",
+      "lesson": "A char class [xy] is one-of, not maybe-one: optional letters are x? / a?. Verify keyword routing against REAL source data (the live Reply.io names caught this), not only invented fixtures."
     }
   ]
 }

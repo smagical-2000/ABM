@@ -56,7 +56,10 @@ _VERTICAL_RES: tuple[tuple[str, re.Pattern], ...] = (
     ("ortho", re.compile(r"ortho|spine", re.I)),
     ("behavioral", re.compile(r"behavio|mental|psych|substance|sud\b", re.I)),
     ("radiology", re.compile(r"radiolog|imaging", re.I)),
-    ("anesthesia", re.compile(r"an[ae]esthes", re.I)),
+    # ana?esthes: American "anesthes..." AND British "anaesthes..." — a char class
+    # here ([ae]) would DEMAND a letter between "an" and "esthes" and silently
+    # miss the American spelling (see evals/bugs.json `anesthesia-regex-us-spelling`).
+    ("anesthesia", re.compile(r"ana?esthes", re.I)),
 )
 
 
@@ -84,3 +87,28 @@ def sequence_key_for(account: dict) -> str:
 def sequence_label(key: str) -> str:
     meta = SEQUENCE_KEYS.get(key)
     return meta["label"] if meta else key
+
+
+# Auto-detect: which sequence key a Reply.io CAMPAIGN NAME looks like it belongs
+# to, so a sequence Galyna just built is pre-suggested in the mapping picker.
+# A suggestion is only ever a hint — the human confirms the connection; None
+# (no confident keyword) is the honest default, never a guess.
+_NAME_HINTS: tuple[tuple[str, re.Pattern], ...] = _VERTICAL_RES + (
+    ("payer", re.compile(r"pay[eo]r", re.I)),
+    ("health_system", re.compile(r"health\s*system|hospital|rural", re.I)),
+    ("specialty_other", re.compile(
+        r"derm|cardio|urolog|ophthalm|neuro|pain\s*management", re.I)),
+)
+
+
+def suggest_sequence_key(campaign_name: str | None) -> str | None:
+    """The sequence key a Reply.io campaign name suggests, or None. Specific
+    verticals win over the broad buckets (an 'Ortho Hospital Outreach' campaign
+    is an ortho sequence, not a health-system one)."""
+    name = (campaign_name or "").strip()
+    if not name:
+        return None
+    for key, rx in _NAME_HINTS:
+        if rx.search(name):
+            return key
+    return None

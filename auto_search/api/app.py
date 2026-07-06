@@ -1669,7 +1669,11 @@ def create_app() -> FastAPI:
 
     @app.get("/api/campaigns/replyio-campaigns")
     async def campaigns_replyio_list():
-        """Live Reply.io campaign list (read-only) for the mapping picker."""
+        """Live Reply.io campaign list (read-only) for the mapping picker, with
+        auto-detection: each campaign carries the sequence key its NAME suggests
+        (a hint the human confirms, never auto-linked) and whether it is already
+        connected. Newest first (Reply.io ids are sequential), so a sequence
+        Galyna just built surfaces at the top."""
         if not os.getenv("REPLYIO_API_KEY"):
             raise HTTPException(status_code=503, detail="REPLYIO_API_KEY not set")
         from auto_search.engagement.replyio_client import ReplyioClient
@@ -1678,7 +1682,14 @@ def create_app() -> FastAPI:
         except Exception as e:  # noqa: BLE001 — surface a clean 502, not a stack
             raise HTTPException(status_code=502,
                                 detail=f"Reply.io campaigns fetch failed: {e}") from e
-        return {"campaigns": rows}
+        crepo = getattr(app.state, "campaign_repo", None)
+        mapped_ids = {str(s.get("campaign_id")) for s in (crepo.sequences() if crepo else [])
+                      if s.get("campaign_id")}
+        out = [{**r, "mapped": str(r.get("id")) in mapped_ids,
+                "suggested_key": campaigns_catalog.suggest_sequence_key(r.get("name"))}
+               for r in rows]
+        out.sort(key=lambda r: (r.get("id") or 0), reverse=True)   # newest first
+        return {"campaigns": out}
 
     @app.post("/api/campaigns/mapping")
     async def campaigns_mapping_set(request: Request):

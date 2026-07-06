@@ -89,6 +89,8 @@ def test_catalog_routes_by_segment_then_subvertical():
     assert catalog.sequence_key_for(
         _scored(sub_segment="", name="Radiology Partners")) == "radiology"
     assert catalog.sequence_key_for(
+        _scored(sub_segment="Anesthesiology")) == "anesthesia"   # US spelling
+    assert catalog.sequence_key_for(
         _scored(sub_segment="Dermatology", name="Acme Derm")) == "specialty_other"
 
 
@@ -96,6 +98,24 @@ def test_catalog_name_never_misroutes_health_systems():
     # A hospital with "Radiology" in a department-ish name stays health_system.
     a = {"segment": "health_system", "name": "Northside Hospital Radiology Center"}
     assert catalog.sequence_key_for(a) == "health_system"
+
+
+def test_suggest_sequence_key_from_campaign_names():
+    """Auto-detect: a Reply.io campaign NAME suggests its group — specific
+    verticals beat broad buckets, and no keyword means no guess (None)."""
+    assert catalog.suggest_sequence_key("Outbound - Ortho Articles") == "ortho"
+    assert catalog.suggest_sequence_key("Ortho Hospital Outreach") == "ortho"   # vertical wins
+    assert catalog.suggest_sequence_key("Health Systems FTLORC") == "health_system"
+    assert catalog.suggest_sequence_key("Payor Event Invite") == "payer"
+    assert catalog.suggest_sequence_key("Behavioural CEO Video") == "behavioral"
+    # BOTH anesthesia spellings (US had a real miss: an[ae]esthes demanded a letter
+    # between "an" and "esthes" — evals/bugs.json `anesthesia-regex-us-spelling`).
+    assert catalog.suggest_sequence_key("Engagement Anesthesiology") == "anesthesia"
+    assert catalog.suggest_sequence_key("Anaesthesia UK pilot") == "anesthesia"
+    assert catalog.suggest_sequence_key("Dermatology blog blast") == "specialty_other"
+    assert catalog.suggest_sequence_key("New sequence") is None
+    assert catalog.suggest_sequence_key("") is None
+    assert catalog.suggest_sequence_key(None) is None
 
 
 # ── enroll: the pure rule ─────────────────────────────────────────────

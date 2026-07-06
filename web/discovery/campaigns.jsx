@@ -163,22 +163,60 @@ function LedgerView({ enrollments, sequences }){
 }
 
 // ── SEQUENCES (map each group to its Reply.io campaign) ───────────────────────
-function SequencesView({ sequences, replyio, replyioErr, onSave, saving }){
+function SequencesView({ sequences, replyio, replyioErr, onSave, saving, onRefresh, refreshing }){
   const opts=(replyio||[]).slice().sort((a,b)=>String(a.name||'').localeCompare(String(b.name||'')));
   const [draft,setDraft]=useState({});   // sequence_key -> campaign id chosen in the picker
+  const seqByKey=useMemo(()=>{ const m={}; sequences.forEach(s=>{m[s.sequence_key]=s;}); return m; },[sequences]);
+  // Auto-detected: the newest not-yet-connected Reply.io campaigns (Galyna just
+  // built these). Each may carry a suggested group; the human always confirms.
+  const detected=useMemo(()=>(replyio||[]).filter(c=>!c.mapped).slice(0,8),[replyio]);
+  const [connect,setConnect]=useState({});   // campaign id -> chosen sequence key
   return (
     <>
       <div style={{display:'flex',alignItems:'flex-start',gap:8,padding:'12px 28px',background:'rgba(238,242,255,.5)',borderBottom:'1px solid #e0e7ff'}}>
         <Icon name="info" size={14} style={{color:'#4f46e5',marginTop:1,flexShrink:0}}/>
-        <span style={{fontSize:12.5,color:'#3730a3',lineHeight:1.45}}>
+        <span style={{fontSize:12.5,color:'#3730a3',lineHeight:1.45,flex:1}}>
           The emails themselves (the 3 steps, copy, timing, mailboxes) are written in Reply.io.
           This page only decides WHICH Reply.io campaign each account group is enrolled into.
-          Build the sequence in Reply.io first, then pick it here.
+          Build the sequence in Reply.io first, then connect it here.
         </span>
+        <button onClick={onRefresh} disabled={refreshing} title="Pull the latest campaign list from Reply.io (picks up sequences created moments ago)"
+          style={{display:'inline-flex',alignItems:'center',gap:6,flexShrink:0,borderRadius:7,background:'#fff',border:'1px solid #c7d2fe',padding:'5px 11px',fontFamily:'var(--font-sans)',fontSize:12,fontWeight:600,color:'#4338ca',cursor:refreshing?'default':'pointer',opacity:refreshing?.6:1}}>
+          <Icon name="refresh" size={13} className={refreshing?'cspin':''}/>{refreshing?'Checking…':'Check Reply.io for new sequences'}
+        </button>
       </div>
       {replyioErr&&(
         <div style={{padding:'10px 28px',borderBottom:'1px solid #fef3c7',background:'rgba(255,251,235,.6)',fontSize:12.5,color:'#92400e'}}>
           Could not load the Reply.io campaign list: {replyioErr}. You can still paste a campaign id below.
+        </div>
+      )}
+      {/* Auto-detected: newest campaigns in Reply.io not connected to any group yet */}
+      {detected.length>0&&(
+        <div style={{borderBottom:'1px solid #f4f4f5'}}>
+          <div style={{display:'flex',alignItems:'center',gap:8,padding:'10px 28px 6px'}}>
+            <span className="cpulse" style={{width:7,height:7,borderRadius:'50%',background:'#4f46e5',display:'inline-block'}}/>
+            <span style={{...TX.label,color:'#4338ca'}}>Detected in Reply.io · newest first · not connected yet</span>
+          </div>
+          {detected.map(c=>{
+            const chosen=connect[c.id]!==undefined?connect[c.id]:(c.suggested_key||'');
+            return (
+              <div key={c.id} style={{display:'flex',alignItems:'center',gap:14,padding:'9px 28px'}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <span style={{...TX.body,fontWeight:500,color:'#18181b'}}>{c.name}</span>
+                  {c.suggested_key&&<span style={{marginLeft:8,borderRadius:6,background:'#eef2ff',padding:'1px 7px',fontSize:10.5,fontWeight:500,color:'#4338ca',boxShadow:'inset 0 0 0 1px #c7d2fe'}}>looks like {(seqByKey[c.suggested_key]||{}).label||c.suggested_key}</span>}
+                </div>
+                <select value={chosen} onChange={ev=>setConnect(d=>({...d,[c.id]:ev.target.value}))}
+                  style={{appearance:'none',minWidth:200,borderRadius:7,border:'1px solid #e4e4e7',background:'#fff',padding:'5px 24px 5px 9px',fontFamily:'var(--font-sans)',fontSize:12,color:'#3f3f46'}}>
+                  <option value="">Connect to…</option>
+                  {sequences.map(s=><option key={s.sequence_key} value={s.sequence_key}>{s.label}</option>)}
+                </select>
+                <button onClick={()=>chosen&&onSave(chosen,String(c.id),c.name)} disabled={!chosen||saving}
+                  style={{background:chosen?'#4f46e5':'#fafafa',border:'none',fontFamily:'var(--font-sans)',fontSize:12,fontWeight:600,color:chosen?'#fff':'#d4d4d8',cursor:chosen?'pointer':'default',padding:'6px 13px',borderRadius:7}}>
+                  Connect
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
       {sequences.map((s)=>{
@@ -238,6 +276,18 @@ function CampaignsView({ pushToast }){
     window.API.campaignsReplyio().then(r=>setReplyio(r.campaigns||[]))
       .catch(e=>{ setReplyio([]); setReplyioErr(e.message); });
   },[tab]);  // eslint-disable-line
+
+  // on-demand re-check, so a sequence Galyna created a minute ago shows up
+  const [refreshing,setRefreshing]=useState(false);
+  function refreshReplyio(){
+    if(refreshing) return;
+    setRefreshing(true); setReplyioErr(null);
+    window.API.campaignsReplyio().then(r=>{
+      setReplyio(r.campaigns||[]); setRefreshing(false);
+      const fresh=(r.campaigns||[]).filter(c=>!c.mapped).length;
+      pushToast&&pushToast(`Reply.io checked — ${fresh} campaign${fresh===1?'':'s'} not connected yet`,'muted');
+    }).catch(e=>{ setRefreshing(false); setReplyioErr(e.message); });
+  }
 
   // poll while a live run is in flight (same pattern as the engagement sync pill)
   const pollRef=useRef(false);
@@ -446,7 +496,7 @@ function CampaignsView({ pushToast }){
           </div>
           {tab==='ready'&&<ReadyView eligible={eligible} live={settings.live} onEnroll={enrollOne}/>}
           {tab==='enrolled'&&<LedgerView enrollments={enrollments} sequences={sequences}/>}
-          {tab==='sequences'&&<SequencesView sequences={sequences} replyio={replyio} replyioErr={replyioErr} onSave={saveMapping} saving={saving}/>}
+          {tab==='sequences'&&<SequencesView sequences={sequences} replyio={replyio} replyioErr={replyioErr} onSave={saveMapping} saving={saving} onRefresh={refreshReplyio} refreshing={refreshing}/>}
         </div>
         </>}
       </main>

@@ -461,13 +461,18 @@ def test_campaigns_sequences_tab_and_preview_run(page):
     campaign list is stubbed (no network in tests)."""
     page.route("**/api/campaigns/replyio-campaigns",
                lambda route: route.fulfill(json={"campaigns": [
-                   {"id": 111, "name": "Outbound HS (test)", "status": 0}]}))
+                   {"id": 111, "name": "Outbound Health Systems (test)", "status": 0,
+                    "mapped": False, "suggested_key": "health_system"}]}))
     page.click("text=Campaigns")
     page.wait_for_selector("text=Ready to enroll", timeout=10_000)
     page.click("text=Sequences")
     page.wait_for_selector("text=Health Systems", timeout=10_000)
     assert page.get_by_text("needs a campaign", exact=False).count() > 0
     assert page.get_by_text("written in Reply.io", exact=False).count() > 0
+    # Auto-detect: the unconnected campaign surfaces with its suggested group.
+    assert page.get_by_text("Detected in Reply.io", exact=False).count() > 0
+    assert page.get_by_text("looks like Health Systems", exact=False).count() > 0
+    assert page.get_by_text("Check Reply.io for new sequences", exact=False).count() > 0
     # Preview run: dry, inline — the seeded eligible account is blocked on setup.
     page.click("text=Preview run")
     page.wait_for_selector("text=blocked on sequence setup", timeout=10_000)

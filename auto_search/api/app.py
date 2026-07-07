@@ -1211,7 +1211,8 @@ def create_app() -> FastAPI:
         return {"enabled": engagement_notify.live_routing(), "source": "env"}
 
     @app.post("/api/engagement/notify-changes")
-    def engagement_notify_changes(dry_run: bool = False, seed: bool = False, limit: int = 0):
+    def engagement_notify_changes(dry_run: bool = False, seed: bool = False, limit: int = 0,
+                                  stage: str = ""):
         """Auto AE/SDR push. Posts a card when an account's tier ROSE above the last tier
         we notified it at (Some/Warm → SDR, Hot → AE) — OR when an already-Hot account gets
         NEW activity (Galyna 2026-07-05: a Hot account re-alerts on any new touch, old or
@@ -1241,7 +1242,15 @@ def create_app() -> FastAPI:
             repo.set_setting("notified_tiers", json.dumps(ledger))
             return {"seeded": len(board), "format": "tier+touch"}
         due = engagement_notify.accounts_to_notify(board, ledger)
-        live = _live_routing_state(repo)["enabled"]
+        # STAGING GATE (Sunny, 2026-07-07): while the `notify_stage` setting is
+        # "test", every send goes to the PRIVATE test channel with a [TEST]
+        # prefix and the ledger is NOT marked — the same accounts stay due, so
+        # after human verification an explicit `stage=live` call pushes the
+        # exact same cards to the real channel. Automatic triggers never reach
+        # the main channel while staged. Param overrides the setting.
+        staged = ((stage or repo.get_setting("notify_stage") or "live")
+                  .strip().lower() == "test")
+        live = (not staged) and _live_routing_state(repo)["enabled"]
         ids_override = None if live else {}   # None = env ids (ping); {} = plain @Name (test)
         app_base = os.getenv("ENGAGEMENT_APP_URL")   # deep-link back to the ABM console
         fired, posted = [], 0
@@ -1252,7 +1261,9 @@ def create_app() -> FastAPI:
             entry = {"account": a.get("name"), "from": d["prev"], "to": tier,
                      "reason": d.get("reason"),
                      "role": "AE" if is_ae else "SDR", "owner": owner,
-                     "channel": (("AE" if is_ae else "SDR") + " channel") if live else "private-test"}
+                     "channel": ("test-preview" if staged else
+                                 (("AE" if is_ae else "SDR") + " channel") if live
+                                 else "private-test")}
             if not dry_run and (not limit or posted < limit):
                 webhook = engagement_notify.tier_webhook(is_ae=is_ae) if live else None
                 # "Open in console" deep-link → this account's drawer in the ABM platform
@@ -1260,18 +1271,43 @@ def create_app() -> FastAPI:
                            f"view=engagement&account={quote(a['account_id'])}") if app_base else None
                 events = repo.events_for_account(a["account_id"])
                 ok = engagement_notify.activate_account(a, events, ae=owner, app_url=app_url,
-                                                        webhook=webhook, dm_limit=0)
+                                                        webhook=webhook, dm_limit=0,
+                                                        test=staged)
                 entry["posted"] = bool(ok)
                 if ok:
-                    # Record BOTH tier and the touch we just notified on, so the same
-                    # activity can't re-fire but a genuinely newer touch (Hot) can.
-                    ledger[a["account_id"]] = {"tier": tier, "touch": d.get("touch")}
+                    if not staged:
+                        # Record BOTH tier and the touch we just notified on, so the
+                        # same activity can't re-fire but a genuinely newer touch can.
+                        ledger[a["account_id"]] = {"tier": tier, "touch": d.get("touch")}
                     posted += 1
             fired.append(entry)
-        if not dry_run:
+        if not dry_run and not staged:
             repo.set_setting("notified_tiers", json.dumps(ledger))
         return {"due": len(due), "posted": posted, "live": live,
+                "stage": "test" if staged else "live",
                 "dry_run": dry_run, "detail": fired[:60]}
+
+    @app.get("/api/engagement/settings/notify-stage")
+    def notify_stage_get():
+        """Where notifier cards go: 'test' = private test channel, ledger
+        untouched (accounts stay due for a later live push); 'live' = normal."""
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=503, detail="engagement store not available")
+        return {"stage": (repo.get_setting("notify_stage") or "live")}
+
+    @app.post("/api/engagement/settings/notify-stage")
+    async def notify_stage_set(request: Request):
+        """Set the staging gate. Body: {"stage": "test"|"live"}."""
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=503, detail="engagement store not available")
+        body = await _json_body(request)
+        val = str(body.get("stage") or "").strip().lower()
+        if val not in ("test", "live"):
+            raise HTTPException(status_code=422, detail="stage must be 'test' or 'live'")
+        repo.set_setting("notify_stage", val)
+        return {"stage": val}
 
     @app.get("/api/ops/changelog")
     def ops_changelog_list(limit: int = 100):

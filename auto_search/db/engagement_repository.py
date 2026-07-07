@@ -361,7 +361,11 @@ class EngagementJsonRepository:
             elif kind == "meeting_booked":
                 slot["meetings"] += 1
             ot = e.get("occurred_at")
-            if ot and (slot["last_touch"] is None or ot > slot["last_touch"]):
+            # last_touch = latest SCORED touch only (zero-point delivered/open/
+            # bounce rows must not advance it — phantom Hot re-alerts otherwise).
+            # Keep in sync with the engaged_accounts view in engagement_schema.sql.
+            if (e.get("points") or 0) > 0 and ot and (
+                    slot["last_touch"] is None or ot > slot["last_touch"]):
                 slot["last_touch"] = ot
         cc: dict[str, dict] = {}
         seen_people: dict[str, set] = {}   # account_id -> person keys (dedup the count)

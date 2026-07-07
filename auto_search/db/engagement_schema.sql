@@ -157,7 +157,11 @@ WITH e AS (
            COUNT(*) FILTER (WHERE kind = 'click')         AS clicks,
            COUNT(*) FILTER (WHERE kind = 'reply')         AS replies,
            COUNT(*) FILTER (WHERE kind = 'meeting_booked') AS meetings,
-           MAX(occurred_at)                              AS last_touch
+           -- last_touch = latest SCORED touch only. Zero-point rows (delivered/
+           -- open/bounce) must never advance it: the Hot-reactivation rule
+           -- compares it against the notify ledger, so a mere email OPEN moving
+           -- it forward would phantom re-alert Hot accounts. Sync w/ JSON repo.
+           MAX(occurred_at) FILTER (WHERE COALESCE(points, 0) > 0) AS last_touch
     FROM engagement_events
     -- Exclude retired signal kinds (SAO, replaced by meeting_booked in 2026-06):
     -- historical rows stay for audit but never count toward heat. Keep this literal

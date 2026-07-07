@@ -86,3 +86,17 @@ def test_stage_setting_endpoints(client):
     assert client.get("/api/engagement/settings/notify-stage").json()["stage"] == "test"
     assert client.post("/api/engagement/settings/notify-stage",
                        json={"stage": "bogus"}).status_code == 422
+
+
+def test_zero_point_touches_never_advance_last_touch(client):
+    """An email OPEN (0 pts) newer than the last scored touch must NOT move
+    last_touch — otherwise every open would phantom re-alert a Hot account."""
+    app = client.app
+    _seed_due_account(app)
+    app.state.engagement_repo.add_event({
+        "source": "replyio", "external_id": "e:open:c1", "channel": "email",
+        "kind": "open", "points": 0, "contact_ext": "c1", "company": "Due Co",
+        "account_id": "abm_dueco", "occurred_at": "2026-07-08T09:00:00+00:00"})
+    rows = app.state.engagement_repo.engaged_accounts()
+    row = next(r for r in rows if r["account_id"] == "abm_dueco")
+    assert row["last_touch"] == "2026-07-07T10:00:00+00:00"   # the scored touch, not the open

@@ -234,6 +234,15 @@
       "root_cause": "Engagement crossing prefers a scored account id when one exists; events previously keyed to abm_<key> get re-assigned on re-sync, leaving the abm_ row orphaned. Ledger knows nothing about the new id, so it looks like a brand-new rising account.",
       "fix": "One-time repair: ledger pre-marked (both ids -> Hot + latest touch, so nothing fires) then events/contacts moved to the scored id; board shows ONE Synergy at Hot 22. PERMANENT fix still needed: crossing should canonicalize abm_<key>/acc_<key> as one identity (migrate abm events on first scored-cross, and seed the ledger entry for the new id from the old).",
       "guard": "none yet \u2014 add a crossing test: scored twin created after events exist must not produce two board rows or a phantom rise."
+    },
+    {
+      "id": "zero-point-opens-advance-last-touch",
+      "date": "2026-07-07",
+      "area": "engaged_accounts rollup (SQL view + JSON repo) x Hot-reactivation rule",
+      "symptom": "A mere email OPEN (0 points) advanced last_touch, so every Hot account would phantom re-alert its AE whenever anyone opened an old email. Caught by the deep review while all sends were staged to the test channel; never reached the team.",
+      "root_cause": "MAX(occurred_at) in the rollup had no points>0 filter; the reactivation rule compares last_touch to the notify ledger touch.",
+      "fix": "SQL view: MAX(occurred_at) FILTER (WHERE COALESCE(points,0)>0); JSON repo: gate the last_touch update on points>0.",
+      "guard": "tests/test_notify_staging.py::test_zero_point_touches_never_advance_last_touch"
     }
   ]
 }

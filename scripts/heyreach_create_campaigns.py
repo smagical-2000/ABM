@@ -8,11 +8,13 @@ and report the blocker. Campaigns are DRAFTS either way; nothing can send.
 """
 import json
 from pathlib import Path
+
 import httpx
 
-key = [l.split("=", 1)[1].strip()
-       for l in Path("/Users/sunnydsouza/projects/abm-scorer/.env").read_text().splitlines()
-       if l.startswith("HEYREACH_API_KEY=")][0]
+_ENV = Path(__file__).resolve().parent.parent / ".env"
+key = [line.split("=", 1)[1].strip()
+       for line in _ENV.read_text().splitlines()
+       if line.startswith("HEYREACH_API_KEY=")][0]
 BASE = "https://api.heyreach.io/api/public"
 H = {"X-API-KEY": key, "Content-Type": "application/json"}
 

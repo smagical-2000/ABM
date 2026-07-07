@@ -243,6 +243,15 @@
       "root_cause": "MAX(occurred_at) in the rollup had no points>0 filter; the reactivation rule compares last_touch to the notify ledger touch.",
       "fix": "SQL view: MAX(occurred_at) FILTER (WHERE COALESCE(points,0)>0); JSON repo: gate the last_touch update on points>0.",
       "guard": "tests/test_notify_staging.py::test_zero_point_touches_never_advance_last_touch"
+    },
+    {
+      "id": "social-poll-dict-location-crash",
+      "date": "2026-07-07",
+      "area": "social event poll x Apify profile enrichment",
+      "symptom": "Daily cron flagged Crashed (social leg rc=1): TypeError in is_us \u2014 the linkedin-profile-scraper actor returned city/country as OBJECTS ({'name': ...}) instead of strings; the event-keyword poll aborted mid-run and the rest of that day's engagers were never processed.",
+      "root_cause": "normalize_enrichment passed raw actor location fields straight through, and is_us assumed str|None then regex-searched a dict. Upstream actor schema drift \u2014 no contract on field types at the external-API boundary.",
+      "fix": "apify._loc_str normalizes location objects to strings (name/text/default/value keys) at both mapping sites; is_us treats any non-string as unknown and can never raise.",
+      "guard": "test_is_us_never_crashes_on_non_string_hints + test_normalize_enrichment_location_objects_become_strings"
     }
   ]
 }

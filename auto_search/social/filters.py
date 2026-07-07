@@ -85,10 +85,12 @@ def is_us(country: str | None, *location_hints: str | None) -> bool:
     location string. Unknown/empty → False (we'd rather skip than chase a non-US
     lead), so the caller drops anyone we can't confirm is in the US.
     """
-    if country and country.strip().lower() in _US_VALUES:
+    # Non-string values (the profile actor has returned location OBJECTS —
+    # 2026-07-07 prod crash) are treated as absent, never crashed on.
+    if isinstance(country, str) and country.strip().lower() in _US_VALUES:
         return True
     for hint in (country, *location_hints):
-        if hint and _US_LOCATION_RE.search(hint):
+        if isinstance(hint, str) and hint and _US_LOCATION_RE.search(hint):
             return True
     return False
 

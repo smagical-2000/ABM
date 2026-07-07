@@ -99,6 +99,19 @@ def parse_engagers(items: list[dict]) -> list[RawEngager]:
     return out
 
 
+def _loc_str(v: object) -> str | None:
+    """Location fields sometimes arrive as objects ({'name': 'United States', …})
+    instead of plain strings (actor schema drift, 2026-07-07 crash) — normalize
+    to a string or None so downstream filters always get text."""
+    if isinstance(v, str):
+        return v or None
+    if isinstance(v, dict):
+        for k in ("name", "text", "default", "value"):
+            if isinstance(v.get(k), str) and v[k]:
+                return v[k]
+    return None
+
+
 def normalize_enrichment(items: list[dict]) -> dict | None:
     """Pull the fields we need from a Fresh-LinkedIn-Profile-Data result.
 
@@ -121,8 +134,8 @@ def normalize_enrichment(items: list[dict]) -> dict | None:
         "industry": data.get("company_industry"),
         "employee_count": data.get("company_employee_count"),
         "linkedin_url": data.get("linkedin_url"),
-        "city": data.get("city"),
-        "country": data.get("country"),
+        "city": _loc_str(data.get("city")),
+        "country": _loc_str(data.get("country")),
     }
 
 
@@ -224,7 +237,7 @@ def normalize_profile(items: list[dict]) -> dict | None:
         "employee_count": None,
         "linkedin_url": p.get("linkedinUrl"),    # the RESOLVED public slug (not the ACoAAA id)
         "email": emails[0] if emails else None,
-        "city": p.get("location"),
+        "city": _loc_str(p.get("location")),
         "country": None,
     }
 

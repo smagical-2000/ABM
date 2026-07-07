@@ -37,6 +37,11 @@ def _run(script: str, *args: str) -> int:
 
 
 def main() -> int:
+    # Deploy verification: Railway "SUCCESS" is not proof this code is running —
+    # the stamp printed here must match the .build-stamp shipped with the deploy.
+    import os
+    print(f"[run_daily] rev {os.getenv('RAILWAY_GIT_COMMIT_SHA', '?')[:9]} "
+          f"build {os.getenv('BUILD_STAMP', '?')}", flush=True)
     discovery_rc = _run("run_discovery.py", "--days", "1", "--no-limit")
     social_rc = _run("run_social.py", "--since-hours", "24", "--max-enrich", "100")
     sfdc_rc = _run("run_engagement_sfdc.py", "--since", "2026-01-01")

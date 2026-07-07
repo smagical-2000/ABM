@@ -93,3 +93,22 @@ def test_explicit_decline_is_not_attending(text):
 ])
 def test_attendance_handles_curly_apostrophes(text):
     assert is_attending(text)[0] is True, text
+
+
+# ── is_us type-safety (2026-07-07 prod crash: actor returned location OBJECTS) ──
+
+def test_is_us_accepts_strings():
+    from auto_search.social.filters import is_us
+    assert is_us("United States") is True
+    assert is_us(None, "Phoenix, Arizona, United States") is True
+    assert is_us("Canada", "Toronto, Ontario") is False
+    assert is_us(None, None) is False
+
+
+def test_is_us_never_crashes_on_non_string_hints():
+    """The daily social poll died on a dict city — any non-string location
+    value must read as 'unknown', not raise."""
+    from auto_search.social.filters import is_us
+    assert is_us({"name": "United States"}) is False      # dict country → unknown
+    assert is_us(None, {"name": "New York"}) is False     # dict city → unknown
+    assert is_us(None, 42, ["US"], b"US") is False        # junk types → unknown

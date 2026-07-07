@@ -87,3 +87,19 @@ def test_normalize_profile_falls_back_to_experience_and_handles_empty():
     assert normalize_profile(items)["company"] == "Acme Health"
     assert normalize_profile([]) is None
     assert normalize_profile([{"firstName": "", "lastName": "", "currentPosition": []}]) is None
+
+
+def test_normalize_enrichment_location_objects_become_strings():
+    """Actor schema drift (2026-07-07): city/country arrived as objects and
+    crashed the US filter — the mapping must normalize them to strings."""
+    items = [{"data": {
+        "full_name": "Jane Doe", "company": "Acme Health",
+        "city": {"name": "Chicago"}, "country": {"name": "United States"}}}]
+    out = normalize_enrichment(items)
+    assert out["city"] == "Chicago"
+    assert out["country"] == "United States"
+
+    weird = [{"data": {"full_name": "Jane Doe", "company": "Acme Health",
+                       "city": {"code": 1}, "country": 7}}]
+    out2 = normalize_enrichment(weird)
+    assert out2["city"] is None and out2["country"] is None

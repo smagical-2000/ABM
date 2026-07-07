@@ -54,6 +54,7 @@ class ChangeEntry(BaseModel):
     why: str = ""                              # why it changed
     area: str = "other"                        # category (see AREAS)
     who: str = "engineering"                   # who made the change
+    audience: str = ""                         # who it affects (SDRs / AEs / Marketing…)
     status: str = "initiated"                  # initiated | completed | rolled_back
     summary: str = ""                          # short one-liner for the Slack message
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
@@ -82,33 +83,30 @@ def _short_date(iso: str) -> str:
 
 
 def build_change_card(entry: ChangeEntry) -> dict:
-    """Pure: a change entry -> a Slack Block Kit payload, written for a
-    NON-TECHNICAL reader using the ticket's exact field structure:
-    What changed / Why it changed / When it was implemented / Who made the
-    change / Status (In progress / Completed / Rolled back). No emoji."""
-    headline = _STATUS_HEADLINE.get(entry.status, entry.status)
-    header = f"{headline}: {entry.what}"[:150]
-    body = [f"*What changed:* {entry.what}"]
+    """Pure: a change entry -> a Slack Block Kit payload in the company's
+    Feature-Announcement style — What? / Why? / Who? / When? — written for a
+    non-technical reader. "Who?" is the AUDIENCE the change affects (their
+    convention), not the author; the author rides in the footer. No emoji."""
+    header = entry.what[:150]
+    when = {"completed": f"Live now ({_short_date(entry.created_at)})",
+            "initiated": f"In progress (started {_short_date(entry.created_at)})",
+            "rolled_back": f"Rolled back ({_short_date(entry.created_at)})",
+            }.get(entry.status, _short_date(entry.created_at))
+    sections = [f"*What?*\n{entry.what}"
+                + (f"\n{entry.summary}" if entry.summary else "")]
     if entry.why:
-        body.append(f"*Why it changed:* {entry.why}")
-    if entry.summary:
-        body.append(f"*In short:* {entry.summary}")
-    fields = [
-        f"*Status:* {_STATUS_LABEL.get(entry.status, entry.status)}",
-        f"*Area:* {_AREA_LABEL.get(entry.area, entry.area)}",
-        f"*Who made the change:* {entry.who}",
-        f"*When it was implemented:* {_short_date(entry.created_at)}",
-    ]
+        sections.append(f"*Why?*\n{entry.why}")
+    sections.append(f"*Who?*\n{entry.audience or 'GTM team (SDRs, AEs, Marketing)'}")
+    sections.append(f"*When?*\n{when}")
     return {
         "blocks": [
             {"type": "header", "text": {"type": "plain_text", "text": header}},
-            {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(body)}},
-            {"type": "section", "fields": [
-                {"type": "mrkdwn", "text": f} for f in fields]},
+            {"type": "section", "text": {"type": "mrkdwn", "text": "\n\n".join(sections)}},
             {"type": "context", "elements": [
                 {"type": "mrkdwn",
-                 "text": f"Change ref: {entry.change_id} — the started and completed "
-                         "messages for one change share this ref."}]},
+                 "text": f"{_AREA_LABEL.get(entry.area, entry.area)} · by {entry.who} · "
+                         f"ref {entry.change_id} (started/completed posts for one "
+                         "change share this ref)"}]},
         ]
     }
 

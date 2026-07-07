@@ -24,24 +24,26 @@ def test_entry_requires_what_and_known_status():
     assert e.status == "initiated" and e.change_id.startswith("chg_")
 
 
-def test_card_uses_ticket_structure_plain_language_no_emoji():
-    """The card must read for a NON-TECHNICAL teammate, with Galyna's exact
-    field structure and status wording."""
+def test_card_uses_company_announcement_format():
+    """What? / Why? / Who? / When? — the company Feature-Announcement style.
+    'Who?' is the AUDIENCE, not the author (author rides in the footer)."""
     e = changelog.ChangeEntry(
-        what="LinkedIn TOFU cadence 6h -> 15min (selling hours)",
-        why="Likes must reach Slack fast; hours gate keeps Apify cost ~$2.7/day",
-        area="cadence_scheduling", who="Sunny", status="completed",
-        summary="15-min scans weekdays 9-7 ET; revert = one env flag")
+        what="LinkedIn checks now every 15 minutes in selling hours",
+        why="Likes must reach Slack fast; the hours gate keeps cost ~$2.7/day",
+        area="cadence_scheduling", who="Sunny", audience="SDRs and AEs",
+        status="completed", summary="A like is picked up within 15 minutes")
     card = json.dumps(changelog.build_change_card(e))
-    for needle in ("Change completed", "What changed:", "Why it changed:",
-                   "Who made the change:", "When it was implemented:",
-                   "Status:* Completed", "Cadence or scheduling", e.change_id):
+    for needle in ("*What?*", "*Why?*", "*Who?*", "*When?*",
+                   "SDRs and AEs", "Live now", "Cadence or scheduling",
+                   "by Sunny", e.change_id):
         assert needle in card
     assert "automation_logic" not in card and "cadence_scheduling" not in card
     assert not any(0x1F300 <= ord(ch) <= 0x1FAFF for ch in card)   # no emoji
     started = json.dumps(changelog.build_change_card(
         changelog.ChangeEntry(what="x", status="initiated")))
-    assert "Change started" in started and "In progress" in started
+    assert "In progress" in started
+    default_aud = json.dumps(changelog.build_change_card(changelog.ChangeEntry(what="x")))
+    assert "GTM team" in default_aud                     # audience never blank
 
 
 def test_poster_without_webhook_is_safe(monkeypatch):

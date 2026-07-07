@@ -1343,7 +1343,8 @@ def create_app() -> FastAPI:
         try:
             entry = changelog_mod.ChangeEntry(**{
                 k: v for k, v in body.items()
-                if k in ("change_id", "what", "why", "area", "who", "status", "summary")
+                if k in ("change_id", "what", "why", "area", "who", "audience",
+                         "status", "summary")
                 and v is not None})
         except Exception as e:  # noqa: BLE001 — pydantic validation → 422
             raise HTTPException(status_code=422, detail=str(e)) from None

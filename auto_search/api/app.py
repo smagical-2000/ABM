@@ -1093,6 +1093,11 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="account not found")
         body = await _json_body(request)
         is_test = bool(body.get("test"))
+        # STAGING GATE: while notify_stage=test, even MANUAL activations are
+        # test posts (private channel, [TEST], no claim, no paid enrichment) —
+        # "strictly test channels" means no button can reach the main channel.
+        if (repo.get_setting("notify_stage") or "live").strip().lower() == "test":
+            is_test = True
         force = bool(body.get("force"))
         # Send cutoff (Galyna, 2026-06-25): we capture ALL history but only hand off
         # activity dated on/after the cutoff, so the team is never sent the already-

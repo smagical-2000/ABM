@@ -97,6 +97,11 @@ def main() -> int:
                     help="bypass the min-interval cost throttle (manual immediate run)")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    # Deploy-verification stamp: every tick prints the code revision it runs, so
+    # "is the fix actually live?" is answered by the logs, never by deploy status.
+    # (A stale Docker layer cache once served old code under a SUCCESS deploy.)
+    print(f"[run_linkedin_tofu] rev {os.getenv('RAILWAY_GIT_COMMIT_SHA', 'unknown')[:9]} "
+          f"build {os.getenv('BUILD_STAMP', 'unset')}", flush=True)
 
     # The kill switch: a live run does nothing until the env flag is explicitly on.
     if not args.dry_run and os.getenv("LINKEDIN_TOFU_CRON_ENABLED") != "1":

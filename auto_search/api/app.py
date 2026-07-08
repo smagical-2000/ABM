@@ -2685,12 +2685,57 @@ def create_app() -> FastAPI:
         return {"scheduled": len(todo), "enrich_green_yellow": green_yellow,
                 "estimated_usd": est}
 
+    async def _classify_generic_rows(result):
+        """Generic accounts list: assign each row a segment via the same
+        high-confidence-only Claude classifier the engagement board uses
+        (name+domain -> health_system/specialty/payer). Rows that can't be
+        confidently bucketed are DROPPED and returned by name — a mixed list
+        must never be scored on a guessed rubric. No-op for Definitive schemas
+        (their segment comes from the export type)."""
+        if result.schema_key != csv_imports.GENERIC_KEY:
+            return result, []
+        from auto_search.engagement.classify import classify_account
+        from auto_search.scoring.frameworks import framework_for_segment
+        sem = asyncio.Semaphore(8)
+
+        async def one(a):
+            async with sem:
+                return a, await classify_account(a.name, a.domain)
+
+        pairs = await asyncio.gather(*(one(a) for a in result.accounts))
+        kept, dropped = [], []
+        for a, c in pairs:
+            seg = c.get("framework")
+            if c.get("confidence") == "high" and seg in ("health_system", "specialty", "payer"):
+                a.segment = seg
+                a.framework = framework_for_segment(seg).key
+                kept.append(a)
+            else:
+                dropped.append(a.name)
+        result.accounts = kept
+        result.skipped += len(dropped)
+        return result, dropped
+
+    def _segment_counts(result) -> dict:
+        counts: dict[str, int] = {}
+        for a in result.accounts:
+            counts[a.segment] = counts.get(a.segment, 0) + 1
+        return counts
+
     @app.post("/api/scoring/import/preview")
     async def import_preview(request: Request):
         """Parse a CSV (raw request body) and report the schema + column mapping
-        + dedupe, without persisting — the wizard's review step."""
+        + dedupe, without persisting — the wizard's review step. Generic lists
+        also get their per-row classification here so the wizard can show the
+        segment breakdown and what was left out BEFORE committing."""
         result = _parse_upload(await request.body())
-        return _preview_payload(app, result)
+        result, dropped = await _classify_generic_rows(result)
+        payload = _preview_payload(app, result)
+        if result.schema_key == csv_imports.GENERIC_KEY:
+            payload["segments"] = _segment_counts(result)
+            payload["unclassified"] = dropped[:15]
+            payload["unclassified_count"] = len(dropped)
+        return payload
 
     @app.post("/api/scoring/import")
     async def import_commit(request: Request):
@@ -2703,6 +2748,7 @@ def create_app() -> FastAPI:
         (it leaves the Discovery panel) instead of creating a signal-less twin.
         Each batch is tagged with a label so it can be filtered + exported later."""
         result = _parse_upload(await request.body())
+        result, dropped = await _classify_generic_rows(result)
         label = _import_label(request.headers.get("x-import-filename"))
         svc_ = svc(app)
         scoring = app.state.scoring
@@ -2725,6 +2771,8 @@ def create_app() -> FastAPI:
             "queued": len(csv_rows) + len(moved),
             "moved_from_discovery": len(moved),
             "skipped_known": skipped,
+            "unclassified_count": len(dropped),
+            "unclassified": dropped[:15],
             "import_label": label,
             "accounts": csv_rows + moved,
         }

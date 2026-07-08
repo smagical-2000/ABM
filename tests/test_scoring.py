@@ -244,6 +244,16 @@ _PG_CSV = (
     "Anesthesiology,TX\n"
 )
 
+_GENERIC_CSV = (
+    "Account Name,Opportunity Name,Website Domain,Website\n"
+    "Endeavor Health,Endeavor Health,endeavorhealth.org,https://endeavorhealth.org\n"
+    "Humana,Humana - Enterprise,humana.com,https://www.humana.com/\n"
+    "Iowa Ortho,Iowa Ortho - NB,,www.iowaortho.com\n"      # blank primary -> Website fallback
+    "Waud Capital Partners,Waud Capital,,\n"               # no domain anywhere -> kept
+    "Endeavor Health,dup row,endeavorhealth.org,x\n"       # duplicate name -> skipped
+    ",no name,x.com,\n"                                    # no name -> skipped
+)
+
 
 class TestImports:
     def test_detect_and_parse_health_systems(self):
@@ -273,6 +283,30 @@ class TestImports:
         mapped_cols = {m.col for m in res.mapping}
         assert "Hospital Name" in mapped_cols and "Net Patient Revenue" in mapped_cols
         assert "Firm Type" in res.unmatched_columns
+
+    def test_generic_accounts_list_detected_and_parsed(self):
+        res = imports.parse_csv(_GENERIC_CSV)
+        assert res.schema_key == imports.GENERIC_KEY and res.segment == "mixed"
+        assert [a.name for a in res.accounts] == [
+            "Endeavor Health", "Humana", "Iowa Ortho", "Waud Capital Partners"]
+        assert res.skipped == 2                       # dup + no-name rows
+        by = {a.name: a for a in res.accounts}
+        assert by["Endeavor Health"].domain == "endeavorhealth.org"
+        assert by["Iowa Ortho"].domain == "iowaortho.com"     # Website fallback
+        assert by["Waud Capital Partners"].domain is None      # kept, name-only
+        # segment/framework are deliberately blank — the endpoint classifier
+        # assigns them per row (a mixed list has no single segment)
+        assert all(a.segment == "" and a.framework == "" for a in res.accounts)
+        assert "Opportunity Name" in res.unmatched_columns
+
+    def test_generic_never_shadows_definitive(self):
+        # a DHC export that ALSO has an Account Name column still parses as DHC
+        csv_text = _PG_CSV.replace(
+            "Physician Group Name,Website,", "Physician Group Name,Account Name,Website,",
+        ).replace(
+            "Gulf Coast Anesthesia,https", "Gulf Coast Anesthesia,GCA,https")
+        res = imports.parse_csv(csv_text)
+        assert res.schema_key == "physician_groups"
 
 
 # ── service (engine + QA monkeypatched) ───────────────────────────────

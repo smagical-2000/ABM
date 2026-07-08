@@ -78,7 +78,12 @@ function ImportModal({ onClose, onImported, pushToast }) {
     ingest(e.dataTransfer.files && e.dataTransfer.files[0]);
   };
   const segLabel = preview && window.SEGMENT_META[preview.segment]
-    ? window.SEGMENT_META[preview.segment].label : preview && preview.segment;
+    ? window.SEGMENT_META[preview.segment].label
+    : preview && preview.segment === 'mixed' && preview.segments
+      ? Object.entries(preview.segments)
+          .map(([k, n]) => `${n} ${(window.SEGMENT_META[k] || { label: k }).label}`)
+          .join(' · ') || 'mixed'
+      : preview && preview.segment;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -108,7 +113,7 @@ function ImportModal({ onClose, onImported, pushToast }) {
           {/* STEP 1 — choose */}
           {step === 1 && (
             <div>
-              <p className="text-[13px] text-zinc-500">Drop a Definitive Healthcare export (Health Systems or Physician Groups). We auto-detect the schema and map the columns that pre-fill the rubric.</p>
+              <p className="text-[13px] text-zinc-500">Drop a Definitive Healthcare export (Health Systems or Physician Groups) or any accounts list with name and domain columns. We auto-detect the schema; plain lists get each account classified into its segment automatically.</p>
               <input ref={inputRef} type="file" accept=".csv,text/csv" className="hidden"
                 onChange={(e) => ingest(e.target.files && e.target.files[0])} />
               <div
@@ -129,8 +134,14 @@ function ImportModal({ onClose, onImported, pushToast }) {
             <div>
               <div className="flex items-center gap-2.5 rounded-lg bg-emerald-50/70 px-3 py-2.5 ring-1 ring-inset ring-emerald-100">
                 <Icons.check className="h-4 w-4 shrink-0 text-emerald-500" />
-                <span className="text-[12.5px] text-emerald-800"><span className="font-medium">{preview.schema_label}</span> detected · {preview.rows_total} rows · segment <span className="font-medium">{segLabel}</span></span>
+                <span className="text-[12.5px] text-emerald-800"><span className="font-medium">{preview.schema_label}</span> detected · {preview.rows_total} rows · {preview.segment === 'mixed' ? <span className="font-medium">{segLabel}</span> : <>segment <span className="font-medium">{segLabel}</span></>}</span>
               </div>
+              {preview.unclassified_count > 0 && (
+                <div className="mt-2 flex items-start gap-2 rounded-lg bg-amber-50/70 px-3 py-2.5 text-[12.5px] text-amber-800 ring-1 ring-inset ring-amber-100">
+                  <Icons.alert className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+                  <span><span className="font-medium">{preview.unclassified_count} left out</span> — not confidently a health system, specialty group, or payer, so they won't be imported or scored: {preview.unclassified.join(', ')}{preview.unclassified_count > preview.unclassified.length ? '…' : ''}. Add any of them individually with the AE lookup if needed.</span>
+                </div>
+              )}
               <div className="mt-4 max-h-[260px] overflow-y-auto rounded-xl border border-zinc-200">
                 <table className="w-full text-[12.5px]">
                   <thead className="sticky top-0 bg-zinc-50/95 text-[11px] uppercase tracking-wide text-zinc-400">
@@ -215,6 +226,6 @@ function ImportModal({ onClose, onImported, pushToast }) {
 window.ImportModal = ImportModal;
 
 function humanize(msg) {
-  if (/400/.test(msg)) return 'Unrecognized CSV. Use a Definitive Healthcare Health Systems or Physician Groups export.';
+  if (/400/.test(msg)) return 'Unrecognized CSV. Use a Definitive Healthcare export (Health Systems or Physician Groups), or any accounts list with a name column and a domain column.';
   return `Import failed: ${msg}`;
 }

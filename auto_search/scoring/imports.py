@@ -7,6 +7,13 @@ the import wizard can show it before committing.
 
 Schema is matched by header name with fallbacks, so a slightly different export
 still imports; unmatched columns are simply not carried.
+
+A third shape is accepted when neither Definitive schema matches: a GENERIC
+accounts list (e.g. an SFDC or analysis export) with just a name column and a
+domain column (2026-07-08, for the SAO-analysis cohort). Generic rows carry NO
+segment — the import endpoint classifies each row (name+domain -> health
+system / specialty / payer, high confidence only) and drops the rest, so a
+mixed list is never scored on a guessed rubric.
 """
 
 from __future__ import annotations
@@ -103,16 +110,83 @@ def detect_schema(headers: list[str]) -> Schema | None:
     return None
 
 
+# ── generic accounts list ─────────────────────────────────────────────
+# Checked only AFTER the Definitive schemas fail, so a DHC export can never be
+# mistaken for it. First matching name/domain header wins.
+GENERIC_KEY = "generic_accounts"
+GENERIC_LABEL = "Accounts list (name + domain)"
+GENERIC_SEGMENT = "mixed"                     # per-row segments come from the classifier
+_GENERIC_NAME_COLS = ("Account Name", "Company Name", "Account", "Company", "Name")
+_GENERIC_DOMAIN_COLS = ("Website Domain", "Company Domain", "Domain", "Website", "URL")
+
+
+def detect_generic(headers: list[str]) -> tuple[str, str] | None:
+    """(name_col, domain_col) when the file is a plain accounts list, else None."""
+    hset = {h.strip() for h in headers}
+    name_col = next((c for c in _GENERIC_NAME_COLS if c in hset), None)
+    domain_col = next((c for c in _GENERIC_DOMAIN_COLS if c in hset), None)
+    return (name_col, domain_col) if name_col and domain_col else None
+
+
+def _parse_generic(reader: csv.DictReader, headers: list[str],
+                   name_col: str, domain_col: str) -> ImportResult:
+    """Plain name+domain rows -> segment-less accounts (the endpoint classifies).
+    When the chosen domain cell is blank, any other recognized domain-ish column
+    is tried, so 'Website Domain' empty + 'Website' filled still yields a domain.
+    Rows with a name but NO domain are kept — the classifier and scorer both
+    work from the name alone (same as an AE lookup)."""
+    fallbacks = [c for c in _GENERIC_DOMAIN_COLS if c != domain_col and c in headers]
+    accounts: list[Account] = []
+    seen_ids: set[str] = set()
+    skipped = 0
+    for raw in reader:
+        row = {(k or "").strip(): (v or "").strip() for k, v in raw.items()}
+        name = row.get(name_col, "")
+        if not name:
+            skipped += 1
+            continue
+        account_id = "csv_" + slugify(name)
+        if account_id in seen_ids:
+            skipped += 1
+            continue
+        seen_ids.add(account_id)
+        domain = clean_domain(_strip_url(row.get(domain_col, "")))
+        for alt in fallbacks:
+            if domain:
+                break
+            domain = clean_domain(_strip_url(row.get(alt, "")))
+        accounts.append(Account(
+            account_id=account_id, name=name,
+            segment="", framework="",           # assigned per row by the classifier
+            source="csv", domain=domain, firmographics={},
+        ))
+    mapping = [MappedColumn(col=name_col, fact=None),
+               MappedColumn(col=domain_col, fact="Domain")]
+    unmatched = [h for h in headers if h not in (name_col, domain_col)]
+    logger.info("csv import: generic accounts list, %d accounts (%d skipped)",
+                len(accounts), skipped)
+    return ImportResult(
+        schema_key=GENERIC_KEY, schema_label=GENERIC_LABEL, segment=GENERIC_SEGMENT,
+        accounts=accounts, mapping=mapping, rows_total=len(accounts) + skipped,
+        skipped=skipped, unmatched_columns=unmatched,
+    )
+
+
 def parse_csv(text: str) -> ImportResult:
     """Parse a Definitive export into scoreable accounts + a mapping summary."""
     reader = csv.DictReader(io.StringIO(text))
     headers = [h.strip() for h in (reader.fieldnames or [])]
     schema = detect_schema(headers)
     if schema is None:
-        raise ImportError_(
-            "Unrecognized CSV. Expected a Definitive Healthcare Health Systems "
-            "or Physician Groups export."
-        )
+        generic = detect_generic(headers)
+        if generic is None:
+            raise ImportError_(
+                "Unrecognized CSV. Expected a Definitive Healthcare Health Systems "
+                "or Physician Groups export, or a plain accounts list with a name "
+                "column (e.g. 'Account Name') and a domain column (e.g. 'Website "
+                "Domain')."
+            )
+        return _parse_generic(reader, headers, *generic)
 
     framework = framework_for_segment(schema.segment).key
     fact_label = dict(schema.fact_cols)

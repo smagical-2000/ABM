@@ -247,8 +247,10 @@ function AccountRow({ a, onOpen, onActivate, showReason }){
   );
 }
 
-function AccountsView({ accounts, onOpen, onActivate, segFilter }){
-  const vis=accounts.filter(a=>segFilter==='all'||a.segment===segFilter).sort((a,b)=>b.score-a.score);
+function AccountsView({ accounts, onOpen, onActivate, segFilter, searchQ }){
+  const vis=accounts
+    .filter(a=>(segFilter==='all'||a.segment===segFilter)&&window.matchesQuery(searchQ,a.name,a.domain))
+    .sort((a,b)=>b.score-a.score);
   return (
     <>
       <div style={{display:'grid',gridTemplateColumns:COLS,gap:20,padding:'8px 28px',borderBottom:'1px solid #f4f4f5',background:'#fafafa'}}>
@@ -256,7 +258,9 @@ function AccountsView({ accounts, onOpen, onActivate, segFilter }){
         <div style={TX.label}>Momentum · last 8 weeks</div><div style={TX.label}>Status</div><div/>
       </div>
       {vis.length===0
-        ? <div style={{padding:'40px 28px',textAlign:'center',...TX.meta}}>No accounts in this segment.</div>
+        ? <div style={{padding:'40px 28px',textAlign:'center',...TX.meta}}>
+            {searchQ?`No results found for "${searchQ}".`:'No accounts in this segment.'}
+          </div>
         : vis.map(a=><AccountRow key={a.id} a={a} onOpen={onOpen} onActivate={onActivate}/>)}
     </>
   );
@@ -265,10 +269,11 @@ function AccountsView({ accounts, onOpen, onActivate, segFilter }){
 // Activity = the worklist: only accounts that actually moved recently (a meaningful
 // touch, not a click — filtered server-side via `recent`), newest first, tier-jumps up
 // top. The short list a rep works from, vs Accounts (everything, by lifetime heat).
-function ActivityView({ accounts, onOpen, onActivate, segFilter }){
+function ActivityView({ accounts, onOpen, onActivate, segFilter, searchQ }){
   const up=a=>tierOf(a.score)!==tierOf(a.score-a.deltaWeek)?1:0;
   const vis=accounts
-    .filter(a=>(segFilter==='all'||a.segment===segFilter)&&a.recent)
+    .filter(a=>(segFilter==='all'||a.segment===segFilter)&&a.recent
+      &&window.matchesQuery(searchQ,a.name,a.domain))
     .sort((a,b)=> up(b)-up(a) || (b.recent.at||'').localeCompare(a.recent.at||'') || b.deltaWeek-a.deltaWeek);
   return (
     <>
@@ -277,7 +282,9 @@ function ActivityView({ accounts, onOpen, onActivate, segFilter }){
         <div style={TX.label}>Momentum · last 8 weeks</div><div style={TX.label}>What changed</div><div/>
       </div>
       {vis.length===0
-        ? <div style={{padding:'40px 28px',textAlign:'center',...TX.meta}}>Nothing has moved here lately — check Accounts for the full list.</div>
+        ? <div style={{padding:'40px 28px',textAlign:'center',...TX.meta}}>
+            {searchQ?`No results found for "${searchQ}" — try Accounts for the full list.`:'Nothing has moved here lately — check Accounts for the full list.'}
+          </div>
         : vis.map(a=><AccountRow key={a.id} a={a} onOpen={onOpen} onActivate={onActivate} showReason/>)}
     </>
   );
@@ -544,6 +551,7 @@ function EngagementView({ pushToast }){
   const [detail,setDetail]=useState(null);
   const [activating,setActivating]=useState(null);
   const [segFilter,setSegFilter]=useState('all');
+  const [searchQ,setSearchQ]=useState('');   // MAR2-11 find-an-account filter
   const [syncing,setSyncing]=useState(false);
   const [running,setRunning]=useState(false);   // server-side: a sync is in progress
   const [live,setLive]=useState(null);          // server-side: live routing on/off (null=loading)
@@ -830,16 +838,25 @@ function EngagementView({ pushToast }){
             <Tab id="activity" label="Activity" count={stats.active}/>
             <Tab id="accounts" label="Accounts" count={stats.accounts}/>
             {(tab==='accounts'||tab==='activity')&&(
-              <label style={{display:'inline-flex',alignItems:'center',gap:5,marginLeft:'auto',fontSize:12,color:'#a1a1aa'}}>Segment
-                <select value={segFilter} onChange={e=>setSegFilter(e.target.value)} style={{appearance:'none',borderRadius:6,border:'1px solid #e4e4e7',background:'#fff',padding:'4px 24px 4px 8px',fontFamily:'var(--font-sans)',fontSize:12,fontWeight:500,color:'#3f3f46'}}>
-                  <option value="all">All</option><option value="health_system">Health System</option><option value="specialty">Specialty</option><option value="payer">Payer</option>
-                </select>
-              </label>
+              <div style={{display:'inline-flex',alignItems:'center',gap:14,marginLeft:'auto',alignSelf:'center'}}>
+                {/* MAR2-11: filter-as-you-type over the accounts below (name or domain) */}
+                <div style={{position:'relative',display:'inline-flex',alignItems:'center'}}>
+                  <input value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="Search name or domain…" aria-label="Search accounts"
+                    style={{borderRadius:6,border:'1px solid #e4e4e7',background:'#fff',padding:'4px 22px 4px 9px',fontFamily:'var(--font-sans)',fontSize:12,color:'#3f3f46',width:190,outline:'none'}}/>
+                  {searchQ&&<button onClick={()=>setSearchQ('')} title="Clear search"
+                    style={{position:'absolute',right:3,background:'none',border:'none',cursor:'pointer',color:'#a1a1aa',fontSize:14,lineHeight:1,padding:'2px 4px'}}>×</button>}
+                </div>
+                <label style={{display:'inline-flex',alignItems:'center',gap:5,fontSize:12,color:'#a1a1aa'}}>Segment
+                  <select value={segFilter} onChange={e=>setSegFilter(e.target.value)} style={{appearance:'none',borderRadius:6,border:'1px solid #e4e4e7',background:'#fff',padding:'4px 24px 4px 8px',fontFamily:'var(--font-sans)',fontSize:12,fontWeight:500,color:'#3f3f46'}}>
+                    <option value="all">All</option><option value="health_system">Health System</option><option value="specialty">Specialty</option><option value="payer">Payer</option>
+                  </select>
+                </label>
+              </div>
             )}
           </div>
           {tab==='accounts'
-            ? <AccountsView accounts={accounts} onOpen={openAccount} onActivate={setActivating} segFilter={segFilter}/>
-            : <ActivityView accounts={accounts} onOpen={openAccount} onActivate={setActivating} segFilter={segFilter}/>}
+            ? <AccountsView accounts={accounts} onOpen={openAccount} onActivate={setActivating} segFilter={segFilter} searchQ={searchQ}/>
+            : <ActivityView accounts={accounts} onOpen={openAccount} onActivate={setActivating} segFilter={segFilter} searchQ={searchQ}/>}
         </div>
         </>}
       </main>

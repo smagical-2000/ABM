@@ -506,6 +506,7 @@ function App() {
   const [segment, setSegment] = useState('all');
   const [signalType, setSignalType] = useState('all');
   const [abmFilter, setAbmFilter] = useState('all');       // 'all' | 'match' | 'confirmed'
+  const [searchQ, setSearchQ] = useState('');              // MAR2-11 find-an-account filter
   const [socialOpen, setSocialOpen] = useState(false);     // Monitored Accounts modal
   const [abmInfo, setAbmInfo] = useState(null);            // { total, uploaded_at, indexed }
   const [parked, setParked] = useState(null);             // jobs stacking watch list
@@ -783,8 +784,11 @@ function App() {
     if (signalType !== 'all' && !c.signals.some((s) => s.signal_type === signalType)) return false;
     if (abmFilter === 'match' && !c.abm_match) return false;
     if (abmFilter === 'confirmed' && !(c.abm_match && c.abm_match.tier === 'confirmed')) return false;
+    // Search narrows WITHIN the active filters (never replaces them), so the
+    // existing dropdowns + intent sort keep working alongside it (MAR2-11).
+    if (!window.matchesQuery(searchQ, c.name, c.domain)) return false;
     return true;
-  }), [companies, tab, segment, signalType, abmFilter]);
+  }), [companies, tab, segment, signalType, abmFilter, searchQ]);
 
   const openCompany = companies.find((c) => c.company_key === openKey) || null;
   const visibleRows = filtered.filter((c) => !leaving[c.company_key]);
@@ -913,6 +917,7 @@ function App() {
 
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-100 px-6 py-3.5">
               <div className="flex flex-wrap items-center gap-4">
+                <window.SearchInput value={searchQ} onChange={setSearchQ} />
                 <Dropdown label="Segment" value={segment} onChange={setSegment}
                   options={[{ value: 'all', label: 'All' }, { value: 'health_system', label: 'Health System' }, { value: 'specialty', label: 'Specialty' }, { value: 'payer', label: 'Payer' }]} />
                 <Dropdown label="Signal" value={signalType} onChange={setSignalType}
@@ -978,7 +983,9 @@ function App() {
             {loading ? (
               <div className="animate-pulse">{Array.from({ length: 4 }).map((_, i) => <SkeletonRow key={i} />)}</div>
             ) : visibleCount === 0 ? (
-              <EmptyState variant={tab} onRun={() => pushToast('Discovery runs on a schedule', 'muted')} />
+              searchQ
+                ? <window.NoResults query={searchQ} onClear={() => setSearchQ('')} />
+                : <EmptyState variant={tab} onRun={() => pushToast('Discovery runs on a schedule', 'muted')} />
             ) : (
               filtered.map((c, i) => {
                 // The auto-score line: drawn once, before the first Watch lead that
@@ -1123,6 +1130,7 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
   const [sourceF, setSourceF] = useState('all');
   const [dateF, setDateF] = useState('all');
   const [importF, setImportF] = useState('all');
+  const [searchQ, setSearchQ] = useState('');   // MAR2-11 find-an-account filter (≠ the AE lookup)
   const [imports, setImports] = useState([]);
   const [confirmReset, setConfirmReset] = useState(false);
   const [confirmIntros, setConfirmIntros] = useState(false);
@@ -1270,6 +1278,9 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
       if (importF !== 'all' && a.import_label !== importF) return false;
       if (fitF !== 'all') { if (a.state !== 'scored' || bandOf(a) !== fitF) return false; }
       if (dateF !== 'all') { if (a.state !== 'scored' || !withinDate(a.scored_at, dateF)) return false; }
+      // Search narrows WITHIN the active filters; the fit sort below still
+      // applies to whatever survives, per MAR2-11.
+      if (!window.matchesQuery(searchQ, a.name, a.domain)) return false;
       return true;
     });
     const order = { scoring: 0, queued: 1, scored: 2, error: 3 };
@@ -1279,7 +1290,7 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
       const rb = b.total != null ? b.total / b.max_total : 0;
       return rb - ra;
     });
-  }, [accounts, segF, fitF, sourceF, dateF, importF]);
+  }, [accounts, segF, fitF, sourceF, dateF, importF, searchQ]);
 
   function toggleSelect(id) {
     setSelected((prev) => {
@@ -1400,6 +1411,7 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
         <div className="mt-6 overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm shadow-zinc-900/[0.02]">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-100 px-6 py-3.5">
             <div className="flex flex-wrap items-center gap-4">
+              <window.SearchInput value={searchQ} onChange={setSearchQ} />
               <Dropdown label="Segment" value={segF} onChange={setSegF}
                 options={[{ value: 'all', label: 'All' }, { value: 'health_system', label: 'Health System' }, { value: 'specialty', label: 'Specialty' }, { value: 'payer', label: 'Payer' }]} />
               <Dropdown label="Fit" value={fitF} onChange={setFitF}
@@ -1433,6 +1445,9 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
           {loading ? (
             <div className="animate-pulse">{Array.from({ length: 5 }).map((_, i) => <ScoredSkeletonRow key={i} />)}</div>
           ) : visible === 0 ? (
+            accounts.length > 0 ? (
+              <window.NoResults query={searchQ} onClear={() => setSearchQ('')} />
+            ) : (
             <div className="flex flex-col items-center justify-center py-24 text-center">
               <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-zinc-100 text-zinc-400"><Icons.layers className="h-7 w-7" /></div>
               <h3 className="mt-5 text-[15px] font-semibold text-zinc-900">No scored accounts yet</h3>
@@ -1441,6 +1456,7 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
                 <Icons.upload className="h-4 w-4" />Import accounts
               </button>
             </div>
+            )
           ) : (
             scoredList.map((a) => (
               <ScoredRow key={a.account_id} account={a} batchRunning={batchRunning}

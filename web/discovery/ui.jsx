@@ -286,3 +286,51 @@ function ToastStack({ toasts }) {
   );
 }
 window.ToastStack = ToastStack;
+
+// ── Account search (MAR2-11) ──────────────────────────────────────────────────
+// Filter-as-you-type over accounts ALREADY on screen — deliberately distinct
+// from the Scored tab's AE lookup bar (which finds NEW accounts on the web).
+// PURE matcher: case-insensitive substring over name + domain.
+function matchesQuery(q, ...fields) {
+  const needle = (q || '').trim().toLowerCase();
+  if (!needle) return true;
+  return fields.some((f) => (f || '').toLowerCase().includes(needle));
+}
+window.matchesQuery = matchesQuery;
+
+function SearchInput({ value, onChange, placeholder = 'Search name or domain…' }) {
+  return (
+    <div className="relative w-52">
+      <Icons.search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
+      <input type="text" value={value} onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder} aria-label="Search accounts"
+        className="w-full rounded-lg border border-zinc-200 bg-white py-1.5 pl-8 pr-7 text-[13px] text-zinc-700 outline-none transition-colors placeholder:text-zinc-400 focus:border-indigo-300 focus:ring-2 focus:ring-indigo-100" />
+      {value && (
+        <button onClick={() => onChange('')} title="Clear search"
+          className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-600">
+          <Icons.x className="h-3.5 w-3.5" />
+        </button>
+      )}
+    </div>
+  );
+}
+window.SearchInput = SearchInput;
+
+function NoResults({ query, onClear }) {
+  return (
+    <div className="flex flex-col items-center justify-center py-16 text-center">
+      <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-zinc-100 text-zinc-400"><Icons.search className="h-6 w-6" /></div>
+      <h3 className="mt-4 text-[15px] font-semibold text-zinc-900">No results found</h3>
+      <p className="mt-1 max-w-xs text-[13px] text-zinc-500">
+        {query ? <>Nothing matches “{query}”. Try a different account name or domain.</> : 'No accounts match the current filters.'}
+      </p>
+      {query && onClear && (
+        <button onClick={onClear}
+          className="mt-4 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[13px] font-medium text-zinc-600 transition-colors hover:bg-zinc-50">
+          Clear search
+        </button>
+      )}
+    </div>
+  );
+}
+window.NoResults = NoResults;

@@ -1069,11 +1069,28 @@ function fmtSignals(signals) {
     .map((s) => (s.summary ? `${s.signal_type}: ${s.summary}` : s.signal_type))
     .join('; ');
 }
+// The RESEARCHED intent evidence: the scorer's intent-dimension summary (dated,
+// named facts — or an explicit "nothing public found across …" diligence line).
+// Real research output only; blank when a row has none. Never synthesized here.
+function intentEvidence(a) {
+  const d = (a.dimensions || []).find(
+    (x) => /intent/i.test(x.key || '') || /intent/i.test(x.label || ''));
+  return (d && d.summary) || '';
+}
+// Deep-research signals (only for accounts whose dossier has been generated):
+// "headline (strength/10): detail" per signal, straight from the dossier.
+function dossierSignals(a) {
+  const sigs = (a.dossier && a.dossier.intent_signals) || [];
+  return sigs
+    .map((s) => `${s.signal}${s.score != null ? ` (${s.score}/10)` : ''}: ${s.detail || ''}`)
+    .join('; ');
+}
 function buildAccountsCsv(accounts) {
   const head = ['Account', 'Domain', 'Segment', 'Sub-segment', 'Source', 'Import',
     'Fit', 'Analyst Total', 'Official Total', 'Max', 'Firmographic', 'Technographic',
     'Business Intent', 'Recommendation', 'QA Status', 'QA Notes', 'Scored',
-    'Cost (USD)', 'Key facts', 'Signals'];
+    'Cost (USD)', 'Key facts', 'Signals', 'Intent evidence (researched)',
+    'Deep research signals'];
   const lines = accounts.map((a) => {
     const tier = a.tier || window.tierFor(a.framework, a.total);
     const pillars = window.pillarsFor(a);
@@ -1091,6 +1108,8 @@ function buildAccountsCsv(accounts) {
       a.scored_at ? window.shortDate(a.scored_at) : '',
       a.cost_usd != null ? a.cost_usd : '', facts,
       fmtSignals(a.discovery_signals),
+      intentEvidence(a),
+      dossierSignals(a),
     ].map(csvCell).join(',');
   });
   return [head.join(','), ...lines].join('\n');

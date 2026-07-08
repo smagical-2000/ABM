@@ -28,10 +28,12 @@ import asyncio
 import os
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 load_dotenv(override=True)
 
 _META = "https://api.airtable.com/v0/meta/bases"
@@ -67,7 +69,8 @@ def ensure_mirror_table(primary_base: str, primary_table: str,
                    if t["name"] == primary_table or t["id"] == primary_table)
         mirr = c.get(f"{_META}/{mirror_base}/tables", headers=_hdr())
         mirr.raise_for_status()
-        existing = next((t for t in mirr.json()["tables"] if t["name"] == mirror_name), None)
+        existing = next((t for t in mirr.json()["tables"]
+                         if t["name"] == mirror_name or t["id"] == mirror_name), None)
         if existing:
             print(f"[mirror] table exists: {existing['name']} ({existing['id']})")
             return existing["id"]
@@ -99,13 +102,13 @@ async def backfill(mirror_table_id: str | None, *, apply: bool) -> None:
         keyed = sum(1 for r in rows
                     if (r["fields"].get("Email") or r["fields"].get("LinkedIn URL")))
         print(f"[mirror] would backfill {keyed} keyed rows "
-              f"({len(rows) - keyed} unkeyed would be created as-is). Dry-run.")
+              f"({len(rows) - keyed} unkeyed would be SKIPPED). Dry-run.")
         return
     mirror = AirtableClient(base_id=os.environ["AIRTABLE_TOFU_MIRROR_BASE_ID"],
                             table=mirror_table_id
                             or os.getenv("AIRTABLE_TOFU_MIRROR_TABLE", "TOFU Leads by ABM"))
     now = datetime.now(UTC).isoformat()
-    ok = failed = 0
+    ok = failed = unkeyed = 0
     for r in rows:
         fields = {k: v for k, v in r["fields"].items() if v not in (None, "")}
         fields.pop("ABM Match", None)          # unused field, not part of the mirror
@@ -116,12 +119,16 @@ async def backfill(mirror_table_id: str | None, *, apply: bool) -> None:
             elif fields.get("LinkedIn URL"):
                 await mirror.upsert(fields, merge_on=["LinkedIn URL"])
             else:
-                await mirror.create(fields)    # unkeyed legacy row — copy as-is
+                # No merge key -> an upsert can't find it and a create would
+                # DUPLICATE a row that was already copied. Skip + report.
+                unkeyed += 1
+                continue
             ok += 1
         except Exception as e:  # noqa: BLE001 — keep going; report at the end
             failed += 1
             print(f"[mirror] FAILED row {r['id']}: {e}", file=sys.stderr)
-    print(f"[mirror] backfill done: {ok} written, {failed} failed of {len(rows)}")
+    print(f"[mirror] backfill done: {ok} written, {failed} failed, "
+          f"{unkeyed} unkeyed skipped, of {len(rows)}")
 
 
 def main() -> int:

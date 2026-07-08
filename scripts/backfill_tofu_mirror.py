@@ -158,6 +158,32 @@ async def backfill(mirror_table_id: str | None, *, apply: bool) -> None:
         print(f"[mirror] would backfill {len(rows)} funnel-lead rows "
               "(Clay bulk rows excluded). Dry-run.")
         return
+
+    # Divergence detector (Lynn Osgood, 2026-07-08): a funnel lead that is NOT
+    # a runner capture arrived via the CLAY path — usually a non-ABM reactor
+    # our gate dropped by design (MAR2-19 decides whether to capture those).
+    # Alert on NEW ones so the team hears it from us, not from a screenshot.
+    def _is_runner_capture(r: dict) -> bool:
+        url = (r["fields"].get("LinkedIn URL") or "").strip().lower()
+        return url != "" and any(mid and mid in url for mid in keep_urls)
+
+    mirror_probe = AirtableClient(base_id=os.environ["AIRTABLE_TOFU_MIRROR_BASE_ID"],
+                                  table=mirror_table_id
+                                  or os.getenv("AIRTABLE_TOFU_MIRROR_TABLE", "TOFU Leads by ABM"))
+    existing_keys = set()
+    for r in await mirror_probe.records():
+        f = r["fields"]
+        if f.get("Email"):
+            existing_keys.add(f["Email"].strip().lower())
+        if f.get("LinkedIn URL"):
+            existing_keys.add(f["LinkedIn URL"].strip().lower())
+
+    def _row_key(r: dict) -> str:
+        f = r["fields"]
+        return (f.get("Email") or f.get("LinkedIn URL") or "").strip().lower()
+
+    clay_path_new = [r for r in rows
+                     if _row_key(r) not in existing_keys and not _is_runner_capture(r)]
     mirror = AirtableClient(base_id=os.environ["AIRTABLE_TOFU_MIRROR_BASE_ID"],
                             table=mirror_table_id
                             or os.getenv("AIRTABLE_TOFU_MIRROR_TABLE", "TOFU Leads by ABM"))
@@ -183,6 +209,19 @@ async def backfill(mirror_table_id: str | None, *, apply: bool) -> None:
             print(f"[mirror] FAILED row {r['id']}: {e}", file=sys.stderr)
     print(f"[mirror] backfill done: {ok} written, {failed} failed, "
           f"{unkeyed} unkeyed skipped, of {len(rows)}")
+    if clay_path_new:
+        from auto_search.ops import alerts
+        names = "; ".join(
+            f"{r['fields'].get('First Name', '')} {r['fields'].get('Last Name', '')}".strip()
+            + (f" ({r['fields'].get('Company Name')})" if r['fields'].get('Company Name') else "")
+            for r in clay_path_new[:10])
+        alerts.post_ops_alert(
+            kind="tofu-clay-path", severity="warning", service="discovery-cron",
+            title=f"{len(clay_path_new)} lead(s) reached the funnel via the Clay path, "
+                  "not captured by the ABM runner",
+            detail=f"{names}. Usually non-ABM reactors our gate drops by design "
+                   "(MAR2-19 decides capture-all). Added to the tracking table now.")
+        print(f"[mirror] clay-path alert posted for {len(clay_path_new)} lead(s)")
 
 
 def main() -> int:

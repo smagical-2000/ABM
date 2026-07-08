@@ -1,6 +1,6 @@
 # LinkedIn Engagement (TOFU Ads): Automation and Lead Flow
 
-**Owner:** Engineering (Sunny) · **Last updated:** 2026-07-07 · **Linear:** MAR2-13
+**Owner:** Engineering (Sunny) · **Last updated:** 2026-07-08 · **Linear:** MAR2-13
 
 Purpose: full visibility into how a LinkedIn ad reaction becomes a lead, a
 Salesforce record, engagement heat, and a Slack handoff, so anyone on the team

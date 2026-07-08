@@ -1,8 +1,9 @@
 """Hourly LinkedIn TOFU ad-engagement run — the entry point a Railway cron calls.
 
-Scrape reactions on Magical's sponsored posts -> ABM-only -> Apollo email -> dedup
--> upsert into the "LinkedIn <> Airtable" table + Reply.io campaign contact + record
-`linkedin_tofu` heat. (SFDC creation is handled downstream by the Airtable automation.)
+Scrape reactions on Magical's sponsored posts -> dedup -> Apollo email -> capture
+EVERY reactor (ABM match is a Yes/No flag since 2026-07-08, not a gate) -> upsert
+into the "LinkedIn <> Airtable" table; Reply.io enrollment + `linkedin_tofu` heat
+stay ABM-only. (SFDC creation is handled downstream by the Zapier Zap.)
 
 DISABLED BY DEFAULT. A live run is a no-op unless LINKEDIN_TOFU_CRON_ENABLED=1, so
 the cron service can be created/scheduled but will not write a thing until you flip

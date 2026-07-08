@@ -78,8 +78,9 @@ def ensure_mirror_table(primary_base: str, primary_table: str,
         if existing:
             print(f"[mirror] table exists: {existing['name']} ({existing['id']})")
             return existing["id"]
-        fields = [_clone_field(f) for f in src["fields"]
-                  if f["name"] != "Synced At" and not f["name"].startswith("ABM Match")]
+        # Clone every primary column (incl. "ABM Match" — the runner dual-writes
+        # it since capture-all, 2026-07-08) except Synced At, added fresh below.
+        fields = [_clone_field(f) for f in src["fields"] if f["name"] != "Synced At"]
         fields.append({"name": "Synced At", "type": "dateTime",
                        "options": {"timeZone": "utc",
                                    "dateFormat": {"name": "iso"},
@@ -160,9 +161,10 @@ async def backfill(mirror_table_id: str | None, *, apply: bool) -> None:
         return
 
     # Divergence detector (Lynn Osgood, 2026-07-08): a funnel lead that is NOT
-    # a runner capture arrived via the CLAY path — usually a non-ABM reactor
-    # our gate dropped by design (MAR2-19 decides whether to capture those).
-    # Alert on NEW ones so the team hears it from us, not from a screenshot.
+    # a runner capture arrived via the CLAY path. Since capture-all shipped
+    # (MAR2-19, decided 2026-07-08: every reactor is captured, ABM or not),
+    # new ones are unexpected — likely a reactor the actor's ~20-visible-
+    # reactions cap hid from us. Alert so the team hears it from us first.
     def _is_runner_capture(r: dict) -> bool:
         url = (r["fields"].get("LinkedIn URL") or "").strip().lower()
         return url != "" and any(mid and mid in url for mid in keep_urls)
@@ -191,7 +193,6 @@ async def backfill(mirror_table_id: str | None, *, apply: bool) -> None:
     ok = failed = unkeyed = 0
     for r in rows:
         fields = {k: v for k, v in r["fields"].items() if v not in (None, "")}
-        fields.pop("ABM Match", None)          # unused field, not part of the mirror
         fields["Synced At"] = now
         try:
             if fields.get("Email"):
@@ -219,8 +220,9 @@ async def backfill(mirror_table_id: str | None, *, apply: bool) -> None:
             kind="tofu-clay-path", severity="warning", service="discovery-cron",
             title=f"{len(clay_path_new)} lead(s) reached the funnel via the Clay path, "
                   "not captured by the ABM runner",
-            detail=f"{names}. Usually non-ABM reactors our gate drops by design "
-                   "(MAR2-19 decides capture-all). Added to the tracking table now.")
+            detail=f"{names}. Capture-all is ON (2026-07-08), so these were likely "
+                   "hidden from the reactions actor (~20 visible per post) or "
+                   "arrived outside the scan window. Added to the tracking table now.")
         print(f"[mirror] clay-path alert posted for {len(clay_path_new)} lead(s)")
 
 

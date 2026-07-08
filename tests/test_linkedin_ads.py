@@ -63,27 +63,28 @@ def test_build_airtable_fields_happy_and_required():
                                  phone="+15551112222", linkedin_url="li/anna2")
     assert f == {"Email": "anna@abmco.com", "Company Name": "ABM Health",
                  "UTM Source": "linkedin", "UTM Medium": "paid-social",
-                 "UTM Campaign": "TOFU Engagement Campaign", "First Name": "Anna",
-                 "Last Name": "Abm", "Title": "VP RCM", "Phone": "+15551112222",
-                 "LinkedIn URL": "li/anna2"}
+                 "UTM Campaign": "TOFU Engagement Campaign", "ABM Match": "Yes",
+                 "First Name": "Anna", "Last Name": "Abm", "Title": "VP RCM",
+                 "Phone": "+15551112222", "LinkedIn URL": "li/anna2"}
     # optional fields omitted when blank
     f2 = la.build_airtable_fields(email="x@y.com", company="Y")
-    assert set(f2) == {"Email", "Company Name", "UTM Source", "UTM Medium", "UTM Campaign"}
+    assert set(f2) == {"Email", "Company Name", "UTM Source", "UTM Medium",
+                       "UTM Campaign", "ABM Match"}
     # a key (Email OR LinkedIn URL) + Company Name are required
     for bad in (dict(email="", company="Y"), dict(email="x@y.com", company="  ")):
         with pytest.raises(ValueError):
             la.build_airtable_fields(**bad)
 
 
-def test_build_airtable_fields_phone_only():
-    """2026-07-08 rule: a phone-only lead keys on LinkedIn URL (no Email cell
-    written, and never an empty one that could merge rows together)."""
-    f = la.build_airtable_fields(company="ABM Health", phone="+15550001111",
-                                 linkedin_url="li/dana2")
+def test_build_airtable_fields_phone_only_and_non_abm():
+    """2026-07-08 rules: a phone-only lead keys on LinkedIn URL (no Email cell
+    written), and non-ABM captures are tagged ABM Match: No."""
+    f = la.build_airtable_fields(company="Random Co", phone="+15550001111",
+                                 linkedin_url="li/carl2", abm_match=False)
     assert "Email" not in f
-    assert f["LinkedIn URL"] == "li/dana2" and f["Phone"] == "+15550001111"
+    assert f["ABM Match"] == "No" and f["LinkedIn URL"] == "li/carl2"
     with pytest.raises(ValueError):     # no email AND no linkedin url = no key
-        la.build_airtable_fields(company="ABM Health", phone="+15550001111")
+        la.build_airtable_fields(company="Random Co", phone="+15550001111")
 
 
 def test_post_url():
@@ -106,7 +107,8 @@ _ENRICH = {
     "li/dana": {"full_name": "Dana Dm", "company": "ABM Health", "company_domain": "abmco.com", "linkedin_url": "li/dana2"},
     "li/eve":  {"full_name": "Eve Existing", "company": "ABM Health", "company_domain": "abmco.com", "linkedin_url": "li/eve2"},
 }
-_EMAILS = {"Abm": "anna@abmco.com", "Existing": "eve@abmco.com"}   # by last name; Dana → none
+# by last name; Dana → none (ABM, phone-only path), Carl → non-ABM WITH email
+_EMAILS = {"Abm": "anna@abmco.com", "Existing": "eve@abmco.com", "Cold": "carl@randomco.com"}
 
 
 class _FakeIndex:
@@ -176,10 +178,11 @@ async def test_dry_run_makes_no_writes(patched, monkeypatch):
                            scoring_repo=None, discovery_repo=None,
                            airtable_client=air, replyio_client=reply, dry_run=True)
 
-    # Anna + Eve are ABM with email; Mag dropped; Carl not-ABM; Dana has no
-    # email, and dry runs never spend FullEnrich, so no phone either → no lead.
-    assert out["stats"] == {"scanned": 5, "dropped_magical": 1, "not_abm": 1,
-                            "no_email_or_phone": 1, "would_create": 2}
+    # Anna + Eve are ABM with email; Carl is non-ABM with email (captured since
+    # 2026-07-08); Mag dropped; Dana has no email and dry runs never spend
+    # FullEnrich, so she has no phone either → not a lead.
+    assert out["stats"] == {"scanned": 5, "dropped_magical": 1, "non_abm_captured": 1,
+                            "no_email_or_phone": 1, "would_create": 3}
     # the dry-run guarantee: nothing written anywhere
     assert air.upserts == [] and reply.added == [] and crossed == []
     assert out["results"][0]["email"] == "anna@abmco.com"
@@ -196,25 +199,30 @@ async def test_live_run_upserts_and_records_heat(patched, monkeypatch):
                            scoring_repo=None, discovery_repo=None,
                            airtable_client=air, replyio_client=reply, dry_run=False)
 
-    # two ABM reactors with email (Anna, Eve) → two Airtable upserts + two Reply.io adds
-    assert len(air.upserts) == 2
+    # three leads with email hit Airtable (Anna + Eve ABM, Carl non-ABM) — but
+    # ONLY the two ABM matches enter Reply.io and earn heat events
+    assert len(air.upserts) == 3
     anna = air.upserts[0]["fields"]
     assert anna["First Name"] == "Anna" and anna["Last Name"] == "Abm"
     assert anna["Email"] == "anna@abmco.com" and anna["Company Name"] == "ABM Health"
     assert anna["UTM Campaign"] == "TOFU Engagement Campaign"
     assert anna["LinkedIn URL"] == "li/anna2"          # enriched URL
+    assert anna["ABM Match"] == "Yes"
     assert air.upserts[0]["merge_on"] == ["Email"]     # idempotent on email
+    carl = air.upserts[1]["fields"]
+    assert carl["ABM Match"] == "No" and carl["Company Name"] == "Random Co"
     assert len(reply.added) == 2 and reply.added[0]["campaign_id"] == 1709709
+    assert {a["email"] for a in reply.added} == {"anna@abmco.com", "eve@abmco.com"}
     assert out["results"][0]["airtable_id"] == "recTEST"
-    # heat recorded once for the batch, as linkedin_tofu events worth 6 (TOFU lead)
+    # heat recorded once for the batch, as linkedin_tofu events worth 6 (TOFU
+    # lead) — ABM matches only; Carl produces a contact row but NO event
     assert len(crossed) == 1
     ev = crossed[0]["event_rows"]
     assert len(ev) == 2 and ev[0]["kind"] == "linkedin_tofu" and ev[0]["points"] == 6
     assert ev[0]["raw"]["airtable_id"] == "recTEST"
     assert ev[0]["raw"]["category"] == "Ortho"
-    # dead-end Dana (no email, no phone) still persists a contact row = durable
-    # dedup, so she is never re-billed through Apollo/FullEnrich next scan
-    assert len(crossed[0]["contact_rows"]) == 3
+    # every capture (incl. Carl + dead-end Dana) is a contact row = durable dedup
+    assert len(crossed[0]["contact_rows"]) == 4
 
 
 async def test_fullenrich_fills_phone_to_airtable_on_live(patched, monkeypatch):
@@ -236,12 +244,13 @@ async def test_fullenrich_fills_phone_to_airtable_on_live(patched, monkeypatch):
     assert calls                                                  # FullEnrich ran for no-phone leads
     assert air.upserts[0]["fields"]["Phone"] == "+15557654321"    # → Airtable → Salesforce
     assert reply.added[0]["phone"] == "+15557654321"             # → Reply.io
-    # Carl (non-ABM) is dropped before Apollo/FullEnrich — no credit spent
+    # Carl (non-ABM, has email) must NOT spend a FullEnrich credit — Clay later
     assert "Cold" not in calls
     # Dana (ABM, no email) is SAVED by the phone: phone-only row keyed on
     # LinkedIn URL, no Email cell, and no Reply.io enrollment (email tool)
     dana = next(u for u in air.upserts if u["fields"].get("First Name") == "Dana")
     assert "Email" not in dana["fields"] and dana["merge_on"] == ["LinkedIn URL"]
+    assert dana["fields"]["ABM Match"] == "Yes"
     assert out["stats"].get("replyio_skipped_no_email") == 1
     assert all(a.get("email") for a in reply.added)               # email leads only
 
@@ -285,7 +294,7 @@ async def test_failed_airtable_upsert_records_no_heat(patched, monkeypatch):
                            scoring_repo=None, discovery_repo=None,
                            airtable_client=_FakeAirtable(fail=True),
                            replyio_client=reply, dry_run=False)
-    assert out["stats"].get("airtable_failed") == 2   # both ABM email leads (Anna, Eve) fail
+    assert out["stats"].get("airtable_failed") == 3   # all email leads (Anna, Carl, Eve) fail
     assert reply.added == []          # no campaign push when the row didn't land
     # Dana's dead-end contact row (dedup) is all that persists — no events, so
     # no heat could be recorded for pushes that failed
@@ -373,8 +382,8 @@ async def test_replyio_409_is_not_a_failure(patched, monkeypatch):
                            scoring_repo=None, discovery_repo=None,
                            airtable_client=_FakeAirtable(), replyio_client=reply,
                            dry_run=False)
-    assert out["stats"].get("airtable_upserted") == 2     # Anna + Eve rows land
-    assert out["stats"].get("replyio_already_sequenced") == 2
+    assert out["stats"].get("airtable_upserted") == 3     # Anna, Carl, Eve rows land
+    assert out["stats"].get("replyio_already_sequenced") == 2   # ABM leads only
     assert out["stats"].get("replyio_failed") is None     # 409 is not counted as a failure
     assert reply.calls == 2
 
@@ -414,11 +423,15 @@ async def test_mirror_receives_copy_with_synced_at(patched, monkeypatch):
                            scoring_repo=None, discovery_repo=None,
                            airtable_client=air, replyio_client=_FakeReply(),
                            mirror_client=mir, dry_run=False)
-    assert len(mir.upserts) == len(air.upserts) == 2
-    assert out["stats"]["mirror_upserted"] == 2
+    # 3 = Anna + Eve (ABM) + Carl (non-ABM, captured since 2026-07-08) — the
+    # mirror gets EVERY captured lead, ABM or not, same as the primary.
+    assert len(mir.upserts) == len(air.upserts) == 3
+    assert out["stats"]["mirror_upserted"] == 3
     m = mir.upserts[0]["fields"]
     assert m["Email"] == "anna@abmco.com" and m["Synced At"]
     assert mir.upserts[0]["merge_on"] == ["Email"]
+    carl = mir.upserts[1]["fields"]
+    assert carl["ABM Match"] == "No" and carl["Synced At"]
 
 
 async def test_mirror_failure_never_blocks_the_lead(patched, monkeypatch):
@@ -428,9 +441,9 @@ async def test_mirror_failure_never_blocks_the_lead(patched, monkeypatch):
                            scoring_repo=None, discovery_repo=None,
                            airtable_client=air, replyio_client=_FakeReply(),
                            mirror_client=mir, dry_run=False)
-    assert len(air.upserts) == 2                       # primary rows all landed
-    assert out["stats"]["mirror_failed"] == 2          # counted for the ops alert
-    assert out["stats"]["airtable_upserted"] == 2
+    assert len(air.upserts) == 3                       # primary rows all landed
+    assert out["stats"]["mirror_failed"] == 3          # counted for the ops alert
+    assert out["stats"]["airtable_upserted"] == 3
 
 
 async def test_no_mirror_client_means_no_mirror_stats(patched, monkeypatch):
@@ -440,3 +453,46 @@ async def test_no_mirror_client_means_no_mirror_stats(patched, monkeypatch):
                            airtable_client=_FakeAirtable(), replyio_client=_FakeReply(),
                            dry_run=False)
     assert "mirror_upserted" not in out["stats"] and "mirror_failed" not in out["stats"]
+
+
+class _FakeEngRepo:
+    """Records what actually persists — used with the REAL cross_and_persist."""
+
+    def __init__(self):
+        self.contact_rows: list[dict] = []
+        self.event_rows: list[dict] = []
+
+    def contacts(self):
+        return list(self.contact_rows)
+
+    def upsert_contact(self, c):
+        self.contact_rows.append(c)
+
+    def add_event(self, e):
+        self.event_rows.append(e)
+        return True
+
+
+async def test_capture_all_persists_non_abm_contacts_for_dedup(patched, monkeypatch):
+    """Regression (QA, 2026-07-08): every other runner test monkeypatches
+    cross_and_persist and asserts on its INPUT, which twice let the real
+    function silently drop non-ABM contacts (persist_unmatched defaults to
+    False). This test runs the REAL cross_and_persist against a recording
+    repo: Carl (non-ABM) must land as a contact row — it is the durable dedup
+    key; without it every scan re-bills Apollo/FullEnrich for him — while
+    heat events stay ABM-only."""
+    from auto_search.engagement import sync as sync_mod
+    monkeypatch.setattr(sync_mod, "build_index", lambda s, d: _FakeIndex())
+    repo = _FakeEngRepo()
+    out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=repo,
+                           scoring_repo=None, discovery_repo=None,
+                           airtable_client=_FakeAirtable(), replyio_client=_FakeReply(),
+                           dry_run=False)
+    exts = {c["external_id"] for c in repo.contact_rows}
+    # Anna + Eve (ABM leads), Carl (non-ABM lead), Dana (dead-end, no contact info)
+    assert exts == {"linkedin:pa", "linkedin:pe", "linkedin:pc", "linkedin:pd"}
+    carl = next(c for c in repo.contact_rows if c["external_id"] == "linkedin:pc")
+    assert carl.get("account_id") is None            # captured, but no account cross
+    assert len(repo.event_rows) == 2                 # heat is ABM-only (Anna + Eve)
+    assert all(e["account_id"] == "abm_abmco" for e in repo.event_rows)
+    assert out["stats"]["heat_events"] == 2

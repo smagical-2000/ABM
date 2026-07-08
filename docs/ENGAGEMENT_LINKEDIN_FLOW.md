@@ -34,8 +34,8 @@ Someone reacts (like, celebrate, etc.) on a Magical sponsored TOFU post
 [3] Apollo email lookup   -> find a work email
       |
       v
-[4] ABM match gate        -> keep ONLY people whose company is on the ABM target list
-      |                      (capturing non-ABM reactors too is proposed, with Galyna)
+[4] ABM match FLAG        -> every reactor is captured; the flag (Yes/No) marks
+      |                      whether the company is on the ABM target list
       v
 [5] FullEnrich phone      -> phone lookup (always tried when a lead has no email,
       |                      since email OR phone is what qualifies a lead)
@@ -61,7 +61,7 @@ Someone reacts (like, celebrate, etc.) on a Magical sponsored TOFU post
 | 1 | Apify (linkedin-post-reactions) | Scrape who reacted | Scheduled scan (`run_linkedin_tofu.py`) | post id -> list of {name, profile, company} |
 | 2 | Our runner (dedup) | Skip already-captured people, no double spend | per reactor | profile id -> keep or drop |
 | 3 | Apollo | Find a work email | per new reactor | name + company -> email |
-| 4 | Our runner (ABM gate) | Keep only ABM target companies | per reactor | company -> keep or drop |
+| 4 | Our runner (ABM match flag) | Tag whether the company is on the ABM target list (every reactor is captured either way — Sunny, 2026-07-08) | per reactor | company -> ABM Match Yes/No |
 | 5 | FullEnrich | Phone number (best effort) | per surviving lead | contact -> phone |
 | 6 | Airtable ("LinkedIn <> Airtable") | Lead capture of record | upsert (email is the key) | contact -> Airtable row |
 | 6b | Airtable ("ABM Flow LinkedIn <> Airtable" table) | Tracking view of the ENGAGEMENT LEADS the ABM system produced (~40), stamped Synced At — deliberately excludes the primary table's Clay bulk rows that never became leads | after each successful primary write | lead row + Synced At -> tracking row |
@@ -85,19 +85,22 @@ the heat capture are ours.
   (one row per ad: `share_id, category`, e.g. Ortho). Adding a new ad = adding a row.
 - **Engagement trigger:** any reaction (like, celebrate, support, etc.) on those
   posts. Comments are not currently captured, reactions only.
-- **Lead qualification rules (the gates, in order; email-or-phone updated 2026-07-08):**
+- **Lead qualification rules (updated 2026-07-08):**
   1. **Dedup**: a person we already captured is skipped before any paid step.
-  2. **ABM match**: the reactor's company must be on the ABM target list.
-     Reactors from non-ABM companies are dropped today. (Capturing them too is
-     an open proposal with Galyna, tracked in Linear.)
+  2. **Everyone is captured**: reactors from companies NOT on the ABM target
+     list are no longer dropped. Each Airtable row carries an **ABM Match**
+     (Yes/No) field so the team can filter target-account leads.
   3. **Email OR phone qualifies a lead**: a person with a work email (Apollo)
      or a phone number (FullEnrich) becomes a lead. Only people with neither
      are skipped. Phone-only leads are keyed on their LinkedIn URL.
   4. Magical's own employees are dropped.
+  - **What stays ABM-only**: Reply.io enrollment (email leads at target
+    accounts), engagement heat points, and the Slack lead card. Non-ABM leads
+    with an email still reach Salesforce (the Zapier Zap is email-gated, not
+    ABM-gated) and appear in both Airtable tables.
   - **Known gap (ticketed)**: the Airtable to Salesforce Zapier Zap currently
     creates a Lead only when the row has an email, so phone-only leads stay in
-    Airtable (with Reply.io not applicable either, as an email tool) until
-    that automation adds a phone-based check.
+    Airtable until that automation adds a phone-based check.
 - **Enrichment:** Apollo (work email) plus FullEnrich (phone). FullEnrich runs
   for ABM leads missing a phone and for any lead missing an email (the phone is
   what qualifies those). A Clay waterfall for deeper email and phone finding
@@ -144,7 +147,7 @@ A captured engagement lands in four places. Access and fields:
 
 | Where | What it holds | Fields | Access |
 |---|---|---|---|
-| **Airtable, "LinkedIn <> Airtable" table** | The lead capture record (the monitoring table for this ticket) | Name, title, company, email, phone, LinkedIn URL, post category, captured-at timestamp | [airtable.com/appniZ6UOILREppmF](https://airtable.com/appniZ6UOILREppmF) (table "LinkedIn <> Airtable"; no access yet: ask Sunny or Alykhan for an invite) |
+| **Airtable, "LinkedIn <> Airtable" table** | The lead capture record (the monitoring table for this ticket) | Name, title, company, email, phone, LinkedIn URL, ABM Match (Yes/No), post category, captured-at timestamp | [airtable.com/appniZ6UOILREppmF](https://airtable.com/appniZ6UOILREppmF) (table "LinkedIn <> Airtable"; no access yet: ask Sunny or Alykhan for an invite) |
 | **Airtable, "ABM Flow LinkedIn <> Airtable" table (tracking mirror)** | The engagement leads the ABM system produced (~40: Salesforce TOFU-campaign leads plus runner captures) — deliberately NOT the primary table's full history, which includes bulk rows that never became leads | Same columns as the primary table plus Synced At (when the pipeline wrote the row) | [airtable.com/appniZ6UOILREppmF/tblF9uEPNXYbAySY8](https://airtable.com/appniZ6UOILREppmF/tblF9uEPNXYbAySY8) (same base as the primary table) |
 | **Salesforce** | The CRM Lead | Standard Lead fields plus source | Existing SFDC seats (Leads, source "TOFU Engagement Campaign") |
 | **ABM platform, Engagement tab** | Account-level view: heat score, tier, last touch, and the full dated timeline of every touch | Account, tier, points per event, timestamps per event | [engagement-preview-production.up.railway.app](https://engagement-preview-production.up.railway.app) (login required; creds from Sunny. Justin, Gabe, Ben already have access) |
@@ -162,9 +165,10 @@ platform timeline stamps the heat event. Comparing Airtable captured-at with
 SFDC CreatedDate shows the Airtable automation delay for any specific lead.
 
 **To verify a specific lead made it through, check in this order:**
-1. **Airtable row exists?** Then capture, enrichment, and the ABM gate all
-   succeeded. Not there? The person either reacted outside scan hours (wait for
-   the next window), had no findable work email, or is not at an ABM company.
+1. **Airtable row exists?** Then capture and enrichment succeeded (the ABM
+   Match column says whether the company is a target account). Not there? The
+   person either reacted outside scan hours (wait for the next window), or had
+   no findable work email AND no findable phone (either one qualifies a lead).
 2. **Salesforce Lead exists?** Allow about 5 minutes (Zapier polling). If
    Airtable yes but SFDC no after that, the issue is the Zapier sync, not the
    capture pipeline.

@@ -1596,9 +1596,10 @@ def create_app() -> FastAPI:
     async def engagement_linkedin_run(dry_run: bool = True, max_contacts: int | None = None,
                                       max_leads: int | None = None, max_reactions: int = 50):
         """LinkedIn TOFU ad-engagement, standalone (the main /sync also runs this leg).
-        Scrape post reactions -> drop staff -> ABM-only -> Apollo work email -> dedup.
-        dry_run=false also WRITES: Airtable upsert + Reply.io contact + `linkedin_tofu`
-        heat. Awaits and returns the funnel. Shares the one-at-a-time engagement lock."""
+        Scrape post reactions -> drop staff -> dedup -> Apollo work email -> capture
+        every reactor (ABM match is a flag, not a gate, since 2026-07-08). dry_run=false
+        also WRITES: Airtable upsert (+ Reply.io and `linkedin_tofu` heat, ABM-only).
+        Awaits and returns the funnel. Shares the one-at-a-time engagement lock."""
         repo = getattr(app.state, "engagement_repo", None)
         if not repo:
             raise HTTPException(status_code=503, detail="engagement store not available")

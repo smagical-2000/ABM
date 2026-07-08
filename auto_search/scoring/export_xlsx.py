@@ -18,9 +18,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from openpyxl import Workbook
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
+
+from auto_search.scoring.frameworks import FRAMEWORKS
 
 # Quiet, deck-friendly palette (fills need full ARGB).
 _HEADER_FILL = PatternFill("solid", fgColor="FF18181B")     # zinc-900
@@ -52,21 +55,63 @@ _COLUMNS = [
 ]
 
 
+# Stored tier LABELS differ per framework ("Tier 1", "High Fit", …); the BAND
+# is the stable vocabulary, and these words match the UI's fitWord (QA F1).
+_BAND_WORD = {"high": "High", "medium": "Medium", "low": "Low", "out": "Not a fit"}
+
+
 def _fit_word(a: dict) -> str:
-    return a.get("tier_label") or a.get("tier_band") or ""
+    return _BAND_WORD.get(a.get("tier_band") or "", a.get("tier_label") or "")
 
 
-def _pillar(a: dict, i: int) -> str:
-    dims = a.get("dimensions") or []
-    # Pillars are the framework's dimension order (firmo, techno, intent).
-    return f"{dims[i].get('score')}/{dims[i].get('max')}" if len(dims) > i else ""
+def _pillar_defs(a: dict):
+    fw = FRAMEWORKS.get(a.get("framework") or "")
+    return fw.pillars if fw else ()
+
+
+def _pillars(a: dict) -> list[str]:
+    """The three board pillars, summed from the framework's OWN dimension
+    rollup (health_system folds six dimensions into three) — same math as the
+    UI's pillarsFor, never positional (QA F2)."""
+    dims = {d.get("key"): d for d in a.get("dimensions") or []}
+    out = []
+    for p in _pillar_defs(a):
+        members = [dims[k] for k in p.dims if k in dims]
+        if members:
+            score = sum(d.get("score") or 0 for d in members)
+            mx = sum(d.get("max") or 0 for d in members)
+            out.append(f"{score}/{mx}")
+        else:
+            out.append("")
+    while len(out) < 3:
+        out.append("")
+    return out[:3]
 
 
 def _intent_evidence(a: dict) -> str:
+    """Summaries of the dimensions in the framework's INTENT pillar — for
+    health systems that's competitor + pain + leadership, labelled; for
+    specialty/payer it's the single intent dimension (QA F5)."""
+    pillar = next((p for p in _pillar_defs(a) if p.key == "intent"), None)
+    keys = set(pillar.dims) if pillar else None
+    parts = []
     for d in a.get("dimensions") or []:
-        if "intent" in (d.get("key") or "").lower() or "intent" in (d.get("label") or "").lower():
-            return d.get("summary") or ""
-    return ""
+        key, label = (d.get("key") or ""), (d.get("label") or "")
+        member = (key in keys) if keys is not None else ("intent" in (key + label).lower())
+        if member and d.get("summary"):
+            parts.append(f"{label}: {d['summary']}" if keys and len(keys) > 1 else d["summary"])
+    return " | ".join(parts)
+
+
+def _safe(v):
+    """Excel-cell hygiene: strip openpyxl-illegal control chars and neutralize
+    formula injection — a '='-leading string (an imported account name, an
+    LLM-written summary) must land as text, never as a live formula (QA F3/F6).
+    Same contract as the CSV path's csvCell guard."""
+    if not isinstance(v, str):
+        return v
+    v = ILLEGAL_CHARACTERS_RE.sub("", v)
+    return "'" + v if v.startswith("=") else v
 
 
 def _dossier_signals(a: dict) -> str:
@@ -97,15 +142,18 @@ def _short_date(iso: str | None) -> str:
 
 def _row(a: dict) -> list:
     qa = a.get("qa") or {}
-    return [
+    pillars = _pillars(a)
+    score = (f"{a.get('total')}/{a.get('max_total')}"
+             if a.get("total") is not None and a.get("max_total") is not None else "")
+    return [_safe(v) for v in [
         a.get("name"), a.get("domain") or "", (a.get("segment") or "").replace("_", " ").title(),
-        _fit_word(a), f"{a.get('total')}/{a.get('max_total')}",
-        _pillar(a, 0), _pillar(a, 1), _pillar(a, 2),
+        _fit_word(a), score,
+        pillars[0], pillars[1], pillars[2],
         a.get("recommendation") or "", qa.get("status") or "", qa.get("notes") or "",
         _intent_evidence(a), _dossier_signals(a), _discovery_signals(a), _facts(a),
         a.get("import_label") or "", _short_date(a.get("scored_at")),
         a.get("cost_usd") if a.get("cost_usd") is not None else "",
-    ]
+    ]]
 
 
 def _style_sheet(ws: Worksheet, n_rows: int) -> None:

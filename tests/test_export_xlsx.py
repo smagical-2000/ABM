@@ -1,70 +1,101 @@
-"""Styled Excel export: pure workbook builder (colors, wrapping, summary) and
-the endpoint (ordered ids in -> streamed .xlsx out). The honesty contract:
-every cell is data the account already carries; empty stays empty."""
+"""Styled Excel export — tested with the REAL system shapes (the first QA pass
+caught tests that fabricated fit labels the platform never produces):
+tier_band vocabulary, health_system's six-dimension pillar rollup, formula
+injection, and the endpoint's annotate/scored-only/dedupe hygiene."""
 
 import importlib
 import io
+from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
 from auto_search.scoring import export_xlsx
+from auto_search.scoring.models import Account, Dimension, ScoreResult
 
 _app_module = importlib.import_module("auto_search.api.app")
 
 
-def _account(name="Beacon Health", fit="High", **over):
-    a = {
-        "account_id": "csv_" + name.lower().replace(" ", ""),
-        "name": name, "domain": "beacon.org", "segment": "health_system",
-        "state": "scored", "tier_label": fit, "total": 26, "max_total": 30,
+def _hs_account():
+    """A health_system account exactly as the platform stores it: six
+    dimensions, band 'high', label 'Tier 1' (the framework's real words)."""
+    return {
+        "account_id": "csv_beaconhealth", "name": "Beacon Health",
+        "domain": "beacon.org", "segment": "health_system",
+        "framework": "health_system", "state": "scored",
+        "tier_band": "high", "tier_label": "Tier 1", "total": 26, "max_total": 30,
         "cost_usd": 0.12, "scored_at": "2026-07-08T17:00:00+00:00",
-        "import_label": "SAO cohort", "recommendation": "Strong fit; lead with prior-auth.",
+        "import_label": "SAO cohort", "recommendation": "Lead with prior-auth.",
         "qa": {"status": "verified", "notes": "Revenue confirmed."},
         "dimensions": [
-            {"key": "firmographic", "label": "Firmographic", "score": 10, "max": 12},
-            {"key": "technographic", "label": "Technographic", "score": 5, "max": 7},
-            {"key": "intent", "label": "Business Priorities & Intent", "score": 9, "max": 11,
-             "summary": "Hiring 3 RCM roles (Jun 2026); new CFO (May 2026)."},
+            {"key": "npr", "label": "Net Patient Revenue", "score": 10, "max": 12},
+            {"key": "emr", "label": "EMR Compatibility", "score": 4, "max": 5},
+            {"key": "competitor", "label": "Competitor Landscape", "score": 3, "max": 4,
+             "summary": "UiPath deployed; no AI-RCM vendor."},
+            {"key": "pain", "label": "Pain Signals", "score": 3, "max": 4,
+             "summary": "RCM hiring wave (Jun 2026)."},
+            {"key": "ai_readiness", "label": "Tech Readiness", "score": 1, "max": 2},
+            {"key": "leadership", "label": "Leadership", "score": 2, "max": 3,
+             "summary": "New CFO (May 2026)."},
         ],
         "dossier": {"intent_signals": [
-            {"signal": "RCM hiring wave", "score": 8, "detail": "3 postings in June"}]},
+            {"signal": "RCM hiring wave", "score": 8, "detail": "3 postings in June"},
+            {"signal": "No-detail signal", "score": 5}]},
         "discovery_signals": [{"signal_type": "job_posting", "summary": "3 Coder jobs"}],
         "firmographics": {"Net Patient Revenue": "$1.4B"},
     }
-    a.update(over)
-    return a
 
 
-def test_workbook_rows_styling_and_summary():
-    flagged = _account("Vendor Co", fit="Not a fit", total=2,
-                       firmographics={"Classification": "auto-classified specialty (likely not ICP)"},
-                       qa={"status": "discrepancy", "notes": "misclassified"},
-                       dossier=None, discovery_signals=[], dimensions=[])
-    wb = export_xlsx.build_workbook([_account(), flagged])
+def test_workbook_uses_real_bands_pillars_and_evidence():
+    not_fit = dict(_hs_account(), account_id="csv_vendor", name="Vendor Co",
+                   segment="specialty", framework="specialty",
+                   tier_band="out", tier_label="No Fit", total=2,
+                   dimensions=[], dossier=None, discovery_signals=[],
+                   firmographics={"Classification": "auto-classified specialty (likely not ICP)"},
+                   qa={"status": "discrepancy", "notes": "misclassified"})
+    wb = export_xlsx.build_workbook([_hs_account(), not_fit])
     ws = wb["Scored accounts"]
     head = [c.value for c in ws[1]]
-    assert head[:5] == ["Account", "Domain", "Segment", "Fit", "Score"]
-    assert "Intent evidence (researched)" in head and "Deep research signals" in head
-    # row 2: evidence + dossier text land verbatim
     row2 = {h: ws.cell(row=2, column=i + 1).value for i, h in enumerate(head)}
-    assert row2["Score"] == "26/30"
-    assert "Hiring 3 RCM roles" in row2["Intent evidence (researched)"]
-    assert "RCM hiring wave (8/10): 3 postings in June" == row2["Deep research signals"]
-    assert row2["Discovery signals"] == "job_posting: 3 Coder jobs"
-    # fit + QA cells carry their band fills; empty evidence stays empty
-    assert ws.cell(row=2, column=4).fill.fgColor.rgb == "FFD1FAE5"      # High -> emerald
-    assert ws.cell(row=3, column=4).fill.fgColor.rgb == "FFFEE2E2"      # Not a fit -> rose
-    row3 = {h: ws.cell(row=3, column=i + 1).value for i, h in enumerate(head)}
-    assert (row3["Intent evidence (researched)"] or "") == ""            # honesty: no data, no text
-    assert ws.freeze_panes == "A2" and ws.auto_filter.ref.startswith("A1:")
-    # summary sheet counts
+    # Fit words come from the BAND (stable across frameworks), not stored labels
+    assert row2["Fit"] == "High"
+    assert ws.cell(row=3, column=4).value == "Not a fit"
+    # health_system pillars are the framework ROLLUP, not dimension positions:
+    # techno = emr + ai_readiness, intent = competitor + pain + leadership
+    assert row2["Firmographic"] == "10/12"
+    assert row2["Technographic"] == "5/7"
+    assert row2["Intent"] == "8/11"
+    # intent evidence = the intent pillar's labelled summaries
+    ev = row2["Intent evidence (researched)"]
+    assert "Competitor Landscape: UiPath deployed" in ev
+    assert "Pain Signals: RCM hiring wave" in ev and "Leadership: New CFO" in ev
+    # dossier detail nit: no trailing colon when detail is missing
+    assert row2["Deep research signals"] == (
+        "RCM hiring wave (8/10): 3 postings in June; No-detail signal (5/10)")
+    # fills fire on the real band words
+    assert ws.cell(row=2, column=4).fill.fgColor.rgb == "FFD1FAE5"
+    assert ws.cell(row=3, column=4).fill.fgColor.rgb == "FFFEE2E2"
+    # summary sheet renders a non-empty fit distribution
     s = wb["Summary"]
-    text = " ".join(str(c.value) for r in s.iter_rows() for c in r if c.value)
-    assert "High 1" in text.replace("\n", " ") or ("High" in text and "1" in text)
+    text = " | ".join(str(c.value) for r in s.iter_rows() for c in r if c.value is not None)
+    assert "High | 1" in text and "Not a fit | 1" in text
     assert "Flagged (auto-classified segment): 1" in text
-    assert "Accounts: 2" in text
+
+
+def test_cells_are_never_live_formulas_and_control_chars_stripped():
+    hostile = dict(_hs_account(), account_id="csv_evil",
+                   name='=HYPERLINK("http://evil.example","Q1")',
+                   recommendation="=2+2", qa={"status": "verified",
+                                              "notes": "bad\x0bchar\x08here"})
+    wb = export_xlsx.build_workbook([hostile])
+    ws = wb["Scored accounts"]
+    name_cell = ws.cell(row=2, column=1)
+    rec_cell = ws.cell(row=2, column=9)
+    assert name_cell.data_type == "s" and name_cell.value.startswith("'=")
+    assert rec_cell.data_type == "s" and rec_cell.value == "'=2+2"
+    notes = ws.cell(row=2, column=11).value
+    assert notes == "badcharhere"                    # illegal chars stripped
 
 
 @pytest.fixture
@@ -85,31 +116,37 @@ def client(tmp_path, monkeypatch):
         yield c
 
 
-def test_endpoint_streams_ordered_workbook(client):
-    from datetime import UTC, datetime
-
-    from auto_search.scoring.models import Account, Dimension, ScoreResult
-
-    repo = client.app.state.scoring_repo
-    for n, aid in (("Alpha Health", "csv_alphahealth"), ("Beta Health", "csv_betahealth")):
-        repo.upsert_account(Account(
-            account_id=aid, name=n, segment="health_system",
-            framework="health_system", source="csv", domain="x.org"), state="queued")
+def _seed(repo, name, aid, *, scored=True):
+    repo.upsert_account(Account(
+        account_id=aid, name=name, segment="specialty",
+        framework="specialty", source="csv", domain="x.org"), state="queued")
+    if scored:
         repo.save_score(aid, ScoreResult(
-            account_id=aid, framework="health_system", framework_version="v",
-            dimensions=[Dimension(key="intent", label="Intent", score=7, max=11,
-                                  summary="Hiring wave (Jun 2026).")],
-            total=21, max_total=30, tier_band="medium", tier_label="Medium",
+            account_id=aid, framework="specialty", framework_version="v",
+            dimensions=[Dimension(key="intent", label="Business Priorities & Intent",
+                                  score=7, max=10, summary="Hiring wave (Jun 2026).")],
+            total=21, max_total=30, tier_band="medium", tier_label="Medium Fit",
             cost_usd=0.1, scored_at=datetime.now(UTC).isoformat()))
-    # ids ordered Beta-first: the file must respect caller order (the UI's sort)
-    ids = ["csv_betahealth", "csv_alphahealth"]
+
+
+def test_endpoint_orders_dedupes_and_exports_scored_only(client):
+    repo = client.app.state.scoring_repo
+    _seed(repo, "Alpha Health", "csv_alphahealth")
+    _seed(repo, "Beta Health", "csv_betahealth")
+    _seed(repo, "Parked Co", "csv_parked", scored=False)     # queued: must not export
+    ids = ["csv_betahealth", "csv_betahealth", "csv_parked", "csv_alphahealth", 42]
     r = client.post("/api/scoring/export.xlsx", json={"account_ids": ids})
     assert r.status_code == 200
-    assert r.headers["content-type"].startswith("application/vnd.openxmlformats")
     wb = load_workbook(io.BytesIO(r.content))
     ws = wb["Scored accounts"]
-    assert ws.cell(row=2, column=1).value == "Beta Health"
-    assert ws.cell(row=3, column=1).value == "Alpha Health"
+    names = [ws.cell(row=i, column=1).value for i in (2, 3)]
+    assert names == ["Beta Health", "Alpha Health"]           # order kept, dupe dropped
+    assert ws.cell(row=4, column=1).value is None             # parked row absent
+    assert ws.cell(row=2, column=4).value == "Medium"         # band word, annotated row
+    # single-dimension frameworks: evidence is the summary, unlabelled
+    head = [c.value for c in ws[1]]
+    ev_col = head.index("Intent evidence (researched)") + 1
+    assert ws.cell(row=2, column=ev_col).value == "Hiring wave (Jun 2026)."
     assert client.post("/api/scoring/export.xlsx", json={}).status_code == 422
     assert client.post("/api/scoring/export.xlsx",
-                       json={"account_ids": ["nope"]}).status_code == 404
+                       json={"account_ids": ["csv_parked"]}).status_code == 404

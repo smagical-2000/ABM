@@ -2520,10 +2520,18 @@ def create_app() -> FastAPI:
         ids = body.get("account_ids")
         if not isinstance(ids, list) or not ids:
             raise HTTPException(status_code=422, detail="account_ids (ordered list) required")
-        by_id = {a["account_id"]: a for a in app.state.scoring.list_scored()}
+        # Hygiene (QA F4/F8): string ids only, order-preserving dedupe, and
+        # SCORED rows only — queued/error rows have no scores to export. Rows
+        # go through the same _annotate_scored/_retier as the UI list, so the
+        # file always matches the bands on screen.
+        seen: set = set()
+        ids = [i for i in ids if isinstance(i, str) and not (i in seen or seen.add(i))]
+        by_id = {a["account_id"]: a
+                 for a in _annotate_scored(app.state.scoring.list_scored())
+                 if a.get("state") == "scored"}
         accounts = [by_id[i] for i in ids if i in by_id]
         if not accounts:
-            raise HTTPException(status_code=404, detail="no matching accounts")
+            raise HTTPException(status_code=404, detail="no matching scored accounts")
         wb = export_xlsx.build_workbook(accounts)
         buf = _io.BytesIO()
         wb.save(buf)

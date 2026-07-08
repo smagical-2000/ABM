@@ -1073,16 +1073,26 @@ function fmtSignals(signals) {
 // named facts — or an explicit "nothing public found across …" diligence line).
 // Real research output only; blank when a row has none. Never synthesized here.
 function intentEvidence(a) {
-  const d = (a.dimensions || []).find(
-    (x) => /intent/i.test(x.key || '') || /intent/i.test(x.label || ''));
-  return (d && d.summary) || '';
+  // The framework's own intent-pillar rollup (health systems fold competitor +
+  // pain + leadership into it; specialty/payer have one intent dimension) —
+  // never a name match alone, which misses every health-system row (QA F5).
+  const fw = (window.FRAMEWORKS || {})[a.framework];
+  const pillar = fw && fw.pillars && fw.pillars.find((p) => p.key === 'intent');
+  const keys = pillar ? new Set(pillar.dims) : null;
+  const dims = (a.dimensions || []).filter((d) => (keys
+    ? keys.has(d.key)
+    : /intent/i.test(d.key || '') || /intent/i.test(d.label || '')));
+  const withText = dims.filter((d) => d.summary);
+  return withText
+    .map((d) => (dims.length > 1 ? `${d.label}: ${d.summary}` : d.summary))
+    .join(' | ');
 }
 // Deep-research signals (only for accounts whose dossier has been generated):
 // "headline (strength/10): detail" per signal, straight from the dossier.
 function dossierSignals(a) {
   const sigs = (a.dossier && a.dossier.intent_signals) || [];
   return sigs
-    .map((s) => `${s.signal}${s.score != null ? ` (${s.score}/10)` : ''}: ${s.detail || ''}`)
+    .map((s) => `${s.signal}${s.score != null ? ` (${s.score}/10)` : ''}${s.detail ? `: ${s.detail}` : ''}`)
     .join('; ');
 }
 function buildAccountsCsv(accounts) {
@@ -1409,7 +1419,8 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
                 <button onClick={handleExportExcel}
                   title={`Download ${selected.size > 0 ? 'the selected accounts' : 'the current view'} as a styled Excel workbook (fit colors, evidence, summary sheet)`}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[13px] font-medium text-zinc-500 transition-colors hover:bg-zinc-50 hover:text-zinc-700">
-                  <Icons.download className="h-4 w-4" />Export{selected.size > 0 ? ` ${selected.size}` : ''}
+                  {/* count = what will actually export (selection ∩ current filters), not raw selection size (QA F7) */}
+                  <Icons.download className="h-4 w-4" />Export{selected.size > 0 ? ` ${exportRows().length}` : ''}
                 </button>
                 <button onClick={handleExport} title="Plain CSV for data work"
                   className="rounded-lg border border-zinc-200 bg-white px-2 py-2 text-[11.5px] font-medium text-zinc-400 transition-colors hover:bg-zinc-50 hover:text-zinc-600">

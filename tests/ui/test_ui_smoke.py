@@ -524,3 +524,53 @@ def test_autoscore_toggle_persists_across_reload(page):
     page.reload(wait_until="networkidle")
     page.wait_for_selector("text=Scored", timeout=20_000)            # app remounted
     assert page.get_by_text("Auto-score off", exact=False).count() == 0  # read back as ON
+
+
+# ── MAR2-11: find-an-account search on all three tabs ─────────────────────────
+
+
+def test_discovery_search_filters_and_clears(page):
+    """Typing narrows the Discovery panel to matching accounts in real time;
+    junk shows 'No results found'; Clear search restores the full list."""
+    page.wait_for_selector("text=WellPower")
+    box = page.locator('input[aria-label="Search accounts"]')
+    box.fill("wellpower")
+    page.wait_for_selector("text=1 company")
+    assert page.get_by_role("heading", name="WellPower").count() > 0
+    # heading = a panel ROW; the name may still appear in the activity log below
+    assert page.get_by_role("heading", name="UI Hot Health System").count() == 0
+    box.fill("zzznope")
+    page.wait_for_selector("text=No results found")
+    page.click("text=Clear search")
+    page.wait_for_selector("text=WellPower")   # list restored
+    assert page.get_by_text("No results found").count() == 0
+
+
+def test_scored_search_narrows_and_composes_with_sorting(page):
+    """The Scored tab search narrows by name; it is a FILTER over the existing
+    list, distinct from the AE lookup bar above it (which stays rendered)."""
+    page.click("text=Scored")
+    page.wait_for_selector("text=Scored accounts")
+    page.wait_for_selector("text=The Harris Center for Mental Health")
+    box = page.locator('input[aria-label="Search accounts"]')
+    box.fill("harris")
+    page.wait_for_selector("text=The Harris Center for Mental Health")
+    assert page.get_by_role("heading", name="UI Demo Health System").count() == 0
+    box.fill("no-such-account-xyz")
+    page.wait_for_selector("text=No results found")
+    page.click("text=Clear search")
+    page.wait_for_selector("text=The Harris Center for Mental Health")
+
+
+def test_engagement_search_filters_accounts(page):
+    """The Engagement console search matches the seeded account by name and
+    shows the query-echoing empty state for junk."""
+    page.click("text=Engagement")
+    page.wait_for_selector("text=UI Demo Health System", timeout=10_000)
+    box = page.locator('input[placeholder="Search name or domain…"]')
+    box.fill("ui demo")
+    page.wait_for_selector("text=UI Demo Health System")
+    box.fill("zzznope")
+    page.wait_for_selector('text=No results found for "zzznope"')
+    box.fill("")
+    page.wait_for_selector("text=UI Demo Health System")

@@ -61,7 +61,10 @@ Agentic discipline, not vibe coding. Plan more than you build. Per feature, scal
 6. **Fresh-context review:** a second pass with clean eyes (a sub-agent) + a security pass on any
    secret/auth/API-key handling.
 7. **PR -> CI green -> human review -> merge to `main`.** CI is `.github/workflows/ci.yml`.
-8. **Deploy + verify on the live URL:** `railway up --service discovery-api --detach`.
+8. **Release + deploy + verify:** releases are semver git tags (`vX.Y.Z`); deploy per
+   service with `BUILD_STAMP=<tag>` and confirm the stamp in the service's LOGS — deploy
+   SUCCESS status is never proof code is running. **Full protocol (versioning, release
+   train, hypercare exception, QA gates): `docs/RELEASE_PROTOCOL.md`.**
    NEVER redeploy `discovery-cron` unless that is the intent (it controls daily spend).
    See `docs/DEPLOY_RAILWAY.md`.
 9. **Any bug you find/fix -> record it in `evals/bugs.json`** with the test that now guards it.

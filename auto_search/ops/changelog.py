@@ -50,6 +50,9 @@ class ChangeEntry(BaseModel):
     completed/rolled_back entry so a change reads as one thread."""
 
     change_id: str = Field(default_factory=lambda: "chg_" + uuid.uuid4().hex[:10])
+    serial: int = 0                            # human-trackable number (CHG-14); the
+    #                                            ENDPOINT assigns it — an update to an
+    #                                            existing change_id inherits its serial
     what: str                                  # what changed (required)
     why: str = ""                              # why it changed
     area: str = "other"                        # category (see AREAS)
@@ -57,6 +60,7 @@ class ChangeEntry(BaseModel):
     audience: str = ""                         # who it affects (SDRs / AEs / Marketing…)
     status: str = "initiated"                  # initiated | completed | rolled_back
     summary: str = ""                          # short one-liner for the Slack message
+    github: str = ""                           # PR / commit / tag URL for this change
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     @field_validator("status")
@@ -82,12 +86,25 @@ def _short_date(iso: str) -> str:
         return iso or ""
 
 
+# The canonical human-browsable register (every entry mirrors here as a row).
+# Env-overridable so a register move never needs a code change.
+NOTION_REGISTER_URL = os.getenv(
+    "NOTION_CHANGELOG_PAGE_URL",
+    "https://www.notion.so/9165f72774674f21a51beee57e908ab2")
+
+
+def serial_label(serial: int) -> str:
+    return f"CHG-{serial}" if serial else ""
+
+
 def build_change_card(entry: ChangeEntry) -> dict:
     """Pure: a change entry -> a Slack Block Kit payload in the company's
     Feature-Announcement style — What? / Why? / Who? / When? — written for a
     non-technical reader. "Who?" is the AUDIENCE the change affects (their
-    convention), not the author; the author rides in the footer. No emoji."""
-    header = entry.what[:150]
+    convention), not the author; the author rides in the footer with the
+    serial (CHG-14), the GitHub link, and the Notion register link. No emoji."""
+    tag = serial_label(entry.serial)
+    header = (f"{tag} · " if tag else "") + entry.what
     when = {"completed": f"Live now ({_short_date(entry.created_at)})",
             "initiated": f"In progress (started {_short_date(entry.created_at)})",
             "rolled_back": f"Rolled back ({_short_date(entry.created_at)})",
@@ -98,15 +115,18 @@ def build_change_card(entry: ChangeEntry) -> dict:
         sections.append(f"*Why?*\n{entry.why}")
     sections.append(f"*Who?*\n{entry.audience or 'GTM team (SDRs, AEs, Marketing)'}")
     sections.append(f"*When?*\n{when}")
+    footer = " · ".join(x for x in (
+        tag,
+        _AREA_LABEL.get(entry.area, entry.area),
+        f"by {entry.who}",
+        f"<{entry.github}|GitHub>" if entry.github else "",
+        f"<{NOTION_REGISTER_URL}|full history (Notion)>",
+    ) if x)
     return {
         "blocks": [
-            {"type": "header", "text": {"type": "plain_text", "text": header}},
+            {"type": "header", "text": {"type": "plain_text", "text": header[:150]}},
             {"type": "section", "text": {"type": "mrkdwn", "text": "\n\n".join(sections)}},
-            {"type": "context", "elements": [
-                {"type": "mrkdwn",
-                 "text": f"{_AREA_LABEL.get(entry.area, entry.area)} · by {entry.who} · "
-                         f"ref {entry.change_id} (started/completed posts for one "
-                         "change share this ref)"}]},
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": footer}]},
         ]
     }
 
@@ -153,6 +173,10 @@ def notion_properties(entry: ChangeEntry) -> dict:
         "Who made the change": _rt(entry.who),
         "Change ref": _rt(entry.change_id),
     }
+    if entry.serial:
+        props["Serial"] = {"number": entry.serial}
+    if entry.github:
+        props["GitHub"] = {"url": entry.github}
     if entry.why:
         props["Why it changed"] = _rt(entry.why)
     if entry.summary:

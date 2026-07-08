@@ -1350,11 +1350,22 @@ def create_app() -> FastAPI:
             entry = changelog_mod.ChangeEntry(**{
                 k: v for k, v in body.items()
                 if k in ("change_id", "what", "why", "area", "who", "audience",
-                         "status", "summary")
+                         "status", "summary", "github")
                 and v is not None})
         except Exception as e:  # noqa: BLE001 — pydantic validation → 422
             raise HTTPException(status_code=422, detail=str(e)) from None
         entries = json.loads(repo.get_setting("automation_changelog") or "[]")
+        # Serial (CHG-14): a follow-up post for an EXISTING change_id inherits
+        # that change's serial (one number per change, not per post); a new
+        # change gets max+1. Numeric so the team can track changes by count.
+        prior = next((e for e in entries
+                      if e.get("change_id") == entry.change_id and e.get("serial")), None)
+        if prior:
+            entry.serial = prior["serial"]
+        elif entries:
+            entry.serial = max((e.get("serial") or 0) for e in entries) + 1
+        else:
+            entry.serial = 1
         entries.append(entry.model_dump())
         repo.set_setting("automation_changelog", json.dumps(entries))
         # One log call fans out: Postgres (above) + Slack + the Notion mirror.

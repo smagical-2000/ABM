@@ -26,22 +26,29 @@ def test_entry_requires_what_and_known_status():
 
 def test_card_uses_company_announcement_format():
     """What? / Why? / Who? / When? — the company Feature-Announcement style.
-    'Who?' is the AUDIENCE, not the author (author rides in the footer)."""
+    'Who?' is the AUDIENCE, not the author (author rides in the footer with
+    the serial, the GitHub link, and the Notion register link)."""
     e = changelog.ChangeEntry(
         what="LinkedIn checks now every 15 minutes in selling hours",
         why="Likes must reach Slack fast; the hours gate keeps cost ~$2.7/day",
         area="cadence_scheduling", who="Sunny", audience="SDRs and AEs",
-        status="completed", summary="A like is picked up within 15 minutes")
-    card = json.dumps(changelog.build_change_card(e))
+        status="completed", summary="A like is picked up within 15 minutes",
+        serial=14, github="https://github.com/getmagical/abm-discovery/pull/30")
+    payload = changelog.build_change_card(e)
+    card = json.dumps(payload)
     for needle in ("*What?*", "*Why?*", "*Who?*", "*When?*",
                    "SDRs and AEs", "Live now", "Cadence or scheduling",
-                   "by Sunny", e.change_id):
+                   "by Sunny", "CHG-14",
+                   "<https://github.com/getmagical/abm-discovery/pull/30|GitHub>",
+                   "full history (Notion)"):
         assert needle in card
+    assert payload["blocks"][0]["text"]["text"].startswith("CHG-14 · ")
     assert "automation_logic" not in card and "cadence_scheduling" not in card
     assert not any(0x1F300 <= ord(ch) <= 0x1FAFF for ch in card)   # no emoji
     started = json.dumps(changelog.build_change_card(
         changelog.ChangeEntry(what="x", status="initiated")))
     assert "In progress" in started
+    assert "CHG-" not in started                         # serial 0 = no tag
     default_aud = json.dumps(changelog.build_change_card(changelog.ChangeEntry(what="x")))
     assert "GTM team" in default_aud                     # audience never blank
 
@@ -80,6 +87,15 @@ def test_notion_properties_map_the_schema():
 def test_notion_omits_empty_optionals():
     p = changelog.notion_properties(changelog.ChangeEntry(what="x"))
     assert "Why it changed" not in p and "Summary" not in p   # nothing empty written
+    assert "Serial" not in p and "GitHub" not in p            # unset -> omitted
+
+
+def test_notion_maps_serial_and_github():
+    p = changelog.notion_properties(changelog.ChangeEntry(
+        what="x", serial=7,
+        github="https://github.com/getmagical/abm-discovery/commit/abc1234"))
+    assert p["Serial"] == {"number": 7}
+    assert p["GitHub"] == {"url": "https://github.com/getmagical/abm-discovery/commit/abc1234"}
 
 
 def test_notion_post_needs_token_and_db(monkeypatch):
@@ -155,9 +171,18 @@ def test_initiate_complete_and_list(client, monkeypatch):
     assert done["entry"]["change_id"] == cid and done["total"] == 2
     assert [e.status for e in posts] == ["initiated", "completed"]
 
+    # Serials: the first change gets CHG-1; its completed post INHERITS 1 (one
+    # number per change, not per post); the next new change gets CHG-2.
+    assert first["entry"]["serial"] == 1 and done["entry"]["serial"] == 1
+    third = client.post("/api/ops/changelog", json={
+        "what": "Another change",
+        "github": "https://github.com/getmagical/abm-discovery/pull/31"}).json()
+    assert third["entry"]["serial"] == 2
+    assert third["entry"]["github"].endswith("/pull/31")
+
     lst = client.get("/api/ops/changelog").json()
-    assert lst["total"] == 2
-    assert lst["entries"][0]["status"] == "completed"       # newest first
+    assert lst["total"] == 3
+    assert lst["entries"][0]["serial"] == 2                 # newest first
 
 
 def test_add_validates(client):

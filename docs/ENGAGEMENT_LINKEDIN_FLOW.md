@@ -42,6 +42,9 @@ Someone reacts (like, celebrate, etc.) on a Magical sponsored TOFU post
       |
       +--> [6] Airtable "LinkedIn <> Airtable" table   (lead capture record)
       |            |
+      |            +--> [6b] Tracking mirror: "TOFU Leads by ABM" base
+      |            |         (every lead copied, stamped Synced At — the
+      |            |          audit table proving no lead is missed)
       |            v  Airtable native automation (on create, email-gated)
       |       [7] Salesforce Lead   (created by the Airtable automation)
       |
@@ -61,6 +64,7 @@ Someone reacts (like, celebrate, etc.) on a Magical sponsored TOFU post
 | 4 | Our runner (ABM gate) | Keep only ABM target companies | per reactor | company -> keep or drop |
 | 5 | FullEnrich | Phone number (best effort) | per surviving lead | contact -> phone |
 | 6 | Airtable ("LinkedIn <> Airtable") | Lead capture of record | upsert (email is the key) | contact -> Airtable row |
+| 6b | Airtable ("TOFU Leads by ABM" base) | Tracking mirror: an audit copy of every captured lead, stamped Synced At, so the team can verify nothing is missed | after each successful primary write | same row + Synced At -> mirror row |
 | 7 | Salesforce | CRM Lead | Airtable automation (runs as Alykhan Jina) | Airtable row -> SFDC Lead |
 | 8 | Reply.io | Nurture sequence | contact added | contact -> campaign member |
 | 9 | ABM platform (Postgres) | Engagement heat and account tier | event recorded | account -> linkedin_tofu +6 pts |
@@ -139,6 +143,7 @@ A captured engagement lands in four places. Access and fields:
 | Where | What it holds | Fields | Access |
 |---|---|---|---|
 | **Airtable, "LinkedIn <> Airtable" table** | The lead capture record (the monitoring table for this ticket) | Name, title, company, email, phone, LinkedIn URL, post category, captured-at timestamp | [airtable.com/appniZ6UOILREppmF](https://airtable.com/appniZ6UOILREppmF) (table "LinkedIn <> Airtable"; no access yet: ask Sunny or Alykhan for an invite) |
+| **Airtable, "TOFU Leads by ABM" base (tracking mirror)** | An audit copy of every captured lead, including the full historical backfill | Same columns as the primary table plus Synced At (when the pipeline wrote the row) | New base created 2026-07-08 (invite from Galyna/Sunny; link added at activation) |
 | **Salesforce** | The CRM Lead | Standard Lead fields plus source | Existing SFDC seats (Leads, source "TOFU Engagement Campaign") |
 | **ABM platform, Engagement tab** | Account-level view: heat score, tier, last touch, and the full dated timeline of every touch | Account, tier, points per event, timestamps per event | [engagement-preview-production.up.railway.app](https://engagement-preview-production.up.railway.app) (login required; creds from Sunny. Justin, Gabe, Ben already have access) |
 | **Platform database** | Raw store behind the console (one linkedin_tofu event per captured reaction) | contacts + events tables with full timestamps | Engineering only |

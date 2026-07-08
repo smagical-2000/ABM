@@ -99,6 +99,19 @@ class AirtableClient:
         body = {"records": [{"fields": fields}], "typecast": True}
         return await self._send("POST", body)
 
+    async def records(self) -> list[dict]:
+        """Every record in the table (paged, read-only). Used by the mirror
+        backfill. Returns raw record dicts ({id, fields, createdTime})."""
+        out: list[dict] = []
+        offset = None
+        while True:
+            url = f"{self._url}?pageSize=100" + (f"&offset={offset}" if offset else "")
+            d = await self._send("GET", None, url=url)
+            out.extend(d.get("records") or [])
+            offset = d.get("offset")
+            if not offset:
+                return out
+
     @staticmethod
     def record_id(resp: dict) -> str | None:
         """Pull the (first) record id out of an upsert/create response."""

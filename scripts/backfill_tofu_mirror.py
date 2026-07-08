@@ -1,0 +1,144 @@
+"""One-command activation for the TOFU tracking mirror (Galyna, 2026-07-08).
+
+The mirror is a second Airtable base ("TOFU Leads by ABM") that receives a copy
+of every captured LinkedIn TOFU lead, so the team can audit that the capture
+workflow misses nothing. The runner dual-writes new leads once
+AIRTABLE_TOFU_MIRROR_BASE_ID is set; THIS script does the one-time setup:
+
+  1. Ensures the mirror TABLE exists — created via the Airtable meta API by
+     cloning the primary table's schema (same columns) plus a "Synced At"
+     dateTime column. Idempotent: an existing table is reused.
+  2. Backfills EVERY existing row from the primary "LinkedIn <> Airtable"
+     table into the mirror (upsert on Email, else LinkedIn URL), stamping
+     Synced At, so the mirror proves historical completeness too.
+
+Usage:
+    python scripts/backfill_tofu_mirror.py            # dry-run: reports counts
+    python scripts/backfill_tofu_mirror.py --apply    # create table + write
+
+Needs: AIRTABLE_API_KEY with access to BOTH bases (data read/write + schema
+write on the mirror base), AIRTABLE_BASE_ID / AIRTABLE_LINKEDIN_TABLE (primary),
+AIRTABLE_TOFU_MIRROR_BASE_ID (+ optional AIRTABLE_TOFU_MIRROR_TABLE name).
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import os
+import sys
+from datetime import UTC, datetime
+
+import httpx
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
+
+_META = "https://api.airtable.com/v0/meta/bases"
+# Field types the meta API can create as-is; anything else lands as text.
+_CLONEABLE = {"singleLineText", "multilineText", "url", "email", "phoneNumber",
+              "number", "checkbox", "dateTime", "date", "singleSelect", "multipleSelects"}
+
+
+def _hdr() -> dict:
+    return {"Authorization": f"Bearer {os.environ['AIRTABLE_API_KEY']}",
+            "Content-Type": "application/json"}
+
+
+def _clone_field(f: dict) -> dict:
+    """A creatable field spec from a primary-table field. Options are copied
+    when present; unsupported types degrade to plain text (data still lands
+    because writes use typecast)."""
+    if f["type"] not in _CLONEABLE:
+        return {"name": f["name"], "type": "singleLineText"}
+    out = {"name": f["name"], "type": f["type"]}
+    if f.get("options"):
+        out["options"] = f["options"]
+    return out
+
+
+def ensure_mirror_table(primary_base: str, primary_table: str,
+                        mirror_base: str, mirror_name: str, *, apply: bool) -> str | None:
+    """Return the mirror table id (creating it if needed under --apply)."""
+    with httpx.Client(timeout=30) as c:
+        prim = c.get(f"{_META}/{primary_base}/tables", headers=_hdr())
+        prim.raise_for_status()
+        src = next(t for t in prim.json()["tables"]
+                   if t["name"] == primary_table or t["id"] == primary_table)
+        mirr = c.get(f"{_META}/{mirror_base}/tables", headers=_hdr())
+        mirr.raise_for_status()
+        existing = next((t for t in mirr.json()["tables"] if t["name"] == mirror_name), None)
+        if existing:
+            print(f"[mirror] table exists: {existing['name']} ({existing['id']})")
+            return existing["id"]
+        fields = [_clone_field(f) for f in src["fields"]
+                  if f["name"] != "Synced At" and not f["name"].startswith("ABM Match")]
+        fields.append({"name": "Synced At", "type": "dateTime",
+                       "options": {"timeZone": "utc",
+                                   "dateFormat": {"name": "iso"},
+                                   "timeFormat": {"name": "24hour"}}})
+        if not apply:
+            print(f"[mirror] would CREATE table '{mirror_name}' with "
+                  f"{len(fields)} columns (dry-run)")
+            return None
+        r = c.post(f"{_META}/{mirror_base}/tables", headers=_hdr(),
+                   json={"name": mirror_name, "fields": fields})
+        r.raise_for_status()
+        tid = r.json()["id"]
+        print(f"[mirror] created table '{mirror_name}' ({tid})")
+        return tid
+
+
+async def backfill(mirror_table_id: str | None, *, apply: bool) -> None:
+    from auto_search.engagement.airtable_client import AirtableClient
+
+    primary = AirtableClient()
+    rows = await primary.records()
+    print(f"[mirror] primary rows: {len(rows)}")
+    if not apply:
+        keyed = sum(1 for r in rows
+                    if (r["fields"].get("Email") or r["fields"].get("LinkedIn URL")))
+        print(f"[mirror] would backfill {keyed} keyed rows "
+              f"({len(rows) - keyed} unkeyed would be created as-is). Dry-run.")
+        return
+    mirror = AirtableClient(base_id=os.environ["AIRTABLE_TOFU_MIRROR_BASE_ID"],
+                            table=mirror_table_id
+                            or os.getenv("AIRTABLE_TOFU_MIRROR_TABLE", "TOFU Leads by ABM"))
+    now = datetime.now(UTC).isoformat()
+    ok = failed = 0
+    for r in rows:
+        fields = {k: v for k, v in r["fields"].items() if v not in (None, "")}
+        fields.pop("ABM Match", None)          # unused field, not part of the mirror
+        fields["Synced At"] = now
+        try:
+            if fields.get("Email"):
+                await mirror.upsert(fields, merge_on=["Email"])
+            elif fields.get("LinkedIn URL"):
+                await mirror.upsert(fields, merge_on=["LinkedIn URL"])
+            else:
+                await mirror.create(fields)    # unkeyed legacy row — copy as-is
+            ok += 1
+        except Exception as e:  # noqa: BLE001 — keep going; report at the end
+            failed += 1
+            print(f"[mirror] FAILED row {r['id']}: {e}", file=sys.stderr)
+    print(f"[mirror] backfill done: {ok} written, {failed} failed of {len(rows)}")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Create + backfill the TOFU tracking mirror")
+    ap.add_argument("--apply", action="store_true", help="actually create/write")
+    args = ap.parse_args()
+    mirror_base = os.getenv("AIRTABLE_TOFU_MIRROR_BASE_ID")
+    if not mirror_base:
+        print("AIRTABLE_TOFU_MIRROR_BASE_ID not set — add the mirror base id first.")
+        return 1
+    tid = ensure_mirror_table(os.environ["AIRTABLE_BASE_ID"],
+                              os.environ["AIRTABLE_LINKEDIN_TABLE"], mirror_base,
+                              os.getenv("AIRTABLE_TOFU_MIRROR_TABLE", "TOFU Leads by ABM"),
+                              apply=args.apply)
+    asyncio.run(backfill(tid, apply=args.apply))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -99,7 +99,8 @@ async def _scrape(share_categories: dict[str, str], *, max_reactions: int) -> li
 
 async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo,
               discovery_repo, airtable_client=None, replyio_client=None,
-              max_reactions: int = 50, max_contacts: int | None = None,
+              mirror_client=None, max_reactions: int = 50,
+              max_contacts: int | None = None,
               max_leads: int | None = None, dry_run: bool = True,
               now: str | None = None) -> dict:
     """Run the pipeline. Returns {dry_run, stats, results}. Never raises per-contact —
@@ -237,6 +238,21 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
             stats["airtable_failed"] += 1
             results.append(outcome)
             continue
+
+        # Tracking mirror (Galyna, 2026-07-08): the same row is ALSO written to
+        # the "TOFU Leads by ABM" base, stamped Synced At, so the team can audit
+        # that the workflow misses nothing. Strictly best-effort: a mirror
+        # failure never blocks the lead (primary row already landed above), it
+        # is counted and ops-alerted by the caller.
+        if mirror_client is not None:
+            try:
+                await mirror_client.upsert(
+                    {**fields, "Synced At": now},
+                    merge_on=["Email"] if email else ["LinkedIn URL"])
+                stats["mirror_upserted"] += 1
+            except Exception as e:  # noqa: BLE001
+                logger.warning("mirror upsert failed for %s: %s", email or enriched_url, e)
+                stats["mirror_failed"] += 1
 
         try:
             # Reply.io is an EMAIL sequencer: phone-only leads can't enroll —

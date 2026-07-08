@@ -400,3 +400,43 @@ async def test_max_leads_caps_output(patched, monkeypatch):
                            airtable_client=_FakeAirtable(), replyio_client=_FakeReply(),
                            dry_run=True, max_leads=1)
     assert out["stats"]["would_create"] == 1   # capped at 1, not 2
+
+
+# ── the tracking mirror (Galyna's "TOFU Leads by ABM" base, 2026-07-08) ─
+
+
+async def test_mirror_receives_copy_with_synced_at(patched, monkeypatch):
+    """Every lead that lands in the primary table is also written to the
+    mirror, stamped Synced At; the mirror never gets rows the primary lacks."""
+    monkeypatch.setattr(runner, "cross_and_persist", lambda **kw: (2, 2))
+    air, mir = _FakeAirtable(), _FakeAirtable()
+    out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=object(),
+                           scoring_repo=None, discovery_repo=None,
+                           airtable_client=air, replyio_client=_FakeReply(),
+                           mirror_client=mir, dry_run=False)
+    assert len(mir.upserts) == len(air.upserts) == 2
+    assert out["stats"]["mirror_upserted"] == 2
+    m = mir.upserts[0]["fields"]
+    assert m["Email"] == "anna@abmco.com" and m["Synced At"]
+    assert mir.upserts[0]["merge_on"] == ["Email"]
+
+
+async def test_mirror_failure_never_blocks_the_lead(patched, monkeypatch):
+    monkeypatch.setattr(runner, "cross_and_persist", lambda **kw: (2, 2))
+    air, mir = _FakeAirtable(), _FakeAirtable(fail=True)
+    out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=object(),
+                           scoring_repo=None, discovery_repo=None,
+                           airtable_client=air, replyio_client=_FakeReply(),
+                           mirror_client=mir, dry_run=False)
+    assert len(air.upserts) == 2                       # primary rows all landed
+    assert out["stats"]["mirror_failed"] == 2          # counted for the ops alert
+    assert out["stats"]["airtable_upserted"] == 2
+
+
+async def test_no_mirror_client_means_no_mirror_stats(patched, monkeypatch):
+    monkeypatch.setattr(runner, "cross_and_persist", lambda **kw: (2, 2))
+    out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=object(),
+                           scoring_repo=None, discovery_repo=None,
+                           airtable_client=_FakeAirtable(), replyio_client=_FakeReply(),
+                           dry_run=False)
+    assert "mirror_upserted" not in out["stats"] and "mirror_failed" not in out["stats"]

@@ -168,17 +168,24 @@ def main() -> int:
         _crash_alert(engagement_repo, f"no usable share_ids in {csv_path}")
         return 1
 
-    airtable = reply = None
+    airtable = reply = mirror = None
     if not args.dry_run:
         from auto_search.engagement.airtable_client import AirtableClient
         from auto_search.engagement.replyio_client import ReplyioClient
         airtable = AirtableClient()
         reply = ReplyioClient()
+        # Tracking mirror (Galyna, 2026-07-08): dual-write every lead to the
+        # "TOFU Leads by ABM" base. Unset env -> no mirror, primary unaffected.
+        if os.getenv("AIRTABLE_TOFU_MIRROR_BASE_ID"):
+            mirror = AirtableClient(
+                base_id=os.environ["AIRTABLE_TOFU_MIRROR_BASE_ID"],
+                table=os.getenv("AIRTABLE_TOFU_MIRROR_TABLE", "TOFU Leads by ABM"))
     try:
         summary = asyncio.run(linkedin_ads_runner.run(
             share_categories=share_categories, engagement_repo=engagement_repo,
             scoring_repo=get_scoring_repository(), discovery_repo=get_repository(),
-            airtable_client=airtable, replyio_client=reply, max_reactions=args.max_reactions,
+            airtable_client=airtable, replyio_client=reply, mirror_client=mirror,
+            max_reactions=args.max_reactions,
             max_contacts=args.max_contacts, max_leads=args.max_leads, dry_run=args.dry_run))
     except Exception:  # noqa: BLE001 — cron leg: log + signal failure, don't traceback-crash
         logger.exception("[run_linkedin_tofu] run failed")
@@ -186,6 +193,30 @@ def main() -> int:
         _crash_alert(engagement_repo, traceback.format_exc())
         return 1
     _recovery_alert(engagement_repo)           # posts once iff a crash alert was open
+    # Mirror health: the tracking table's whole job is proving nothing is
+    # missed, so mirror write failures must be TOLD (throttled), and one
+    # recovered note posts when it heals.
+    mf = summary["stats"].get("mirror_failed", 0)
+    if not args.dry_run and mf:
+        try:
+            from auto_search.ops import alerts
+            if alerts.should_alert(engagement_repo, "tofu-mirror", min_gap_hours=3.0):
+                alerts.post_ops_alert(
+                    kind="tofu-mirror", severity="warning", service="linkedin-tofu-cron",
+                    title=f"TOFU tracking mirror: {mf} lead(s) failed to write",
+                    detail="Primary Airtable is unaffected. Check the API token's "
+                           "access to the mirror base; the backfill script re-syncs.")
+        except Exception:  # noqa: BLE001
+            logger.warning("mirror alert failed (continuing)")
+    elif not args.dry_run and summary["stats"].get("mirror_upserted"):
+        try:
+            from auto_search.ops import alerts
+            if alerts.mark_ok(engagement_repo, "tofu-mirror"):
+                alerts.post_ops_alert(kind="tofu-mirror", severity="recovered",
+                                      service="linkedin-tofu-cron",
+                                      title="TOFU tracking mirror healthy again")
+        except Exception:  # noqa: BLE001
+            logger.warning("mirror recovery alert failed (continuing)")
     if not args.dry_run:                       # stamp the last real run for the throttle
         # pass last_synced_at explicitly: set_sync_state only auto-stamps on
         # status success/failed, so "ok" alone would leave it NULL (→ never throttles).

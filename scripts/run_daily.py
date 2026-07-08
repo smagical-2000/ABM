@@ -125,6 +125,18 @@ def main() -> int:
     # failure here must NOT fail the daily run, so its rc is logged, not gated on.
     notify_rc, _, _ = _leg("notify", "run_engagement_notify.py")
 
+    # Best-effort: keep Galyna's tracking table ("ABM Flow LinkedIn <> Airtable")
+    # in sync with funnel leads that arrive via the CLAY path — our runner
+    # dual-writes its own captures live, but a Clay-dump row with an email
+    # becomes an SFDC lead invisibly to us (Lynn Osgood, 2026-07-08). The
+    # reconcile is upsert-only and additive; it never deletes.
+    if os.getenv("AIRTABLE_TOFU_MIRROR_BASE_ID"):
+        tracking_rc, _, _ = _leg("tracking", "backfill_tofu_mirror.py", "--apply")
+        if tracking_rc:
+            print(f"\n[run_daily] tracking reconcile rc={tracking_rc} (non-fatal)", flush=True)
+    else:
+        print("\n[run_daily] tracking reconcile skipped (mirror env unset)", flush=True)
+
     _report(failed, recovered)
     if failed:
         print(f"\n[run_daily] FAILED — {', '.join(failed)} (after retry)", flush=True)

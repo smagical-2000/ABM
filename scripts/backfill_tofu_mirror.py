@@ -105,8 +105,15 @@ def _funnel_lead_keys() -> tuple[set[str], set[str]]:
 
     emails: set[str] = set()
     try:
+        # TWO lead shapes count (2026-07-08, Lynn Osgood case): the older Zap
+        # stamped LeadSource='TOFU Engagement Campaign'; the current Zap stamps
+        # NOTHING (LeadSource null) — so also take Alykhan-created null-source
+        # leads. Safe from over-matching: only emails that ALSO exist as rows
+        # in the primary table can enter the tracking table (the caller filters
+        # primary rows by this set), so a manual unrelated lead changes nothing.
         for lead in SalesforceClient().query(
-                "SELECT Email FROM Lead WHERE LeadSource = 'TOFU Engagement Campaign'"):
+                "SELECT Email FROM Lead WHERE LeadSource = 'TOFU Engagement Campaign' "
+                "OR (LeadSource = null AND CreatedBy.Name = 'Alykhan Jina')"):
             if lead.get("Email"):
                 emails.add(lead["Email"].strip().lower())
     except Exception as e:  # noqa: BLE001 — SFDC down: proceed with runner set only

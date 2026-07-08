@@ -66,6 +66,7 @@ from auto_search.engagement import sync as engagement_sync_mod
 from auto_search.intros import profiles as intros_profiles
 from auto_search.intros import service as intros_service
 from auto_search.normalize import clean_domain, normalize_company_name, normalize_linkedin_url
+from auto_search.ops import watchdog as ops_watchdog
 from auto_search.run_control import RunControl
 from auto_search.runtime import is_production
 from auto_search.scoring import budget as budget_guard
@@ -462,6 +463,11 @@ async def lifespan(app: FastAPI):
     app.state.last_discovery = None
     app.state.run_phase = None                # label for the live banner (which run)
     app.state.loop = asyncio.get_running_loop()
+    # Ops watchdog: alerts to Slack when a cron went silent (OPS_WATCHDOG=1 on
+    # exactly ONE service so incidents alert once). Isolated — never blocks startup.
+    if ops_watchdog.enabled():
+        app.state.ops_watchdog_task = asyncio.create_task(
+            ops_watchdog.watchdog_loop(app))
     # No scoring task can be alive at boot, so anything still marked 'scoring'
     # was orphaned by the previous shutdown — return it to the queue so it does
     # not tick "scoring" forever, and is re-scoreable on demand.

@@ -71,6 +71,32 @@ def _within_active_hours(now: datetime | None = None) -> bool:
     return now.hour >= start or now.hour < end   # window wraps midnight
 
 
+def _crash_alert(repo, detail: str) -> None:
+    """Slack ops alert for a failed run — throttled (3h) because this cron
+    ticks every 15 min and a persistent break must not post 40 duplicates.
+    Best-effort: alerting can never worsen the failure it reports."""
+    try:
+        from auto_search.ops import alerts
+        if alerts.should_alert(repo, "tofu-cron", min_gap_hours=3.0):
+            alerts.post_ops_alert(kind="tofu-cron", severity="failure",
+                                  service="linkedin-tofu-cron",
+                                  title="LinkedIn TOFU run FAILED", detail=detail)
+    except Exception:  # noqa: BLE001
+        logger.warning("ops crash alert failed (continuing)")
+
+
+def _recovery_alert(repo) -> None:
+    """One RECOVERED message when a run succeeds after crash alerts."""
+    try:
+        from auto_search.ops import alerts
+        if alerts.mark_ok(repo, "tofu-cron"):
+            alerts.post_ops_alert(kind="tofu-cron", severity="recovered",
+                                  service="linkedin-tofu-cron",
+                                  title="LinkedIn TOFU run green again")
+    except Exception:  # noqa: BLE001
+        logger.warning("ops recovery alert failed (continuing)")
+
+
 def _hours_since(ts) -> float | None:
     """Hours since an ISO/datetime timestamp, or None if unset/unparseable."""
     if not ts:
@@ -111,6 +137,12 @@ def main() -> int:
 
     engagement_repo = get_engagement_repository()
     engagement_repo.ensure_schema()
+    # Liveness stamp for the ops watchdog: EVERY tick (even a no-op) proves the
+    # 15-min cron is alive; the watchdog alerts when this goes stale in-window.
+    try:
+        engagement_repo.set_setting("ops_tofu_last_tick", datetime.now(UTC).isoformat())
+    except Exception:  # noqa: BLE001 — liveness stamping must never block the run
+        logger.warning("ops tick stamp failed (continuing)")
 
     # Cost guard: the Railway cron ticks every 15 min, but ad reactions barely change and
     # re-scraping + re-enriching every tick was ~$12/day of Apify. Do the real work only
@@ -133,6 +165,7 @@ def main() -> int:
     share_categories = linkedin_ads.load_share_categories(Path(csv_path).read_text())
     if not share_categories:
         logger.error("no usable share_ids in %s", csv_path)
+        _crash_alert(engagement_repo, f"no usable share_ids in {csv_path}")
         return 1
 
     airtable = reply = None
@@ -149,7 +182,10 @@ def main() -> int:
             max_contacts=args.max_contacts, max_leads=args.max_leads, dry_run=args.dry_run))
     except Exception:  # noqa: BLE001 — cron leg: log + signal failure, don't traceback-crash
         logger.exception("[run_linkedin_tofu] run failed")
+        import traceback
+        _crash_alert(engagement_repo, traceback.format_exc())
         return 1
+    _recovery_alert(engagement_repo)           # posts once iff a crash alert was open
     if not args.dry_run:                       # stamp the last real run for the throttle
         # pass last_synced_at explicitly: set_sync_state only auto-stamps on
         # status success/failed, so "ok" alone would leave it NULL (→ never throttles).

@@ -27,14 +27,19 @@ Releases are annotated git tags on `main`: `vMAJOR.MINOR.PATCH`.
    feature, one small PR. (AGENTS.md "How we build here" governs the build itself.)
 2. **Inner verify loop before "done"** — ruff, pytest (with a new test for the
    change), JSX transpile check, `tests/ui` Playwright suite when UI changed.
-3. **PR → CI green → review → merge to `main`.**
-4. **Tag + deploy**: when deploying, tag `main`, deploy from a clean checkout of
+3. **Independent QA agent — a fresh-context agent that did NOT write the code**
+   reviews the diff line by line, re-runs the gates itself, and adversarially
+   probes the feature in a browser. It must return PASS (blocking findings get
+   fixed and re-QA'd; non-blocking findings become tickets). Nothing ships to
+   the change log, deploy, or ticket-Done without this pass (Sunny, 2026-07-08).
+4. **PR → CI green → review → merge to `main`.**
+5. **Tag + deploy**: when deploying, tag `main`, deploy from a clean checkout of
    that tag with `BUILD_STAMP=<tag>`, per service (`railway up -s <svc>`).
-5. **Verify on prod** — the stamp must appear in the service's logs (deploy
+6. **Verify on prod** — the stamp must appear in the service's logs (deploy
    SUCCESS status is never proof), plus a feature-appropriate smoke check.
-6. **Change log** — card drafted, Sunny approves, posts to Slack + Notion.
+7. **Change log** — card drafted, Sunny approves, posts to Slack + Notion.
    A change auto-logs only at ship-to-prod-VERIFIED, not at deploy.
-7. **Every bug found → `evals/bugs.json`** with the test that now guards it.
+8. **Every bug found → `evals/bugs.json`** with the test that now guards it.
 
 ## Hypercare exception (honest escape hatch)
 

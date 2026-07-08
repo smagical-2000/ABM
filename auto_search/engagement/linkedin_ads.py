@@ -119,16 +119,15 @@ _UTM_MEDIUM = "paid-social"
 def build_airtable_fields(*, company: str, email: str | None = None,
                           first_name: str | None = None,
                           last_name: str | None = None, title: str | None = None,
-                          phone: str | None = None, linkedin_url: str | None = None,
-                          abm_match: bool = True) -> dict:
+                          phone: str | None = None, linkedin_url: str | None = None) -> dict:
     """Build the Airtable row for the "LinkedIn <> Airtable" table.
 
     The upsert merge key is Email when present, else LinkedIn URL — a phone-only
     lead (2026-07-08 rule: email OR phone qualifies) still gets a stable key.
-    "ABM Match" (Yes/No select, field fldzBY6E9F9iYSlSY) lets the team filter
-    target-account leads now that non-ABM reactors are captured too. Only
-    non-empty optionals are written (we never overwrite a cell with a blank).
-    UTM_* match the existing TOFU rows.
+    Only non-empty optionals are written (we never overwrite a cell with a
+    blank). UTM_* match the existing TOFU rows. (Note: an unused "ABM Match"
+    select field exists in the table from the withdrawn capture-all proposal —
+    intentionally NOT written until Galyna decides; see the Linear ticket.)
     """
     if not ((email and email.strip()) or (linkedin_url and str(linkedin_url).strip())):
         raise ValueError("Airtable row requires Email or LinkedIn URL (the upsert key)")
@@ -139,7 +138,6 @@ def build_airtable_fields(*, company: str, email: str | None = None,
         "UTM Source": _UTM_SOURCE,
         "UTM Medium": _UTM_MEDIUM,
         "UTM Campaign": UTM_CAMPAIGN,
-        "ABM Match": "Yes" if abm_match else "No",
     }
     for key, val in (("Email", email), ("First Name", first_name), ("Last Name", last_name),
                      ("Title", title), ("Phone", phone), ("LinkedIn URL", linkedin_url)):

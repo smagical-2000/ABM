@@ -3,12 +3,12 @@
 Per post: scrape people who REACTED (Apify `harvestapi~linkedin-post-reactions`) ->
 tag each reactor with the post's share_id/category -> dedupe people -> enrich profile
 to company+domain (Apify freshdata via social.apify.enrich) -> drop Magical's own
-staff (social.filters.is_magical) -> ABM match FLAG (engagement.cross; 2026-07-08:
-non-ABM reactors are CAPTURED too, tagged "ABM Match: No") -> Apollo work email +
-phone (email OR phone qualifies a lead; FullEnrich phone fallback saves the
-no-email ones) -> WRITE: Airtable upsert for every lead (the "LinkedIn <>
-Airtable" table; downstream automation takes it from there), then — ABM matches
-with an email only — Reply.io add-to-campaign, and `linkedin_tofu` heat (6 pts).
+staff (social.filters.is_magical) -> ABM-only gate (engagement.cross; capturing
+non-ABM reactors too is proposed, pending Galyna — see Linear) -> Apollo work
+email + phone (2026-07-08: email OR phone qualifies a lead; FullEnrich phone
+fallback saves the no-email ones) -> WRITE: Airtable upsert (the "LinkedIn <>
+Airtable" table; downstream automation takes it from there), then Reply.io
+add-to-campaign (email leads) -> record `linkedin_tofu` heat (6 pts).
 
 We push to Airtable, NOT Salesforce (per the 2026-06 change): SFDC creation is handled
 by the user's Airtable automation. Reply.io and the heat capture are kept.
@@ -25,9 +25,10 @@ Idempotency (survives hourly re-runs):
     of duplicating it.
 
 Cost is bounded by `max_reactions` (per post) + `max_contacts` (people per run);
-enrichment + Apollo run only for not-yet-processed people. FullEnrich runs for ABM
-leads missing a phone and for any lead missing an email (the lookup that qualifies
-them); non-ABM leads with an email skip it (Clay waterfall backfills later).
+enrichment + Apollo run only for not-yet-processed people, ABM survivors get the
+writes. FullEnrich runs for leads missing a phone (for a no-email lead it's the
+lookup that qualifies them); dead-ends persist a contact row so they are never
+re-billed on the next scan.
 """
 
 from __future__ import annotations
@@ -152,13 +153,13 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
             stats["no_company"] += 1
             continue
 
-        # ABM match is a FLAG, not a gate (2026-07-08, Sunny): every reactor is
-        # captured; the match only decides Reply.io enrollment, heat scoring,
-        # and the Slack lead card. Non-ABM leads land in Airtable tagged "No".
+        # ABM-only gate: keep only people whose company is an ABM target.
+        # (Capturing non-ABM reactors too is PROPOSED, 2026-07-08 — Linear
+        # ticket pending Galyna's decision; until then they are dropped here.)
         m = index.match(company=company, domain=domain)
-        abm_match = bool(m and "abm" in m.lists)
-        if not abm_match:
-            stats["non_abm_captured"] += 1
+        if not (m and "abm" in m.lists):
+            stats["not_abm"] += 1
+            continue
 
         first, last = _split_name(enr.get("full_name") or r.get("name"))
         display = enr.get("full_name") or r.get("name")
@@ -172,15 +173,13 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
         phone = ap.get("phone")
         title = ap.get("title") or enr.get("job_title") or r.get("position")
 
-        company = company or (m.name if m else None) or domain
+        company = company or m.name
         campaign_id = la.campaign_for(r["category"])
-        # FullEnrich phone fallback — real runs only (no dry-run spend), and only
-        # when it changes the outcome: an ABM lead without a phone (sales wants
-        # the number), or ANY lead without an email (2026-07-08 rule: email OR
-        # phone qualifies a lead, so the phone lookup is what saves it). A
-        # non-ABM lead that already has an email skips the credit — the Clay
-        # waterfall (later build) will backfill those.
-        if not phone and not dry_run and (abm_match or not email):
+        # FullEnrich phone fallback — real runs only (no dry-run spend). Runs
+        # when the lead has no phone: for a lead WITH an email it adds the
+        # mobile; for a lead WITHOUT one it's the lookup that QUALIFIES them
+        # (2026-07-08 rule: email OR phone makes a lead).
+        if not phone and not dry_run:
             fe = await enrichment.enrich_contact(
                 first_name=first, last_name=last, domain=domain,
                 company=company, linkedin=enriched_url)
@@ -199,8 +198,7 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
         outcome = {
             "name": display, "email": email, "phone": phone, "title": title,
             "company": company, "domain": domain, "category": r["category"],
-            "campaign_id": campaign_id,
-            "account_id": m.account_id if m else None, "abm_match": abm_match,
+            "campaign_id": campaign_id, "account_id": m.account_id,
             "share_id": r["share_id"], "airtable_id": None,
         }
 
@@ -213,10 +211,10 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
             continue
 
         # Slack heads-up BEFORE the lead is written to Airtable (Airtable then creates
-        # the Salesforce lead via its own automation). ABM leads only — non-ABM
-        # captures would flood the channel; they're filterable in Airtable instead.
-        # Best-effort + off-loop (the poster is sync) so a Slack hiccup never blocks.
-        if abm_match and await asyncio.to_thread(notify.notify_lead, {
+        # the Salesforce lead via its own automation). So the team sees every TOFU lead
+        # the moment it enters the pipeline, ahead of SFDC. Best-effort + off-loop (the
+        # poster is sync) so a Slack hiccup never blocks or slows the write.
+        if await asyncio.to_thread(notify.notify_lead, {
                 "name": display, "title": title, "company": company, "email": email,
                 "phone": phone, "linkedin": enriched_url,
                 "segment": la.segment_for(r["category"])}):
@@ -229,8 +227,7 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
         try:
             fields = la.build_airtable_fields(
                 email=email, company=company, first_name=first, last_name=last,
-                title=title, phone=phone, linkedin_url=enriched_url,
-                abm_match=abm_match)
+                title=title, phone=phone, linkedin_url=enriched_url)
             res = await airtable_client.upsert(
                 fields, merge_on=["Email"] if email else ["LinkedIn URL"])
             outcome["airtable_id"] = airtable_client.record_id(res)
@@ -242,10 +239,9 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
             continue
 
         try:
-            # Reply.io is an EMAIL sequencer for TARGET accounts: enroll only
-            # ABM-matched leads that have an email. Phone-only and non-ABM
-            # leads stay out (visible in Airtable; Clay/SDRs pick them up).
-            if replyio_client is not None and campaign_id and abm_match and email:
+            # Reply.io is an EMAIL sequencer: phone-only leads can't enroll —
+            # they stay visible in Airtable for the SDRs (and Clay later).
+            if replyio_client is not None and campaign_id and email:
                 res = await replyio_client.add_to_campaign(
                     campaign_id=campaign_id, email=email, first_name=first,
                     last_name=last, company=company, title=title, phone=phone)
@@ -253,18 +249,14 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
                     stats["replyio_already_sequenced"] += 1   # in another sequence; left as-is
                 else:
                     stats["replyio_added"] += 1
-            elif abm_match and not email:
+            elif not email:
                 stats["replyio_skipped_no_email"] += 1
         except Exception as e:  # noqa: BLE001 — lead already created; campaign add is best-effort
             logger.warning("reply.io add failed for %s: %s", email, e)
             stats["replyio_failed"] += 1
 
-        # Contact row for EVERYONE (it's the durable dedup key + the Clay
-        # waterfall input later); heat EVENTS only for ABM matches — engagement
-        # points on non-target companies would be noise in the tiers.
         contact_rows.append(_contact_row(r, enr, email, domain, company, title))
-        if abm_match:
-            event_rows.append(_event_row(r, outcome, now))
+        event_rows.append(_event_row(r, outcome, now))
         results.append(outcome)
         leads += 1
         if max_leads and leads >= max_leads:

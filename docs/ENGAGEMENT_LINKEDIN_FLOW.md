@@ -30,8 +30,8 @@ Someone reacts (like, celebrate, etc.) on a Magical sponsored TOFU post
 [3] Apollo email lookup   -> find a work email
       |
       v
-[4] ABM match FLAG        -> every reactor is captured; the flag (Yes/No) marks
-      |                      whether the company is on the ABM target list
+[4] ABM match gate        -> keep ONLY people whose company is on the ABM target list
+      |                      (capturing non-ABM reactors too is proposed, with Galyna)
       v
 [5] FullEnrich phone      -> phone lookup (always tried when a lead has no email,
       |                      since email OR phone is what qualifies a lead)
@@ -75,20 +75,19 @@ the heat capture are ours.
   (one row per ad: `share_id, category`, e.g. Ortho). Adding a new ad = adding a row.
 - **Engagement trigger:** any reaction (like, celebrate, support, etc.) on those
   posts. Comments are not currently captured, reactions only.
-- **Lead qualification rules (updated 2026-07-08):**
+- **Lead qualification rules (the gates, in order; email-or-phone updated 2026-07-08):**
   1. **Dedup**: a person we already captured is skipped before any paid step.
-  2. **Everyone is captured**: reactors from companies NOT on the ABM target
-     list are no longer dropped. Each Airtable row carries an **ABM Match**
-     (Yes/No) field so the team can filter target-account leads.
+  2. **ABM match**: the reactor's company must be on the ABM target list.
+     Reactors from non-ABM companies are dropped today. (Capturing them too is
+     an open proposal with Galyna, tracked in Linear.)
   3. **Email OR phone qualifies a lead**: a person with a work email (Apollo)
      or a phone number (FullEnrich) becomes a lead. Only people with neither
      are skipped. Phone-only leads are keyed on their LinkedIn URL.
   4. Magical's own employees are dropped.
-  - **What stays ABM-only**: Reply.io enrollment (email leads at target
-    accounts), engagement heat points, and the Slack lead card.
   - **Known gap (ticketed)**: the Airtable to Salesforce automation currently
     creates a Lead only when the row has an email, so phone-only leads stay in
-    Airtable until that automation adds a phone-based check.
+    Airtable (with Reply.io not applicable either, as an email tool) until
+    that automation adds a phone-based check.
 - **Enrichment:** Apollo (work email) plus FullEnrich (phone). FullEnrich runs
   for ABM leads missing a phone and for any lead missing an email (the phone is
   what qualifies those). A Clay waterfall for deeper email and phone finding
@@ -135,7 +134,7 @@ A captured engagement lands in four places. Access and fields:
 
 | Where | What it holds | Fields | Access |
 |---|---|---|---|
-| **Airtable, "LinkedIn <> Airtable" table** | The lead capture record (the monitoring table for this ticket) | Name, title, company, email, phone, LinkedIn URL, ABM Match (Yes/No), post category, captured-at timestamp | Airtable base share (ask Sunny or Alykhan for an invite) |
+| **Airtable, "LinkedIn <> Airtable" table** | The lead capture record (the monitoring table for this ticket) | Name, title, company, email, phone, LinkedIn URL, post category, captured-at timestamp | Airtable base share (ask Sunny or Alykhan for an invite) |
 | **Salesforce** | The CRM Lead | Standard Lead fields plus source | Existing SFDC seats |
 | **ABM platform, Engagement tab** | Account-level view: heat score, tier, last touch, and the full dated timeline of every touch | Account, tier, points per event, timestamps per event | Platform login (creds from Sunny; Justin, Gabe, Ben already have access) |
 | **Platform database** | Raw store behind the console (one linkedin_tofu event per captured reaction) | contacts + events tables with full timestamps | Engineering only |

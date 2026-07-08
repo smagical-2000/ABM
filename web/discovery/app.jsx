@@ -1218,10 +1218,10 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
   function handleImported(res) {
     setImporting(false);
     const n = res.imported;
-    // Generic lists classify at commit too — surface rows dropped THERE, or a
-    // borderline account can vanish between preview and commit unnoticed (QA F3).
-    const out = res.unclassified_count
-      ? ` ${res.unclassified_count} left out (not confidently classifiable).` : '';
+    // Generic lists: all rows import; borderline ones carry a classification
+    // flag — surface the count so nothing feels silently altered (QA F3).
+    const out = res.flagged_count
+      ? ` ${res.flagged_count} flagged for segment review.` : '';
     pushToast(`Imported ${n} ${n === 1 ? 'account' : 'accounts'} to the queue.${out} Score them when ready.`, 'success');
     load(true);
   }

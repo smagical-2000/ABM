@@ -579,7 +579,7 @@ def test_engagement_search_filters_accounts(page):
 def test_import_wizard_generic_list_shows_breakdown_and_leftouts(page):
     """Generic accounts-list import (2026-07-08): the wizard banner shows the
     per-segment breakdown instead of a single segment, and the amber box lists
-    the rows the classifier left out. Preview endpoint is MOCKED — this guards
+    the rows the classifier flagged. Preview endpoint is MOCKED — this guards
     the UI contract; the classification itself is covered in the API tests."""
     import json as _json
     payload = {
@@ -589,8 +589,8 @@ def test_import_wizard_generic_list_shows_breakdown_and_leftouts(page):
                     {"col": "Website Domain", "fact": "Domain"}],
         "unmatched_columns": ["Opportunity Name"], "preview": [],
         "new_count": 3, "known_count": 0,
-        "unclassified": ["Waud Capital Partners", "Guidehouse"],
-        "unclassified_count": 2,
+        "flagged": ["Waud Capital Partners", "Guidehouse"],
+        "flagged_count": 2,
     }
     page.route("**/api/scoring/import/preview", lambda route: route.fulfill(
         status=200, content_type="application/json", body=_json.dumps(payload)))
@@ -602,6 +602,6 @@ def test_import_wizard_generic_list_shows_breakdown_and_leftouts(page):
     page.wait_for_selector("text=Accounts list (name + domain)")
     page.wait_for_selector("text=2 Health System")            # breakdown, not one segment
     page.wait_for_selector("text=1 Payer")
-    page.wait_for_selector("text=2 left out")
+    page.wait_for_selector("text=2 imported with a flag")
     assert page.get_by_text("Waud Capital Partners", exact=False).count() > 0
     assert not page.console_errors, page.console_errors

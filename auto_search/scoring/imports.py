@@ -11,9 +11,10 @@ still imports; unmatched columns are simply not carried.
 A third shape is accepted when neither Definitive schema matches: a GENERIC
 accounts list (e.g. an SFDC or analysis export) with just a name column and a
 domain column (2026-07-08, for the SAO-analysis cohort). Generic rows carry NO
-segment — the import endpoint classifies each row (name+domain -> health
-system / specialty / payer, high confidence only) and drops the rest, so a
-mixed list is never scored on a guessed rubric.
+segment here — the import endpoint classifies each row (name+domain -> health
+system / specialty / payer). EVERY row imports: high-confidence buckets route
+cleanly; the rest keep a best-guess rubric plus a visible "Classification"
+flag, and the deep scorer makes the final fit call.
 """
 
 from __future__ import annotations

@@ -41,8 +41,10 @@ When unsure, use "low"."""
 
 async def classify_account(name: str, domain: str | None = None) -> dict:
     """Return {framework, confidence, reason}. framework in FRAMEWORKS, confidence in
-    CONFIDENCE. Any error / unrecognized output degrades to confidence='low' so the
-    caller (which trusts only 'high') drops it — a bad call never yields a wrong label."""
+    CONFIDENCE. Any error / unrecognized output degrades to confidence='low' with
+    reason='classify error', so callers can tell a real low-confidence read from an
+    outage. Callers gate on confidence: engagement routing trusts only 'high'; the
+    CSV import keeps non-high rows but flags them for human/scorer verification."""
     who = (name or "").strip()
     if not who:
         return {"framework": "non_icp", "confidence": "low", "reason": "no name"}

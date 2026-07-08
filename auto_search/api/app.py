@@ -2686,12 +2686,15 @@ def create_app() -> FastAPI:
                 "estimated_usd": est}
 
     async def _classify_generic_rows(result):
-        """Generic accounts list: assign each row a segment via the same
-        high-confidence-only Claude classifier the engagement board uses
-        (name+domain -> health_system/specialty/payer). Rows that can't be
-        confidently bucketed are DROPPED and returned by name — a mixed list
-        must never be scored on a guessed rubric. No-op for Definitive schemas
-        (their segment comes from the export type)."""
+        """Generic accounts list: assign each row a segment via the same Claude
+        classifier the engagement board uses (name+domain -> health_system /
+        specialty / payer). EVERY row imports (Sunny, 2026-07-08): a
+        high-confidence bucket routes cleanly; anything else keeps its
+        best-guess rubric and carries a visible "Classification" flag — the
+        deep scorer makes the final fit call (its Not-a-fit band exists for
+        exactly these), so the cheap classifier only routes, never gatekeeps.
+        Returns (result, flagged_names). No-op for Definitive schemas (their
+        segment comes from the export type)."""
         if result.schema_key != csv_imports.GENERIC_KEY:
             return result, []
         from auto_search.engagement.classify import classify_account
@@ -2703,18 +2706,32 @@ def create_app() -> FastAPI:
                 return a, await classify_account(a.name, a.domain)
 
         pairs = await asyncio.gather(*(one(a) for a in result.accounts))
-        kept, dropped = [], []
+        flagged = []
         for a, c in pairs:
             seg = c.get("framework")
-            if c.get("confidence") == "high" and seg in ("health_system", "specialty", "payer"):
-                a.segment = seg
-                a.framework = framework_for_segment(seg).key
-                kept.append(a)
-            else:
-                dropped.append(a.name)
-        result.accounts = kept
-        result.skipped += len(dropped)
-        return result, dropped
+            conf = c.get("confidence")
+            routable = seg in ("health_system", "specialty", "payer")
+            # Best-guess rubric for non-clean rows: the guessed ICP bucket when
+            # there is one, else specialty as the catch-all (any rubric lands a
+            # true non-ICP in the Not-a-fit band; the flag says why it's there).
+            a.segment = seg if routable else "specialty"
+            a.framework = framework_for_segment(a.segment).key
+            if not (conf == "high" and routable):
+                # A classifier ERROR must read as "unknown", not "likely not
+                # ICP" — an LLM outage on a 500-row health-system list would
+                # otherwise stamp every row with a false negative signal (QA F3).
+                if c.get("reason") == "classify error":
+                    label = "classification unavailable"
+                elif seg == "non_icp":
+                    label = "likely not ICP"
+                else:
+                    label = f"{conf} confidence"
+                a.firmographics["Classification"] = (
+                    f"auto-classified {a.segment} ({label})"
+                    + (f": {c.get('reason')}" if c.get("reason") not in (None, "", "classify error") else "")
+                    + " — verify segment during scoring")
+                flagged.append(a.name)
+        return result, flagged
 
     def _segment_counts(result) -> dict:
         counts: dict[str, int] = {}
@@ -2729,12 +2746,12 @@ def create_app() -> FastAPI:
         also get their per-row classification here so the wizard can show the
         segment breakdown and what was left out BEFORE committing."""
         result = _parse_upload(await request.body())
-        result, dropped = await _classify_generic_rows(result)
+        result, flagged = await _classify_generic_rows(result)
         payload = _preview_payload(app, result)
         if result.schema_key == csv_imports.GENERIC_KEY:
             payload["segments"] = _segment_counts(result)
-            payload["unclassified"] = dropped[:15]
-            payload["unclassified_count"] = len(dropped)
+            payload["flagged"] = flagged[:15]
+            payload["flagged_count"] = len(flagged)
         return payload
 
     @app.post("/api/scoring/import")
@@ -2748,7 +2765,7 @@ def create_app() -> FastAPI:
         (it leaves the Discovery panel) instead of creating a signal-less twin.
         Each batch is tagged with a label so it can be filtered + exported later."""
         result = _parse_upload(await request.body())
-        result, dropped = await _classify_generic_rows(result)
+        result, flagged = await _classify_generic_rows(result)
         label = _import_label(request.headers.get("x-import-filename"))
         svc_ = svc(app)
         scoring = app.state.scoring
@@ -2764,6 +2781,10 @@ def create_app() -> FastAPI:
             else:
                 csv_fresh.append(a)
         csv_rows = scoring.enqueue_csv(csv_fresh, state="queued", import_label=label)
+        # Report flags only for rows that actually imported this run — a
+        # re-import that deduped everything must not claim flagged rows (QA F4).
+        imported_names = {a.name for a in csv_fresh}
+        flagged = [n for n in flagged if n in imported_names]
         return {
             "schema_label": result.schema_label,
             "segment": result.segment,
@@ -2771,8 +2792,8 @@ def create_app() -> FastAPI:
             "queued": len(csv_rows) + len(moved),
             "moved_from_discovery": len(moved),
             "skipped_known": skipped,
-            "unclassified_count": len(dropped),
-            "unclassified": dropped[:15],
+            "flagged_count": len(flagged),
+            "flagged": flagged[:15],
             "import_label": label,
             "accounts": csv_rows + moved,
         }

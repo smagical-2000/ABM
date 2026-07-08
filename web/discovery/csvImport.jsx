@@ -136,10 +136,10 @@ function ImportModal({ onClose, onImported, pushToast }) {
                 <Icons.check className="h-4 w-4 shrink-0 text-emerald-500" />
                 <span className="text-[12.5px] text-emerald-800"><span className="font-medium">{preview.schema_label}</span> detected · {preview.rows_total} rows · {preview.segment === 'mixed' ? <span className="font-medium">{segLabel}</span> : <>segment <span className="font-medium">{segLabel}</span></>}</span>
               </div>
-              {preview.unclassified_count > 0 && (
+              {preview.flagged_count > 0 && (
                 <div className="mt-2 flex items-start gap-2 rounded-lg bg-amber-50/70 px-3 py-2.5 text-[12.5px] text-amber-800 ring-1 ring-inset ring-amber-100">
                   <Icons.alert className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
-                  <span><span className="font-medium">{preview.unclassified_count} left out</span> — not confidently a health system, specialty group, or payer, so they won't be imported or scored: {preview.unclassified.join(', ')}{preview.unclassified_count > preview.unclassified.length ? '…' : ''}. Add any of them individually with the AE lookup if needed.</span>
+                  <span><span className="font-medium">{preview.flagged_count} imported with a flag</span> — not confidently a health system, specialty group, or payer (consultants, vendors, etc.). They still import and can be scored; each carries a note on why it was flagged, and true non-fits will simply score as Not a fit: {preview.flagged.join(', ')}{preview.flagged_count > preview.flagged.length ? '…' : ''}</span>
                 </div>
               )}
               <div className="mt-4 max-h-[260px] overflow-y-auto rounded-xl border border-zinc-200">

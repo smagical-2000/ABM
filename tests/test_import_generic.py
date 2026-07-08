@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from auto_search.engagement import classify as classify_mod
+from auto_search.scoring import imports
 
 _app_module = importlib.import_module("auto_search.api.app")
 
@@ -92,3 +93,34 @@ def test_dhc_exports_do_not_hit_the_classifier(client, monkeypatch):
     out = client.post("/api/scoring/import/preview", content=hs).json()
     assert out["segment"] == "health_system"
     assert "segments" not in out                     # generic-only fields absent
+
+
+# ── QA follow-ups (2026-07-08 independent QA pass) ────────────────────
+
+
+def test_ragged_rows_do_not_crash_either_schema():
+    """QA F1: an extra comma in a hand-edited row parks overflow cells in a
+    LIST under DictReader's None restkey — that must be dropped, not .strip()'d
+    (it 500'd the whole import). Same guard for generic and Definitive."""
+    generic = ("Account Name,Website Domain\n"
+               "Smith, Jones Ortho,sjortho.com\n"          # ragged: 3 cells
+               "Clean Health,cleanhealth.org\n")
+    res = imports.parse_csv(generic)
+    assert res.schema_key == imports.GENERIC_KEY
+    assert {a.name for a in res.accounts} == {"Smith", "Clean Health"}
+    dhc = ("Hospital Name,Net Patient Revenue,State\n"
+           "Beacon Health,\"$1,400,000,000\",IN,overflow-cell\n")
+    res2 = imports.parse_csv(dhc)
+    assert [a.name for a in res2.accounts] == ["Beacon Health"]
+
+
+def test_generic_row_cap_rejects_oversized_lists():
+    """QA F4: every generic row is classified inside one synchronous request —
+    oversized lists are rejected up front with a clear message."""
+    rows = "\n".join(f"Account {i},acct{i}.com" for i in range(imports.GENERIC_MAX_ROWS + 1))
+    text = "Account Name,Website Domain\n" + rows + "\n"
+    with pytest.raises(imports.ImportError_, match="capped"):
+        imports.parse_csv(text)
+    ok = "Account Name,Website Domain\n" + "\n".join(
+        f"Account {i},acct{i}.com" for i in range(3)) + "\n"
+    assert len(imports.parse_csv(ok).accounts) == 3

@@ -1218,7 +1218,11 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
   function handleImported(res) {
     setImporting(false);
     const n = res.imported;
-    pushToast(`Imported ${n} ${n === 1 ? 'account' : 'accounts'} to the queue. Score them when ready.`, 'success');
+    // Generic lists classify at commit too — surface rows dropped THERE, or a
+    // borderline account can vanish between preview and commit unnoticed (QA F3).
+    const out = res.unclassified_count
+      ? ` ${res.unclassified_count} left out (not confidently classifiable).` : '';
+    pushToast(`Imported ${n} ${n === 1 ? 'account' : 'accounts'} to the queue.${out} Score them when ready.`, 'success');
     load(true);
   }
 

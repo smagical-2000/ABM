@@ -176,7 +176,7 @@ function ImportModal({ onClose, onImported, pushToast }) {
                   <div className="text-[12px] text-zinc-400">already known, skipped</div>
                 </div>
               </div>
-              <p className="mt-3 text-[12px] text-zinc-400">Importing is free. Accounts land in a <span className="font-medium text-zinc-500">queue</span>, then you score them on demand from the Scored tab — about <span className="font-medium text-zinc-500">~${fmtEst(preview.new_count * estPer)}</span> total{measured ? <span> (≈${`$${estPer.toFixed(2)}`}/account from your recent imports)</span> : ' on Sonnet'}, no separate QA pass since the Definitive facts are authoritative.</p>
+              <p className="mt-3 text-[12px] text-zinc-400">Importing is free. Accounts land in a <span className="font-medium text-zinc-500">queue</span>, then you score them on demand from the Scored tab — about <span className="font-medium text-zinc-500">~${fmtEst(preview.new_count * estPer)}</span> total{measured ? <span> (≈${`$${estPer.toFixed(2)}`}/account from your recent imports)</span> : ' on Sonnet'}{preview.segment === 'mixed' ? ' — each account was classified before import; the scorer researches the rest.' : ', no separate QA pass since the Definitive facts are authoritative.'}</p>
               <div className="mt-4 max-h-[220px] overflow-y-auto rounded-xl border border-zinc-200">
                 <table className="w-full text-[12.5px]">
                   <thead className="sticky top-0 bg-zinc-50/95 text-[11px] uppercase tracking-wide text-zinc-400">

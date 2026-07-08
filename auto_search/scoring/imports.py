@@ -116,6 +116,10 @@ def detect_schema(headers: list[str]) -> Schema | None:
 GENERIC_KEY = "generic_accounts"
 GENERIC_LABEL = "Accounts list (name + domain)"
 GENERIC_SEGMENT = "mixed"                     # per-row segments come from the classifier
+# Every generic row costs a classification call (preview AND commit), inside one
+# synchronous request — cap the file size so a huge list can't time the wizard
+# out or rack up unmetered LLM spend (QA F4).
+GENERIC_MAX_ROWS = 500
 _GENERIC_NAME_COLS = ("Account Name", "Company Name", "Account", "Company", "Name")
 _GENERIC_DOMAIN_COLS = ("Website Domain", "Company Domain", "Domain", "Website", "URL")
 
@@ -139,8 +143,17 @@ def _parse_generic(reader: csv.DictReader, headers: list[str],
     accounts: list[Account] = []
     seen_ids: set[str] = set()
     skipped = 0
-    for raw in reader:
-        row = {(k or "").strip(): (v or "").strip() for k, v in raw.items()}
+    for row_no, raw in enumerate(reader, start=1):
+        if row_no > GENERIC_MAX_ROWS:
+            raise ImportError_(
+                f"Accounts lists are capped at {GENERIC_MAX_ROWS} rows per import "
+                "(every row is individually classified before it can be scored). "
+                "Split the file and import in parts.")
+        # `if k is not None` drops DictReader's restkey: a ragged row (extra
+        # comma in a hand-edited CSV) parks overflow cells in a LIST under key
+        # None, and .strip() on that list 500'd the whole import (QA F1).
+        row = {(k or "").strip(): (v or "").strip()
+               for k, v in raw.items() if k is not None}
         name = row.get(name_col, "")
         if not name:
             skipped += 1
@@ -195,7 +208,11 @@ def parse_csv(text: str) -> ImportResult:
     skipped = 0
 
     for raw in reader:
-        row = {(k or "").strip(): (v or "").strip() for k, v in raw.items()}
+        # `if k is not None` drops DictReader's restkey: a ragged row (extra
+        # comma in a hand-edited CSV) parks overflow cells in a LIST under key
+        # None, and .strip() on that list 500'd the whole import (QA F1).
+        row = {(k or "").strip(): (v or "").strip()
+               for k, v in raw.items() if k is not None}
         name = row.get(schema.name_col, "")
         if not name:
             skipped += 1

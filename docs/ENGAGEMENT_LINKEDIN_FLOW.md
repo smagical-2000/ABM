@@ -42,9 +42,9 @@ Someone reacts (like, celebrate, etc.) on a Magical sponsored TOFU post
       |
       +--> [6] Airtable "LinkedIn <> Airtable" table   (lead capture record)
       |            |
-      |            +--> [6b] Tracking mirror: "ABM Flow LinkedIn <> Airtable"
-      |            |         table (every lead copied, stamped Synced At — the
-      |            |          audit table proving no lead is missed)
+      |            +--> [6b] Tracking table: "ABM Flow LinkedIn <> Airtable"
+      |            |         (engagement LEADS only, ~40, stamped Synced At —
+      |            |          Galyna's audit view of what the system produced)
       |            v  Zapier (Alykhan's account; polls every ~5 min, email-gated)
       |       [7] Salesforce Lead   (created by the Zapier Zap)
       |

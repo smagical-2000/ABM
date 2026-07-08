@@ -1335,7 +1335,8 @@ def create_app() -> FastAPI:
     @app.post("/api/ops/changelog")
     async def ops_changelog_add(request: Request):
         """Record an automation change AND push it to the changelog Slack channel.
-        Body: {what (required), why, area, who, status, summary, change_id?}.
+        Body: {what (required), why, area, who, audience, status, summary,
+        github?, change_id?}.
         Post one entry with status=initiated when starting a change, then another
         with the SAME change_id and status=completed (or rolled_back) when done —
         Slack gets a card each time (the ticket's two notifications)."""
@@ -1358,6 +1359,9 @@ def create_app() -> FastAPI:
         # Serial (CHG-14): a follow-up post for an EXISTING change_id inherits
         # that change's serial (one number per change, not per post); a new
         # change gets max+1. Numeric so the team can track changes by count.
+        # NOTE: this read-modify-write is safe only because the app runs ONE
+        # worker and there is no await between get_setting and set_setting —
+        # with multiple workers/replicas it needs a row lock (QA F1).
         prior = next((e for e in entries
                       if e.get("change_id") == entry.change_id and e.get("serial")), None)
         if prior:

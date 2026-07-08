@@ -17,6 +17,10 @@ can understand, monitor, and troubleshoot the automation without extra guidance.
 
 ## 1. End-to-end automation flow
 
+![LinkedIn engagement lead journey](images/linkedin_flow_diagram.png)
+
+Text version of the same flow:
+
 ```
 Someone reacts (like, celebrate, etc.) on a Magical sponsored TOFU post
       |
@@ -134,10 +138,16 @@ A captured engagement lands in four places. Access and fields:
 
 | Where | What it holds | Fields | Access |
 |---|---|---|---|
-| **Airtable, "LinkedIn <> Airtable" table** | The lead capture record (the monitoring table for this ticket) | Name, title, company, email, phone, LinkedIn URL, post category, captured-at timestamp | Airtable base share (ask Sunny or Alykhan for an invite) |
-| **Salesforce** | The CRM Lead | Standard Lead fields plus source | Existing SFDC seats |
-| **ABM platform, Engagement tab** | Account-level view: heat score, tier, last touch, and the full dated timeline of every touch | Account, tier, points per event, timestamps per event | Platform login (creds from Sunny; Justin, Gabe, Ben already have access) |
+| **Airtable, "LinkedIn <> Airtable" table** | The lead capture record (the monitoring table for this ticket) | Name, title, company, email, phone, LinkedIn URL, post category, captured-at timestamp | [airtable.com/appniZ6UOILREppmF](https://airtable.com/appniZ6UOILREppmF) (table "LinkedIn <> Airtable"; no access yet: ask Sunny or Alykhan for an invite) |
+| **Salesforce** | The CRM Lead | Standard Lead fields plus source | Existing SFDC seats (Leads, source "TOFU Engagement Campaign") |
+| **ABM platform, Engagement tab** | Account-level view: heat score, tier, last touch, and the full dated timeline of every touch | Account, tier, points per event, timestamps per event | [engagement-preview-production.up.railway.app](https://engagement-preview-production.up.railway.app) (login required; creds from Sunny. Justin, Gabe, Ben already have access) |
 | **Platform database** | Raw store behind the console (one linkedin_tofu event per captured reaction) | contacts + events tables with full timestamps | Engineering only |
+
+Note on per-lead status columns: today each stage stamps its own system (the
+rows above); there is no single "status" column per lead. If the team prefers
+one table with a status per stage (Salesforce created, added to Reply.io,
+notified), we can add those columns to Airtable in about a day. Open question
+with Galyna.
 
 **Per-stage timestamps:** capture time is on the Airtable row (captured-at),
 Salesforce stamps Lead CreatedDate, Reply.io stamps the contact add, and the

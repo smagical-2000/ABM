@@ -6,8 +6,8 @@ Purpose: full visibility into how a LinkedIn ad reaction becomes a lead, a
 Salesforce record, engagement heat, and a Slack handoff, so anyone on the team
 can understand, monitor, and troubleshoot the automation without extra guidance.
 
-> **Current rollout status (2026-07-07):** capture, enrichment, Airtable,
-> Salesforce, and Reply.io are fully live. Slack handoff cards are temporarily
+> **Current rollout status (2026-07-08):** capture, enrichment, both Airtable
+> tables, Salesforce, and Reply.io are fully live. Slack handoff cards are temporarily
 > routed to a private test channel (marked [TEST]) while we verify the new
 > notification rules. After a verified clean cycle they flip back to the live
 > SDR and AE channels. Nothing is lost during this period: the same accounts
@@ -45,8 +45,8 @@ Someone reacts (like, celebrate, etc.) on a Magical sponsored TOFU post
       |            +--> [6b] Tracking mirror: "ABM Flow LinkedIn <> Airtable"
       |            |         table (every lead copied, stamped Synced At — the
       |            |          audit table proving no lead is missed)
-      |            v  Airtable native automation (on create, email-gated)
-      |       [7] Salesforce Lead   (created by the Airtable automation)
+      |            v  Zapier (Alykhan's account; polls every ~5 min, email-gated)
+      |       [7] Salesforce Lead   (created by the Zapier Zap)
       |
       +--> [8] Reply.io campaign   (contact enters the nurture sequence)
       |
@@ -65,13 +65,15 @@ Someone reacts (like, celebrate, etc.) on a Magical sponsored TOFU post
 | 5 | FullEnrich | Phone number (best effort) | per surviving lead | contact -> phone |
 | 6 | Airtable ("LinkedIn <> Airtable") | Lead capture of record | upsert (email is the key) | contact -> Airtable row |
 | 6b | Airtable ("ABM Flow LinkedIn <> Airtable" table) | Tracking mirror: an audit copy of every captured lead, stamped Synced At, so the team can verify nothing is missed | after each successful primary write | same row + Synced At -> mirror row |
-| 7 | Salesforce | CRM Lead | Airtable automation (runs as Alykhan Jina) | Airtable row -> SFDC Lead |
+| 7 | Salesforce | CRM Lead | Zapier Zap under Alykhan Jina's account (polls the table) | Airtable row -> SFDC Lead |
 | 8 | Reply.io | Nurture sequence | contact added | contact -> campaign member |
 | 9 | ABM platform (Postgres) | Engagement heat and account tier | event recorded | account -> linkedin_tofu +6 pts |
 | 10 | Slack | SDR / AE handoff | tier rise, or new activity on a Hot account | account -> handoff card |
 
 Note: **we push to Airtable, not directly to Salesforce.** The Salesforce Lead
-is created by the Airtable native automation (June 2026 design). Reply.io and
+is created by a Zapier Zap under Alykhan Jina's account (confirmed 2026-07-08
+from Salesforce OAuth records and the consistent 4 to 6 minute creation lag,
+which is Zapier's polling cycle). Reply.io and
 the heat capture are ours.
 
 ---
@@ -92,7 +94,7 @@ the heat capture are ours.
      or a phone number (FullEnrich) becomes a lead. Only people with neither
      are skipped. Phone-only leads are keyed on their LinkedIn URL.
   4. Magical's own employees are dropped.
-  - **Known gap (ticketed)**: the Airtable to Salesforce automation currently
+  - **Known gap (ticketed)**: the Airtable to Salesforce Zapier Zap currently
     creates a Lead only when the row has an email, so phone-only leads stay in
     Airtable (with Reply.io not applicable either, as an email tool) until
     that automation adds a phone-based check.
@@ -119,7 +121,7 @@ the heat capture are ours.
 | Reaction captured (next scheduled scan) | Up to 15 min during weekday selling hours (see cadence below) |
 | Email and phone enrichment | Seconds, inside the same run |
 | Airtable row created | Same run, about 1 minute after capture |
-| Salesforce Lead created | Near real time after the Airtable row (Airtable automation) |
+| Salesforce Lead created | About 4 to 6 minutes after the Airtable row (Zapier polling cycle) |
 | Added to Reply.io campaign | Same run |
 | Engagement heat recorded, tier recomputed | Same run |
 | Slack handoff (if due, see section 5) | Immediately after the run (event driven, not a separate schedule) |
@@ -163,8 +165,9 @@ SFDC CreatedDate shows the Airtable automation delay for any specific lead.
 1. **Airtable row exists?** Then capture, enrichment, and the ABM gate all
    succeeded. Not there? The person either reacted outside scan hours (wait for
    the next window), had no findable work email, or is not at an ABM company.
-2. **Salesforce Lead exists?** If Airtable yes but SFDC no, the issue is the
-   Airtable to Salesforce automation, not the capture pipeline.
+2. **Salesforce Lead exists?** Allow about 5 minutes (Zapier polling). If
+   Airtable yes but SFDC no after that, the issue is the Zapier sync, not the
+   capture pipeline.
 3. **Platform timeline shows the +6 event?** Open the account in the
    Engagement tab; every touch is dated. The tier shown is live.
 4. **Slack card?** Only fires per the rules in section 5. An account that was

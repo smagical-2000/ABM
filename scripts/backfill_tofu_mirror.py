@@ -8,9 +8,13 @@ AIRTABLE_TOFU_MIRROR_BASE_ID is set; THIS script does the one-time setup:
   1. Ensures the mirror TABLE exists — created via the Airtable meta API by
      cloning the primary table's schema (same columns) plus a "Synced At"
      dateTime column. Idempotent: an existing table is reused.
-  2. Backfills EVERY existing row from the primary "LinkedIn <> Airtable"
-     table into the mirror (upsert on Email, else LinkedIn URL), stamping
-     Synced At, so the mirror proves historical completeness too.
+  2. Backfills FUNNEL LEADS ONLY from the primary "LinkedIn <> Airtable"
+     table (upsert on Email, else LinkedIn URL), stamping Synced At. A funnel
+     lead = a row matching a Salesforce TOFU-campaign Lead OR a lead the ABM
+     runner captured. The primary table also holds ~1,600 Clay bulk-dump rows
+     that never became leads — Galyna's table must NOT include those
+     (2026-07-08: the first backfill copied everything; she expected ~40, saw
+     1,677; cleaned to 41. This filter keeps that mistake unrepeatable).
 
 Usage:
     python scripts/backfill_tofu_mirror.py            # dry-run: reports counts
@@ -34,7 +38,7 @@ import httpx
 from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-load_dotenv(override=True)
+load_dotenv()   # no override: an operator-exported DATABASE_URL must win
 
 _META = "https://api.airtable.com/v0/meta/bases"
 # Field types the meta API can create as-is; anything else lands as text.
@@ -92,17 +96,60 @@ def ensure_mirror_table(primary_base: str, primary_table: str,
         return tid
 
 
+def _funnel_lead_keys() -> tuple[set[str], set[str]]:
+    """The identities that belong in Galyna's table: Salesforce TOFU-campaign
+    Leads (read-only SOQL) ∪ leads the ABM runner captured (engagement store).
+    Returns (emails, linkedin_urls), all lowercased."""
+    from auto_search.db.engagement_repository import get_engagement_repository
+    from auto_search.engagement.sfdc_client import SalesforceClient
+
+    emails: set[str] = set()
+    try:
+        for lead in SalesforceClient().query(
+                "SELECT Email FROM Lead WHERE LeadSource = 'TOFU Engagement Campaign'"):
+            if lead.get("Email"):
+                emails.add(lead["Email"].strip().lower())
+    except Exception as e:  # noqa: BLE001 — SFDC down: proceed with runner set only
+        print(f"[mirror] WARNING: SFDC lead pull failed ({e}) — runner captures only")
+    member_ids: set[str] = set()
+    repo = get_engagement_repository()
+    runner_contacts = 0
+    for c in repo.contacts():
+        ext = c.get("external_id") or ""
+        if ext.startswith("linkedin:"):
+            runner_contacts += 1
+            if c.get("email"):
+                emails.add(c["email"].strip().lower())
+            # phone-only leads: the LinkedIn member id after the prefix is the
+            # stable key; the Airtable row's LinkedIn URL contains it.
+            member_ids.add(ext.split(":", 1)[1].strip().lower())
+    if runner_contacts == 0:
+        print("[mirror] WARNING: engagement store returned NO runner captures — "
+              "if running locally, DATABASE_URL probably points at the wrong "
+              "database; phone-only leads would be missed.")
+    return emails, member_ids
+
+
 async def backfill(mirror_table_id: str | None, *, apply: bool) -> None:
     from auto_search.engagement.airtable_client import AirtableClient
 
     primary = AirtableClient()
     rows = await primary.records()
     print(f"[mirror] primary rows: {len(rows)}")
+    keep_emails, keep_urls = _funnel_lead_keys()
+    print(f"[mirror] funnel-lead keys: {len(keep_emails)} emails, {len(keep_urls)} member ids")
+
+    def _is_funnel_lead(r: dict) -> bool:
+        f = r["fields"]
+        em = (f.get("Email") or "").strip().lower()
+        url = (f.get("LinkedIn URL") or "").strip().lower()
+        return ((em != "" and em in keep_emails)
+                or (url != "" and any(mid and mid in url for mid in keep_urls)))
+
+    rows = [r for r in rows if _is_funnel_lead(r)]
     if not apply:
-        keyed = sum(1 for r in rows
-                    if (r["fields"].get("Email") or r["fields"].get("LinkedIn URL")))
-        print(f"[mirror] would backfill {keyed} keyed rows "
-              f"({len(rows) - keyed} unkeyed would be SKIPPED). Dry-run.")
+        print(f"[mirror] would backfill {len(rows)} funnel-lead rows "
+              "(Clay bulk rows excluded). Dry-run.")
         return
     mirror = AirtableClient(base_id=os.environ["AIRTABLE_TOFU_MIRROR_BASE_ID"],
                             table=mirror_table_id

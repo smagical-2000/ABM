@@ -125,7 +125,10 @@ def run_checks(repo, now: datetime | None = None) -> list[dict]:
 async def watchdog_loop(app) -> None:
     """Background task for the API lifespan. Never lets an exception kill the
     loop — a watchdog that can die silently would be the joke writing itself."""
-    logger.info("ops watchdog: running every %ss", INTERVAL_S)
+    # print, not logger: the prod app configures no logging handlers, so this
+    # boot line must go to stdout to be visible in Railway (deploy verification).
+    print(f"[ops-watchdog] running every {INTERVAL_S}s "
+          f"(build {os.getenv('BUILD_STAMP', '?')})", flush=True)
     while True:
         try:
             repo = getattr(app.state, "engagement_repo", None)

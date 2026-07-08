@@ -1323,16 +1323,43 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
     });
   }
 
-  function handleExport() {
+  function exportRows() {
     const useSel = selected.size > 0;
-    const rows = useSel
-      ? accounts.filter((a) => a.state === 'scored' && selected.has(a.account_id))
+    return useSel
+      ? scoredList.filter((a) => a.state === 'scored' && selected.has(a.account_id))
       : scoredList.filter((a) => a.state === 'scored');
+  }
+
+  function handleExport() {
+    const rows = exportRows();
     if (!rows.length) { pushToast('No scored accounts to export.', 'success'); return; }
-    const tag = useSel ? 'selected' : importF !== 'all' ? 'import' : sourceF !== 'all' ? sourceF : 'all';
+    const tag = selected.size > 0 ? 'selected' : importF !== 'all' ? 'import' : sourceF !== 'all' ? sourceF : 'all';
     const stamp = new Date().toISOString().slice(0, 10);
     downloadCsv(`magical-scored-${tag}-${stamp}.csv`, buildAccountsCsv(rows));
     pushToast(`Exported ${rows.length} ${rows.length === 1 ? 'account' : 'accounts'} to CSV.`, 'success');
+  }
+
+  // Styled Excel: the server renders presentation (colors, summary sheet); the
+  // UI sends the ids it is SHOWING, so filters and sort apply to the file too.
+  async function handleExportExcel() {
+    const rows = exportRows();
+    if (!rows.length) { pushToast('No scored accounts to export.', 'success'); return; }
+    try {
+      const res = await fetch('/api/scoring/export.xlsx', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ account_ids: rows.map((a) => a.account_id) }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `magical-scored-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      document.body.appendChild(link); link.click(); link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      pushToast(`Exported ${rows.length} ${rows.length === 1 ? 'account' : 'accounts'} to Excel.`, 'success');
+    } catch (e) { pushToast(`Excel export failed: ${e.message}`, 'danger'); }
   }
 
   const scoredOnly = accounts.filter((a) => a.state === 'scored');
@@ -1378,11 +1405,17 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {scoredOnly.length > 0 && !confirmReset && (
-              <button onClick={handleExport}
-                title={selected.size > 0 ? 'Download the selected accounts as CSV' : 'Download the accounts in the current view as CSV'}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[13px] font-medium text-zinc-500 transition-colors hover:bg-zinc-50 hover:text-zinc-700">
-                <Icons.download className="h-4 w-4" />Export{selected.size > 0 ? ` ${selected.size}` : ''}
-              </button>
+              <span className="inline-flex items-center gap-1">
+                <button onClick={handleExportExcel}
+                  title={`Download ${selected.size > 0 ? 'the selected accounts' : 'the current view'} as a styled Excel workbook (fit colors, evidence, summary sheet)`}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[13px] font-medium text-zinc-500 transition-colors hover:bg-zinc-50 hover:text-zinc-700">
+                  <Icons.download className="h-4 w-4" />Export{selected.size > 0 ? ` ${selected.size}` : ''}
+                </button>
+                <button onClick={handleExport} title="Plain CSV for data work"
+                  className="rounded-lg border border-zinc-200 bg-white px-2 py-2 text-[11.5px] font-medium text-zinc-400 transition-colors hover:bg-zinc-50 hover:text-zinc-600">
+                  CSV
+                </button>
+              </span>
             )}
             {scoredOnly.length > 0 && introTodo.length > 0 && (confirmIntros ? (
               <span className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2 py-1.5 text-[12.5px]">

@@ -2504,6 +2504,36 @@ def create_app() -> FastAPI:
         discovery panel does."""
         return _annotate_scored(app.state.scoring.list_scored())
 
+    @app.post("/api/scoring/export.xlsx")
+    async def export_scored_xlsx(request: Request):
+        """Styled Excel export. The client sends the account_ids it is showing
+        (its filters + sort already applied), the server renders the workbook —
+        presentation lives here, filter logic stays in one place (the UI).
+        Body: {"account_ids": [...]} — required, ordered."""
+        import io as _io
+
+        from fastapi.responses import StreamingResponse
+
+        from auto_search.scoring import export_xlsx
+
+        body = await _json_body(request)
+        ids = body.get("account_ids")
+        if not isinstance(ids, list) or not ids:
+            raise HTTPException(status_code=422, detail="account_ids (ordered list) required")
+        by_id = {a["account_id"]: a for a in app.state.scoring.list_scored()}
+        accounts = [by_id[i] for i in ids if i in by_id]
+        if not accounts:
+            raise HTTPException(status_code=404, detail="no matching accounts")
+        wb = export_xlsx.build_workbook(accounts)
+        buf = _io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        stamp = datetime.now(UTC).strftime("%Y-%m-%d")
+        return StreamingResponse(
+            buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition":
+                     f'attachment; filename="magical-scored-{stamp}.xlsx"'})
+
     @app.get("/api/scoring/activity")
     def scoring_activity():
         """Actively-scoring accounts — drives the live shimmer. Also self-heals:

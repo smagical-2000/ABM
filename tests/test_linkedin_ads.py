@@ -509,3 +509,28 @@ async def test_live_run_refuses_empty_dedup_store(patched):
                          scoring_repo=None, discovery_repo=None,
                          airtable_client=_FakeAirtable(), replyio_client=_FakeReply(),
                          dry_run=False)
+
+
+def test_general_category_recognized_but_unmapped():
+    """'general' (a cross-segment post) is a valid category but has no single
+    Reply.io campaign or segment (Sunny, 2026-07-09)."""
+    assert la.normalize_category("General") == "general"
+    assert la.normalize_category("all categories") == "general"
+    assert la.normalize_category("Mixed") == "general"
+    assert la.campaign_for("general") is None
+    assert la.segment_for("general") is None
+
+
+async def test_general_post_captures_and_heats_but_no_replyio(patched, monkeypatch):
+    """A 'general' post: ABM reactors are still captured to Airtable and heat-
+    scored, but NOBODY is auto-enrolled in Reply.io (no one campaign fits a
+    cross-segment post) — enrollment is left to SDR/Clay routing."""
+    monkeypatch.setattr(runner, "cross_and_persist", lambda **kw: (2, 2))
+    air, reply = _FakeAirtable(), _FakeReply()
+    out = await runner.run(share_categories={"111": "General"}, engagement_repo=object(),
+                           scoring_repo=None, discovery_repo=None,
+                           airtable_client=air, replyio_client=reply,
+                           dry_run=False, allow_empty_store=True)
+    assert len(air.upserts) == 3          # Anna + Carl + Eve captured as usual
+    assert reply.added == []              # no campaign for a general post → no enrollment
+    assert out["stats"].get("heat_events") == 2   # ABM heat still recorded

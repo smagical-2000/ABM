@@ -51,6 +51,17 @@ CATEGORY_TO_SEGMENT: dict[str, str] = {
 # segment (or vice versa) would silently mis-file accounts. Fail loudly at import.
 assert set(CATEGORY_TO_CAMPAIGN) == set(CATEGORY_TO_SEGMENT), "category maps drifted"
 
+# A cross-segment post (Sunny, 2026-07-09: "it's in all categories"). It is a
+# valid, monitored category — reactors are captured, deduped, heat-scored, and
+# routed to Salesforce exactly like any other post — but it has NO single
+# Reply.io campaign and NO fixed segment: a general post attracts people from
+# every segment, so a reactor's real segment comes from THEIR matched account,
+# and we never force a general-post reactor into one segment's nurture sequence.
+# campaign_for/segment_for return None for it (it is deliberately NOT in the two
+# maps above, so the drift assertion still holds). Enrollment for these leads is
+# left to the SDR/Clay routing that already reads the matched account's segment.
+GENERAL_CATEGORY = "general"
+
 # Spelling/format drift in the CSV or LinkedIn → our canonical category key.
 _ALIASES: dict[str, str] = {
     "behavioral": "behavioural",
@@ -63,14 +74,25 @@ _ALIASES: dict[str, str] = {
     "orthopaedics": "ortho",
     "radiology/imaging": "radiology",
     "imaging": "radiology",
+    "all": GENERAL_CATEGORY,
+    "all categories": GENERAL_CATEGORY,
+    "mixed": GENERAL_CATEGORY,
+    "multi": GENERAL_CATEGORY,
+    "general healthcare": GENERAL_CATEGORY,
 }
+
+# Every category accepted in the CSV: the six campaign-mapped ones + "general".
+_RECOGNIZED: frozenset[str] = frozenset(CATEGORY_TO_CAMPAIGN) | {GENERAL_CATEGORY}
 
 
 def normalize_category(value: str | None) -> str | None:
-    """Map a raw category label (CSV or LinkedIn) to a canonical key, or None."""
+    """Map a raw category label (CSV or LinkedIn) to a canonical key, or None.
+
+    Recognizes the six campaign categories plus "general" (a cross-segment post
+    with no single campaign/segment — see GENERAL_CATEGORY)."""
     key = (value or "").strip().lower()
     key = _ALIASES.get(key, key)
-    return key if key in CATEGORY_TO_CAMPAIGN else None
+    return key if key in _RECOGNIZED else None
 
 
 def campaign_for(category: str | None) -> int | None:

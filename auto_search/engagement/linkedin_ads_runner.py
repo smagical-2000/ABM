@@ -25,20 +25,22 @@ Idempotency (survives hourly re-runs):
     of duplicating it.
 
 Cost is bounded by `max_reactions` (per post) + `max_contacts` (people per run);
-enrichment + Apollo run only for not-yet-processed people. FullEnrich runs for ABM
-leads missing a phone and for any lead missing an email (the lookup that qualifies
-them); non-ABM leads with an email skip it (Clay waterfall backfills later).
+enrichment + Apollo run only for not-yet-processed people. Phones resolve through
+a cost-ordered waterfall (Apollo -> Salesforce -> FullEnrich); the paid FullEnrich
+tier runs for ANY lead the free tiers miss and is bounded by a per-run cap
+(LINKEDIN_TOFU_FULLENRICH_MAX), so ABM status no longer decides who gets a phone.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections import Counter
 from datetime import UTC, datetime
 
-from auto_search.engagement import enrichment, notify, scoring
 from auto_search.engagement import linkedin_ads as la
+from auto_search.engagement import notify, phone_waterfall, scoring
 from auto_search.engagement.cross import build_index
 from auto_search.engagement.sync import cross_and_persist
 from auto_search.normalize import clean_domain, normalize_company_name
@@ -136,6 +138,16 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
     contact_rows: list[dict] = []
     event_rows: list[dict] = []
     leads = 0                                   # for the max_leads cap
+    # Per-run FullEnrich credit cap (the paid tier of the phone waterfall). Bounds
+    # PAID ATTEMPTS (hit or miss — both billed) when capture-all yields many
+    # non-Apollo-phone leads; env-tunable. Defensive parse: a typo'd env value
+    # must degrade to the default, not crash the whole scan.
+    try:
+        fullenrich_cap = int(os.getenv("LINKEDIN_TOFU_FULLENRICH_MAX", "60"))
+    except ValueError:
+        logger.warning("bad LINKEDIN_TOFU_FULLENRICH_MAX — using default 60")
+        fullenrich_cap = 60
+    fullenrich_used = 0
 
     for r in candidates:
         stats["scanned"] += 1
@@ -184,19 +196,27 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
 
         company = company or (m.name if m else None) or domain
         campaign_id = la.campaign_for(r["category"])
-        # FullEnrich phone fallback — real runs only (no dry-run spend), and only
-        # when it changes the outcome: an ABM lead without a phone (sales wants
-        # the number), or ANY lead without an email (2026-07-08 rule: email OR
-        # phone qualifies a lead, so the phone lookup is what saves it). A
-        # non-ABM lead that already has an email skips the credit — the Clay
-        # waterfall (later build) will backfill those.
-        if not phone and not dry_run and (abm_match or not email):
-            fe = await enrichment.enrich_contact(
-                first_name=first, last_name=last, domain=domain,
-                company=company, linkedin=enriched_url)
-            if fe.get("phone"):
-                phone = fe["phone"]
-                stats["fullenrich_phone"] += 1
+        # Phone via the cost-ordered WATERFALL (Apollo -> Salesforce -> FullEnrich,
+        # 2026-07-09). Real runs only (no dry-run spend). FullEnrich is the paid
+        # last resort and is bounded by a per-run cap so capture-all volume can't
+        # burn credits unattended — ABM status no longer gates it, so a non-ABM
+        # healthcare reactor gets a phone too. (SFDC tier runs in the reconcile
+        # backfill leg, where sales-entered numbers live; the live scan captures
+        # brand-new reactors who aren't in SFDC yet, so it uses Apollo->FullEnrich.)
+        if not dry_run:
+            phone, phone_src, fe_attempted = await phone_waterfall.resolve_phone(
+                first_name=first, last_name=last, email=email, domain=domain,
+                company=company, linkedin=enriched_url, apollo_phone=phone,
+                allow_fullenrich=(fullenrich_used < fullenrich_cap))
+            if phone_src:
+                stats[f"phone_{phone_src}"] += 1
+            if fe_attempted:
+                # Count ATTEMPTS, not hits — a miss is billed too (QA 2026-07-09:
+                # counting hits let a run of misses spend unbounded credits).
+                fullenrich_used += 1
+                stats["fullenrich_lookups"] += 1
+            elif not phone and fullenrich_used >= fullenrich_cap:
+                stats["fullenrich_capped"] += 1
         if not (email or phone):
             stats["no_email_or_phone"] += 1     # nothing to reach them by — not a lead
             # Persist the contact anyway (no lead, no heat): it's the durable

@@ -165,7 +165,7 @@ def patched(monkeypatch):
     monkeypatch.setattr(runner.apollo, "match_contact", fake_match)
     # Always patched: the email-or-phone rule reaches FullEnrich for no-email
     # leads, and a test must NEVER hit the real (billable) API.
-    monkeypatch.setattr(runner.enrichment, "enrich_contact", fake_fe_none)
+    monkeypatch.setattr(runner.phone_waterfall.enrichment, "enrich_contact", fake_fe_none)
     monkeypatch.setattr(runner, "build_index", lambda s, d: _FakeIndex())
 
 
@@ -231,11 +231,11 @@ async def test_fullenrich_fills_phone_to_airtable_on_live(patched, monkeypatch):
     calls = []
 
     async def fake_fe(*, first_name=None, last_name=None, domain=None,
-                      company=None, linkedin=None):
+                      company=None, linkedin=None, http=None):
         calls.append(last_name)
         return {"email": None, "phone": "+15557654321"}
 
-    monkeypatch.setattr(runner.enrichment, "enrich_contact", fake_fe)
+    monkeypatch.setattr(runner.phone_waterfall.enrichment, "enrich_contact", fake_fe)
     monkeypatch.setattr(runner, "cross_and_persist", lambda **kw: (2, 2))
     air, reply = _FakeAirtable(), _FakeReply()
     out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=object(),
@@ -244,8 +244,9 @@ async def test_fullenrich_fills_phone_to_airtable_on_live(patched, monkeypatch):
     assert calls                                                  # FullEnrich ran for no-phone leads
     assert air.upserts[0]["fields"]["Phone"] == "+15557654321"    # → Airtable → Salesforce
     assert reply.added[0]["phone"] == "+15557654321"             # → Reply.io
-    # Carl (non-ABM, has email) must NOT spend a FullEnrich credit — Clay later
-    assert "Cold" not in calls
+    # THE FIX (2026-07-09): Carl (non-ABM, has email) now DOES get a phone
+    # lookup — ABM status no longer gates the paid tier.
+    assert "Cold" in calls
     # Dana (ABM, no email) is SAVED by the phone: phone-only row keyed on
     # LinkedIn URL, no Email cell, and no Reply.io enrollment (email tool)
     dana = next(u for u in air.upserts if u["fields"].get("First Name") == "Dana")
@@ -263,7 +264,7 @@ async def test_fullenrich_not_called_on_dry_run(patched, monkeypatch):
         calls.append(1)
         return {"email": None, "phone": "x"}
 
-    monkeypatch.setattr(runner.enrichment, "enrich_contact", fake_fe)
+    monkeypatch.setattr(runner.phone_waterfall.enrichment, "enrich_contact", fake_fe)
     air, reply = _FakeAirtable(), _FakeReply()
     await runner.run(share_categories={"111": "Ortho"}, engagement_repo=None,
                      scoring_repo=None, discovery_repo=None,
@@ -534,3 +535,25 @@ async def test_general_post_captures_and_heats_but_no_replyio(patched, monkeypat
     assert len(air.upserts) == 3          # Anna + Carl + Eve captured as usual
     assert reply.added == []              # no campaign for a general post → no enrollment
     assert out["stats"].get("heat_events") == 2   # ABM heat still recorded
+
+
+async def test_fullenrich_cap_counts_attempts_not_hits(patched, monkeypatch):
+    """QA 2026-07-09: a FullEnrich MISS is still a billed lookup. With the cap at
+    1 and a provider that never finds phones, exactly ONE paid call happens for
+    the whole run — the rest are capped, not silently retried."""
+    calls = []
+
+    async def fe_always_miss(**kw):
+        calls.append(kw.get("last_name"))
+        return {"email": None, "phone": None}
+
+    monkeypatch.setattr(runner.phone_waterfall.enrichment, "enrich_contact", fe_always_miss)
+    monkeypatch.setattr(runner, "cross_and_persist", lambda **kw: (0, 0))
+    monkeypatch.setenv("LINKEDIN_TOFU_FULLENRICH_MAX", "1")
+    out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=object(),
+                           scoring_repo=None, discovery_repo=None,
+                           airtable_client=_FakeAirtable(), replyio_client=_FakeReply(),
+                           dry_run=False, allow_empty_store=True)
+    assert len(calls) == 1                                    # one billed attempt, then capped
+    assert out["stats"]["fullenrich_lookups"] == 1
+    assert out["stats"]["fullenrich_capped"] >= 1             # later leads were held back

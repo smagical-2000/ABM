@@ -37,7 +37,7 @@ from auto_search.db.scoring_repository import get_scoring_repository
 from auto_search.scoring import spend_guard
 from auto_search.social import SocialTarget, poll_events, poll_targets
 
-load_dotenv(override=True)
+load_dotenv()   # no override: operator env (e.g. DATABASE_URL) must win
 logger = logging.getLogger("run_social")
 
 

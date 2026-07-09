@@ -53,7 +53,7 @@ from auto_search.connectors.warntracker import WarnTrackerConnector
 from auto_search.db import get_repository
 from auto_search.scoring import spend_guard
 
-load_dotenv(override=True)
+load_dotenv()   # no override: operator env (e.g. DATABASE_URL) must win
 
 BOLD, GREEN, YELLOW, RED, DIM, CYAN, RESET = (
     "\033[1m", "\033[92m", "\033[93m", "\033[91m", "\033[2m", "\033[96m", "\033[0m",

@@ -197,7 +197,7 @@ async def test_live_run_upserts_and_records_heat(patched, monkeypatch):
 
     out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=object(),
                            scoring_repo=None, discovery_repo=None,
-                           airtable_client=air, replyio_client=reply, dry_run=False)
+                           airtable_client=air, replyio_client=reply, dry_run=False, allow_empty_store=True)
 
     # three leads with email hit Airtable (Anna + Eve ABM, Carl non-ABM) — but
     # ONLY the two ABM matches enter Reply.io and earn heat events
@@ -240,7 +240,7 @@ async def test_fullenrich_fills_phone_to_airtable_on_live(patched, monkeypatch):
     air, reply = _FakeAirtable(), _FakeReply()
     out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=object(),
                            scoring_repo=None, discovery_repo=None,
-                           airtable_client=air, replyio_client=reply, dry_run=False)
+                           airtable_client=air, replyio_client=reply, dry_run=False, allow_empty_store=True)
     assert calls                                                  # FullEnrich ran for no-phone leads
     assert air.upserts[0]["fields"]["Phone"] == "+15557654321"    # → Airtable → Salesforce
     assert reply.added[0]["phone"] == "+15557654321"             # → Reply.io
@@ -293,7 +293,7 @@ async def test_failed_airtable_upsert_records_no_heat(patched, monkeypatch):
     out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=object(),
                            scoring_repo=None, discovery_repo=None,
                            airtable_client=_FakeAirtable(fail=True),
-                           replyio_client=reply, dry_run=False)
+                           replyio_client=reply, dry_run=False, allow_empty_store=True)
     assert out["stats"].get("airtable_failed") == 3   # all email leads (Anna, Carl, Eve) fail
     assert reply.added == []          # no campaign push when the row didn't land
     # Dana's dead-end contact row (dedup) is all that persists — no events, so
@@ -381,7 +381,7 @@ async def test_replyio_409_is_not_a_failure(patched, monkeypatch):
     out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=object(),
                            scoring_repo=None, discovery_repo=None,
                            airtable_client=_FakeAirtable(), replyio_client=reply,
-                           dry_run=False)
+                           dry_run=False, allow_empty_store=True)
     assert out["stats"].get("airtable_upserted") == 3     # Anna, Carl, Eve rows land
     assert out["stats"].get("replyio_already_sequenced") == 2   # ABM leads only
     assert out["stats"].get("replyio_failed") is None     # 409 is not counted as a failure
@@ -422,7 +422,7 @@ async def test_mirror_receives_copy_with_synced_at(patched, monkeypatch):
     out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=object(),
                            scoring_repo=None, discovery_repo=None,
                            airtable_client=air, replyio_client=_FakeReply(),
-                           mirror_client=mir, dry_run=False)
+                           mirror_client=mir, dry_run=False, allow_empty_store=True)
     # 3 = Anna + Eve (ABM) + Carl (non-ABM, captured since 2026-07-08) — the
     # mirror gets EVERY captured lead, ABM or not, same as the primary.
     assert len(mir.upserts) == len(air.upserts) == 3
@@ -440,7 +440,7 @@ async def test_mirror_failure_never_blocks_the_lead(patched, monkeypatch):
     out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=object(),
                            scoring_repo=None, discovery_repo=None,
                            airtable_client=air, replyio_client=_FakeReply(),
-                           mirror_client=mir, dry_run=False)
+                           mirror_client=mir, dry_run=False, allow_empty_store=True)
     assert len(air.upserts) == 3                       # primary rows all landed
     assert out["stats"]["mirror_failed"] == 3          # counted for the ops alert
     assert out["stats"]["airtable_upserted"] == 3
@@ -451,7 +451,7 @@ async def test_no_mirror_client_means_no_mirror_stats(patched, monkeypatch):
     out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=object(),
                            scoring_repo=None, discovery_repo=None,
                            airtable_client=_FakeAirtable(), replyio_client=_FakeReply(),
-                           dry_run=False)
+                           dry_run=False, allow_empty_store=True)
     assert "mirror_upserted" not in out["stats"] and "mirror_failed" not in out["stats"]
 
 
@@ -487,7 +487,7 @@ async def test_capture_all_persists_non_abm_contacts_for_dedup(patched, monkeypa
     out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=repo,
                            scoring_repo=None, discovery_repo=None,
                            airtable_client=_FakeAirtable(), replyio_client=_FakeReply(),
-                           dry_run=False)
+                           dry_run=False, allow_empty_store=True)
     exts = {c["external_id"] for c in repo.contact_rows}
     # Anna + Eve (ABM leads), Carl (non-ABM lead), Dana (dead-end, no contact info)
     assert exts == {"linkedin:pa", "linkedin:pe", "linkedin:pc", "linkedin:pd"}
@@ -496,3 +496,16 @@ async def test_capture_all_persists_non_abm_contacts_for_dedup(patched, monkeypa
     assert len(repo.event_rows) == 2                 # heat is ABM-only (Anna + Eve)
     assert all(e["account_id"] == "abm_abmco" for e in repo.event_rows)
     assert out["stats"]["heat_events"] == 2
+
+
+async def test_live_run_refuses_empty_dedup_store(patched):
+    """Guard (2026-07-08 duplicate-cards incident): a LIVE run that sees ZERO
+    known contacts is almost certainly talking to the wrong/unreachable store —
+    an empty dedup list would re-post every Slack card and re-bill every
+    Apollo/FullEnrich lookup. Abort BEFORE any scrape/spend; a genuinely fresh
+    store must opt in with allow_empty_store=True. Dry runs are unaffected."""
+    with pytest.raises(RuntimeError, match="ZERO known contacts"):
+        await runner.run(share_categories={"111": "Ortho"}, engagement_repo=object(),
+                         scoring_repo=None, discovery_repo=None,
+                         airtable_client=_FakeAirtable(), replyio_client=_FakeReply(),
+                         dry_run=False)

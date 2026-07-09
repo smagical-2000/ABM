@@ -38,7 +38,9 @@ from auto_search.db.engagement_repository import get_engagement_repository
 from auto_search.db.scoring_repository import get_scoring_repository
 from auto_search.engagement import linkedin_ads, linkedin_ads_runner
 
-load_dotenv(override=True)
+load_dotenv()   # no override: an operator-exported env (e.g. DATABASE_URL) must win
+                # (2026-07-08: override=True let a local .env silently redirect a
+                # "prod-env" run to the local dev DB → empty dedup → duplicate cards)
 logger = logging.getLogger("run_linkedin_tofu")
 
 _DEFAULT_CSV = (Path(__file__).resolve().parent.parent
@@ -120,6 +122,10 @@ def main() -> int:
     ap.add_argument("--max-contacts", type=int, default=None, help="people processed per run")
     ap.add_argument("--max-leads", type=int, default=None, help="stop after N leads")
     ap.add_argument("--csv", default=None, help="share_id,category CSV (default: packaged)")
+    ap.add_argument("--allow-empty-store", action="store_true",
+                    help="permit a LIVE run when the engagement store has no contacts "
+                         "(only correct on a genuinely fresh deployment — an empty "
+                         "dedup list re-posts every Slack card and re-bills enrichment)")
     ap.add_argument("--force", action="store_true",
                     help="bypass the min-interval cost throttle (manual immediate run)")
     args = ap.parse_args()
@@ -187,7 +193,8 @@ def main() -> int:
             scoring_repo=get_scoring_repository(), discovery_repo=get_repository(),
             airtable_client=airtable, replyio_client=reply, mirror_client=mirror,
             max_reactions=args.max_reactions,
-            max_contacts=args.max_contacts, max_leads=args.max_leads, dry_run=args.dry_run))
+            max_contacts=args.max_contacts, max_leads=args.max_leads, dry_run=args.dry_run,
+            allow_empty_store=args.allow_empty_store))
     except Exception:  # noqa: BLE001 — cron leg: log + signal failure, don't traceback-crash
         logger.exception("[run_linkedin_tofu] run failed")
         import traceback

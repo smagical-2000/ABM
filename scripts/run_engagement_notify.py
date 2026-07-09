@@ -22,7 +22,7 @@ import sys
 import httpx
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+load_dotenv()   # no override: operator env (e.g. DATABASE_URL) must win
 
 
 def main() -> int:

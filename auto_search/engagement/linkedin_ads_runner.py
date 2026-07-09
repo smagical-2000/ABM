@@ -101,6 +101,7 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
               mirror_client=None, max_reactions: int = 50,
               max_contacts: int | None = None,
               max_leads: int | None = None, dry_run: bool = True,
+              allow_empty_store: bool = False,
               now: str | None = None) -> dict:
     """Run the pipeline. Returns {dry_run, stats, results}. Never raises per-contact —
     one failure is counted and skipped so the batch always completes. `max_leads` stops
@@ -115,6 +116,16 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
             processed = {c.get("external_id") for c in engagement_repo.contacts()}
         except Exception as e:  # noqa: BLE001 — a missing store mustn't break the run
             logger.warning("could not load processed contacts: %s", e)
+    if not dry_run and not processed and not allow_empty_store:
+        # Fail-hard guard (2026-07-08, after a local run against the wrong DB):
+        # an empty dedup list on a LIVE run means every reactor looks new —
+        # every Slack card re-posts, every Apollo/FullEnrich lookup re-bills.
+        # A healthy store is never empty once the pipeline has run; an empty one
+        # means the store is unreachable or DATABASE_URL points somewhere wrong.
+        raise RuntimeError(
+            "engagement store returned ZERO known contacts — refusing a live scan "
+            "(empty dedup would re-post every Slack card and re-bill every lookup). "
+            "If the store is genuinely fresh, pass allow_empty_store=True.")
 
     candidates = await _scrape(share_categories, max_reactions=max_reactions)
     if max_contacts:                                          # caps PEOPLE per run

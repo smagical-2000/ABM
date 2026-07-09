@@ -23,7 +23,7 @@ from dotenv import load_dotenv
 from auto_search.db import get_repository
 from auto_search.news import competitors
 
-load_dotenv(override=True)
+load_dotenv()   # no override: operator env (e.g. DATABASE_URL) must win
 logger = logging.getLogger("run_competitor_news")
 
 

@@ -32,7 +32,7 @@ from auto_search.db.engagement_repository import get_engagement_repository
 from auto_search.db.scoring_repository import get_scoring_repository
 from auto_search.engagement import sync as engagement_sync
 
-load_dotenv(override=True)
+load_dotenv()   # no override: operator env (e.g. DATABASE_URL) must win
 logger = logging.getLogger("run_engagement_sfdc")
 
 

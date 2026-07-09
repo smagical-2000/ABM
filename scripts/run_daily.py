@@ -37,6 +37,12 @@ import sys
 from pathlib import Path
 
 _SCRIPTS = Path(__file__).resolve().parent
+# The repo root must be importable for _report (stamps + ops alerts): Python
+# puts THIS script's dir on sys.path, not the root — in the cron container that
+# meant `auto_search` failed to import and every stamp/alert silently died
+# (found 2026-07-09 via the API watchdog's false "cron silent" alarm; the runs
+# themselves were green). The leg scripts each self-bootstrap; so must we.
+sys.path.insert(0, str(_SCRIPTS.parent))
 
 
 def _run(script: str, *args: str) -> tuple[int, str]:

@@ -78,6 +78,21 @@ _SCHEMAS: tuple[Schema, ...] = (
             ("State", "State"),
         ),
     ),
+    Schema(
+        # Payers export (Definitive): Account Name + Est. Lives Covered + HQ State.
+        # The payer rubric gates on 200k+ estimated lives covered, so carrying that
+        # number as a known fact is what makes payer scoring accurate (2026-07-09).
+        # No domain column in this export — the scorer's qualifier resolves the site.
+        key="payers",
+        label="Payers",
+        segment="payer",
+        name_col="Account Name",
+        detect=("Est. Lives Covered",),        # unique to the payer export
+        fact_cols=(
+            ("Est. Lives Covered", "Estimated Lives Covered"),
+            ("HQ State", "HQ State"),
+        ),
+    ),
 )
 
 

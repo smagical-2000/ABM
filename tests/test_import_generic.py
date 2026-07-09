@@ -155,3 +155,24 @@ def test_classifier_error_flags_neutrally_and_reimport_counts_zero(client, monke
     again = client.post("/api/scoring/import", content=csv_text).json()
     assert again["imported"] == 0 and again["skipped_known"] == 1
     assert again["flagged_count"] == 0 and again["flagged"] == []
+
+
+def test_payers_schema_routes_and_carries_lives():
+    """Payers export (Account Name + Est. Lives Covered + HQ State) routes to the
+    payer rubric (NOT generic), and the covered-lives number is carried as a
+    known fact so the 200k+ payer gate scores on real size (Sunny, 2026-07-09)."""
+    csv_text = (
+        "Account Name,Est. Lives Covered,HQ State\n"
+        "Blue Cross Blue Shield of Michigan,5400000,MI\n"
+        "Health Alliance Plan,650000,MI\n"
+    )
+    res = imports.parse_csv(csv_text)
+    assert res.schema_key == "payers"
+    assert res.segment == "payer"
+    assert res.schema_key != imports.GENERIC_KEY      # not the classify path
+    a = res.accounts[0]
+    assert a.name == "Blue Cross Blue Shield of Michigan"
+    assert a.segment == "payer" and a.framework == "payer"
+    # the sizing signal the rubric gates on is present in the scorer's facts
+    assert a.firmographics.get("Estimated Lives Covered") == "5400000"
+    assert a.firmographics.get("HQ State") == "MI"

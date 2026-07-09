@@ -99,8 +99,10 @@ class RejectBody(BaseModel):
 
 # Max simultaneous Claude scoring calls when running a queued batch. Bounded so
 # a "Score all" over hundreds of accounts paces the spend + respects rate limits
-# instead of firing every call at once.
-_BATCH_CONCURRENCY = 4
+# instead of firing every call at once. Env-tunable (2026-07-09) so large
+# backlogs (1,000+ accounts) can be scored faster without a code change — raise
+# with care: higher concurrency bursts spend and API rate-limit pressure.
+_BATCH_CONCURRENCY = max(1, int(os.getenv("SCORING_BATCH_CONCURRENCY", "4")))
 
 
 def _schedule_coro(app: FastAPI, coro) -> None:

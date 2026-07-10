@@ -53,6 +53,12 @@ def main() -> int:
     if args.dry_run:
         print(f"[run_engagement_notify] dry-run: {d.get('due')} would fire (cap {cap}).",
               flush=True)
+    elif d.get("held"):
+        # The server's circuit breaker tripped (MAR2-31): abnormal due volume,
+        # NOTHING was sent, and the server already posted the ops alert. This is
+        # the breaker working — not a failure of this leg.
+        print(f"[run_engagement_notify] HELD by circuit breaker: {d.get('due')} due "
+              f"(sane max {d.get('sane_max')}) — zero sent; see ops alert.", flush=True)
     else:
         print(f"[run_engagement_notify] sent {d.get('posted')} of {d.get('due')} due "
               f"(cap {cap}, live={d.get('live')}).", flush=True)

@@ -50,8 +50,18 @@ def normalize_company_name(name: str) -> str:
     collision for true duplicates. Fuzzy matching for near-duplicates is a
     separate concern handled at the DB layer if/when we need it.
     """
+    # Join with no separator — the key is for equality, not readability.
+    return "".join(company_name_words(name))
+
+
+def company_name_words(name: str) -> list[str]:
+    """The canonical key's word sequence: lowercase, punctuation-split, trailing
+    legal-entity suffixes dropped. `normalize_company_name` is exactly
+    ''.join(these) — exposed so matching layers can reason about word structure
+    (e.g. the notify ledger's leading-article handling) without re-implementing
+    the normalization rules. Changing THIS changes every dedup key: don't."""
     if not name:
-        return ""
+        return []
 
     # Lowercase + replace any run of non-alphanumerics with a single space.
     cleaned = _NON_ALNUM.sub(" ", name.lower()).strip()
@@ -60,9 +70,7 @@ def normalize_company_name(name: str) -> str:
     words = [w for w in cleaned.split(" ") if w]
     while words and words[-1] in _ENTITY_SUFFIXES:
         words.pop()
-
-    # Join with no separator — the key is for equality, not readability.
-    return "".join(words)
+    return words
 
 
 def slugify(name: str, *, max_len: int = 50) -> str:

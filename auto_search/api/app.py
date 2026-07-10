@@ -529,7 +529,8 @@ def create_app() -> FastAPI:
     # Webhook receivers can't do Basic auth — they carry their own shared-secret
     # query param instead (403 inside the handler on mismatch).
     auth_enabled = install_basic_auth(
-        app, exempt_paths=("/api/health", "/api/campaigns/webhooks/heyreach"))
+        app, exempt_paths=("/api/health", "/api/campaigns/webhooks/heyreach",
+                           "/api/enrichment/clay/results"))
     if not auth_enabled and is_production():
         raise RuntimeError(
             "Refusing to start in production without auth: set BASIC_AUTH_USER "
@@ -1225,7 +1226,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/engagement/notify-changes")
     def engagement_notify_changes(dry_run: bool = False, seed: bool = False, limit: int = 0,
-                                  stage: str = ""):
+                                  stage: str = "", allow_burst: bool = False):
         """Auto AE/SDR push. Posts a card when an account's tier ROSE above the last tier
         we notified it at (Some/Warm → SDR, Hot → AE) — OR when an already-Hot account gets
         NEW activity (Galyna 2026-07-05: a Hot account re-alerts on any new touch, old or
@@ -1249,12 +1250,47 @@ def create_app() -> FastAPI:
             # touch are recorded as "already notified". So a tier rise OR a strictly-newer
             # touch on a Hot account (activity AFTER this seed) is the only thing that fires
             # — nothing back-fires. This is the "go forward from here" line.
+            # Keyed by COMPANY (2026-07-09, MAR2-31): the baseline must survive
+            # internal account-id re-keys, or every bulk import re-fires it.
+            # merge-strongest (QA panel 2026-07-09, blocker): twin board rows
+            # share a company key; a plain overwrite let the WEAKER twin
+            # downgrade the baseline and re-fire the stronger one next run.
             for a in board:
-                ledger[a["account_id"]] = {"tier": a.get("tier") or "Lower",
-                                           "touch": a.get("last_touch")}
+                engagement_notify.record_notified(
+                    ledger, a, a.get("tier") or "Lower", a.get("last_touch"))
             repo.set_setting("notified_tiers", json.dumps(ledger))
-            return {"seeded": len(board), "format": "tier+touch"}
-        due = engagement_notify.accounts_to_notify(board, ledger)
+            return {"seeded": len(board), "format": "company-key tier+touch"}
+        # Stale-history gate (MAR2-31): the activation cutoff now applies to the
+        # AUTO path too — a newly imported company whose old history just attached
+        # must never read as a fresh activation.
+        cutoff = (repo.get_setting("activation_cutoff") or "").strip()[:10] or None
+        due = engagement_notify.accounts_to_notify(board, ledger, cutoff=cutoff)
+        # CIRCUIT BREAKER (MAR2-31, after the 2026-07-09 139-due burst): an
+        # abnormal due volume means something upstream shifted (bulk import,
+        # identity churn, a sync bug) — sending ANY of it risks flooding real
+        # channels with artifacts. Hold everything, alert ops ONCE (throttled),
+        # and let a human look. `allow_burst=true` is the deliberate override
+        # for a reviewed, genuinely-large batch. Dry runs are never held (they
+        # ARE the way a human looks). The ceiling is a repo setting so it can
+        # be tuned without a deploy.
+        try:
+            sane_max = int(repo.get_setting("notify_sane_max")
+                           or os.getenv("ENGAGEMENT_NOTIFY_SANE_MAX", "25"))
+        except ValueError:
+            sane_max = 25
+        if not dry_run and len(due) > sane_max and not allow_burst:
+            from auto_search.ops import alerts as ops_alerts
+            if ops_alerts.should_alert(repo, "notify-burst", min_gap_hours=6):
+                ops_alerts.post_ops_alert(
+                    kind="notify-burst", severity="failure", service="engagement-preview",
+                    title=f"Notify HELD: {len(due)} accounts due (sane max {sane_max})",
+                    detail="Abnormal activation volume — ZERO cards were sent. Usually "
+                           "identity churn after a bulk import, not real engagement. "
+                           "Inspect with notify-changes?dry_run=true; override with "
+                           "allow_burst=true only after review. Ceiling: repo setting "
+                           "notify_sane_max.")
+            return {"due": len(due), "posted": 0, "held": True, "sane_max": sane_max,
+                    "stage": "held", "dry_run": False, "detail": []}
         # STAGING GATE (Sunny, 2026-07-07): while the `notify_stage` setting is
         # "test", every send goes to the PRIVATE test channel with a [TEST]
         # prefix and the ledger is NOT marked — the same accounts stay due, so
@@ -1291,7 +1327,10 @@ def create_app() -> FastAPI:
                     if not staged:
                         # Record BOTH tier and the touch we just notified on, so the
                         # same activity can't re-fire but a genuinely newer touch can.
-                        ledger[a["account_id"]] = {"tier": tier, "touch": d.get("touch")}
+                        # Company-keyed + merge-strongest (MAR2-31): survives
+                        # account-id re-keys, and a weaker twin can never
+                        # downgrade the company's recorded state.
+                        engagement_notify.record_notified(ledger, a, tier, d.get("touch"))
                     posted += 1
             fired.append(entry)
         if not dry_run and not staged:
@@ -2034,6 +2073,177 @@ def create_app() -> FastAPI:
         index = _abm_index()
         summary["indexed"] = index.size if index else 0
         return summary
+
+    # ── Clay enrichment bridge (MAR2-21, 2026-07-09) ──────────────────────
+    # Platform -> n8n -> Clay (waterfall runs there) -> n8n -> back here.
+    # Both directions are gated by a shared secret (CLAY_BRIDGE_TOKEN); the
+    # n8n webhook paths are unguessable and the workflow itself is unlisted.
+
+    @app.post("/api/enrichment/clay/dispatch")
+    async def clay_dispatch(request: Request):
+        """Send leads that still lack an email or phone to the Clay waterfall
+        (via the n8n bridge). Basic-auth protected; manual trigger — importing
+        never spends, and Clay credits are only consumed when a human kicks
+        this. Body: {"limit": 100, "needs": "any"|"email"|"phone"}."""
+        import httpx as _httpx
+        url = os.getenv("N8N_CLAY_DISPATCH_URL")
+        token = os.getenv("CLAY_BRIDGE_TOKEN")
+        if not (url and token):
+            raise HTTPException(status_code=503, detail="clay bridge env not configured")
+        body = await _json_body(request)
+        limit = max(1, min(int(body.get("limit") or 100), 500))
+        needs_filter = str(body.get("needs") or "any").lower()
+        from auto_search.engagement.airtable_client import AirtableClient
+        rows = await AirtableClient().records()
+
+        def _has(f, k):
+            v = f.get(k)
+            return bool(v and str(v).strip())
+
+        # Company domain resolver (the domain Apify found at capture time and
+        # Apollo used to find the email — stored on the engagement contact as
+        # email_domain). We surface it to Clay so the waterfall keys on the real
+        # site, not just a company label. Two indexes, checked in order:
+        #   1) captured contact's email_domain, by email OR LinkedIn member id
+        #   2) the matched scored/ABM account's domain, by normalized company name
+        eng_repo = getattr(app.state, "engagement_repo", None)
+        dom_by_email: dict[str, str] = {}
+        dom_by_member: dict[str, str] = {}
+        if eng_repo is not None:
+            for c in eng_repo.contacts():
+                d = (c.get("email_domain") or "").strip().lower()
+                if not d:
+                    continue
+                if c.get("email"):
+                    dom_by_email.setdefault(c["email"].strip().lower(), d)
+                ext = c.get("external_id") or ""
+                if ext.startswith("linkedin:"):
+                    dom_by_member.setdefault(ext.split(":", 1)[1].strip().lower(), d)
+        dom_by_company: dict[str, str] = {}
+        try:
+            from auto_search.normalize import normalize_company_name as _norm
+            for a in app.state.scoring_repo.list_accounts():
+                if a.get("name") and a.get("domain"):
+                    dom_by_company.setdefault(_norm(a["name"]), a["domain"])
+            for t in svc(app).repo.abm_targets() if hasattr(svc(app), "repo") else []:
+                if t.get("name") and t.get("domain"):
+                    dom_by_company.setdefault(_norm(t["name"]), t["domain"])
+        except Exception:  # noqa: BLE001 — domain is a bonus; never fail dispatch
+            logger.exception("clay dispatch: account-domain index failed")
+
+        def _resolve_domain(f: dict) -> str | None:
+            em = (f.get("Email") or "").strip().lower()
+            li = (f.get("LinkedIn URL") or "").strip().lower()
+            member = li.rstrip("/").rsplit("/", 1)[-1] if li else ""
+            from auto_search.normalize import normalize_company_name as _n
+            return (dom_by_email.get(em) or (dom_by_member.get(member) if member else None)
+                    or dom_by_company.get(_n(f.get("Company Name") or "")))
+
+        leads = []
+        with_domain = 0
+        for r in rows:
+            f = r["fields"]
+            if not (_has(f, "First Name") or _has(f, "Last Name")):
+                continue                        # junk rows never leave the building
+            needs = [k for k, col in (("email", "Email"), ("phone", "Phone"))
+                     if not _has(f, col)]
+            if not needs or (needs_filter != "any" and needs_filter not in needs):
+                continue
+            if not (_has(f, "Email") or _has(f, "LinkedIn URL")):
+                continue                        # no match key -> results can't land
+            company_domain = _resolve_domain(f)
+            if company_domain:
+                with_domain += 1
+            leads.append({
+                "record_id": r["id"], "first_name": f.get("First Name"),
+                "last_name": f.get("Last Name"), "company": f.get("Company Name"),
+                "company_domain": company_domain or "",
+                "email": f.get("Email"), "phone": f.get("Phone"),
+                "linkedin_url": f.get("LinkedIn URL"), "needs": needs})
+            if len(leads) >= limit:
+                break
+        if not leads:
+            return {"dispatched": 0}
+        import uuid as _uuid
+        batch_id = "clay_" + _uuid.uuid4().hex[:10]
+        async with _httpx.AsyncClient(timeout=30) as hc:
+            resp = await hc.post(url, headers={"X-Bridge-Token": token},
+                                 json={"batch_id": batch_id, "leads": leads})
+        return {"dispatched": len(leads), "with_domain": with_domain,
+                "batch_id": batch_id, "bridge_status": resp.status_code}
+
+    async def _clay_fill(client, match_key: str, match_val: str, updates: dict, *,
+                         record_id: str | None = None) -> bool:
+        """Fill ONLY blank cells on the matched row (never overwrite a value a
+        human or another source already set). Returns True if anything landed.
+        Prefers a direct Airtable record_id (exact, no search); falls back to
+        finding the row by match_key/match_val (email or LinkedIn URL)."""
+        import httpx as _httpx
+        rid = record_id or await client._find_id({match_key: match_val}, [match_key])
+        if not rid:
+            return False
+        async with _httpx.AsyncClient(timeout=30) as hc:
+            got = await hc.get(f"{client._url()}/{rid}", headers=client._headers)
+            got.raise_for_status()
+            current = got.json().get("fields", {})
+            fill = {k: v for k, v in updates.items()
+                    if v and not str(current.get(k) or "").strip()}
+            if not fill:
+                return False
+            patched = await hc.patch(f"{client._url()}/{rid}", headers=client._headers,
+                                     json={"fields": fill, "typecast": True})
+            patched.raise_for_status()
+        return True
+
+    @app.post("/api/enrichment/clay/results")
+    async def clay_results(request: Request):
+        """Receive enriched email/phone from the Clay waterfall (via n8n).
+        Basic-auth EXEMPT (webhook caller) — gated by the shared bridge token
+        instead; 403 on mismatch. Fills blanks only, in BOTH the primary table
+        and the tracking mirror."""
+        token = os.getenv("CLAY_BRIDGE_TOKEN")
+        if not token or request.headers.get("x-bridge-token") != token:
+            raise HTTPException(status_code=403, detail="forbidden")
+        body = await _json_body(request)
+        results = body.get("results") if isinstance(body.get("results"), list) else [body]
+        from auto_search.engagement.airtable_client import AirtableClient
+        primary = AirtableClient()
+        mirror = None
+        if os.getenv("AIRTABLE_TOFU_MIRROR_BASE_ID"):
+            mirror = AirtableClient(
+                base_id=os.environ["AIRTABLE_TOFU_MIRROR_BASE_ID"],
+                table=os.getenv("AIRTABLE_TOFU_MIRROR_TABLE", "ABM Flow LinkedIn <> Airtable"))
+        filled = skipped = 0
+        for res in results:
+            email = (res.get("email") or "").strip()
+            phone = (res.get("phone") or "").strip()
+            record_id = (res.get("record_id") or "").strip()
+            key_email = (res.get("match_email") or res.get("orig_email") or email).strip()
+            key_li = (res.get("linkedin_url") or "").strip()
+            updates = {}
+            if email:
+                updates["Email"] = email
+            if phone:
+                updates["Phone"] = phone
+            if not updates or not (record_id or key_email or key_li):
+                skipped += 1
+                continue
+            match_key, match_val = (("Email", key_email) if key_email
+                                    else ("LinkedIn URL", key_li))
+            try:
+                # Primary: exact by record_id when Clay echoed it back; else find
+                # the row by email/LinkedIn. Mirror: its record ids differ, so it
+                # always matches by email/LinkedIn.
+                ok = await _clay_fill(primary, match_key, match_val, updates,
+                                      record_id=record_id or None)
+                if mirror is not None and (key_email or key_li):
+                    await _clay_fill(mirror, match_key, match_val, updates)
+                filled += 1 if ok else 0
+            except Exception:  # noqa: BLE001 — one bad row must not drop the batch
+                logger.exception("clay result fill failed for %s", match_val)
+                skipped += 1
+        logger.info("clay results: %d filled, %d skipped of %d", filled, skipped, len(results))
+        return {"filled": filled, "skipped": skipped, "received": len(results)}
 
     @app.post("/api/abm/import")
     async def abm_import(request: Request):

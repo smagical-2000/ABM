@@ -22,6 +22,8 @@ from collections import Counter
 
 import httpx
 
+from auto_search.normalize import company_name_words
+
 logger = logging.getLogger(__name__)
 
 # kind -> label (no emoji — the Slack card stays clean/professional)
@@ -341,6 +343,133 @@ def _ledger_entry(v) -> tuple[str, str | None]:
     return (v or "Lower"), None
 
 
+def company_key(name: str | None) -> str:
+    """Stable NOTIFICATION identity for a company — survives internal account-id
+    re-keys (2026-07-09 incident: bulk imports minted csv_/acc_ twins of abm_
+    identities; the account-id-keyed ledger read 83 already-handled companies as
+    brand-new tier rises).
+
+    Composes the canonical `normalize_company_name` (never modified here — its
+    output is minted into persisted account ids, so changing IT would re-key the
+    board) with one matching-only extension: a leading article is dropped so
+    "The Harris Center…" and "Harris Center…" share notification history.
+    Degeneracy guard: the article is kept when what remains is a single word —
+    suffix-stripping already collapses generic names hard ("The Urology Group"
+    -> "theurology"), and stripping further would merge DISTINCT companies
+    ("Urology Associates" -> "urology"). Verified against all 2,222 live company
+    names: with the guard, the only merges are true same-company variants.
+
+    This is a LOOKUP key for the notify ledger only. Never mint identities from
+    it. Returns "" for a missing name — callers must fall back to account_id."""
+    stripped = company_name_words(name or "")
+    raw = [w for w in _NON_ALNUM_RE.sub(" ", (name or "").lower()).split() if w]
+    # Degeneracy guard, generalized (QA panel 2026-07-09): when suffix-stripping
+    # collapses a name to a SINGLE substantive word, distinct companies merge
+    # ("Urology Group" and "Urology Associates" would both key as "urology").
+    # In that case key on the UNSTRIPPED words — same-suffix variants of one
+    # company still match, different-suffix companies stay distinct. Names whose
+    # stripped form keeps 2+ substantive words use the normal stripped key, so
+    # "Acme Health LLC" == "Acme Health Inc." is preserved.
+    core = stripped[1:] if (stripped and stripped[0] == "the") else stripped
+    basis = raw if (len(core) <= 1 and len(raw) > len(stripped)) else stripped
+    if len(basis) >= 3 and basis[0] == "the":
+        return "".join(basis[1:])
+    return "".join(basis)
+
+
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+
+
+def stronger_state(a: dict, b: dict) -> dict:
+    """The stronger of two ledger states: higher tier, then newer touch. The
+    single collision rule shared by the migration, the seed, and the send path
+    — a weaker twin can never downgrade a company's recorded state."""
+    ta = _TIER_RANK.get(str(a.get("tier") or "").lower(), 0)
+    tb = _TIER_RANK.get(str(b.get("tier") or "").lower(), 0)
+    if ta != tb:
+        return a if ta > tb else b
+    da, db = _touch_dt(a.get("touch")), _touch_dt(b.get("touch"))
+    if da is None:
+        return b
+    if db is None:
+        return a
+    return a if da >= db else b
+
+
+def record_notified(notified: dict, account: dict, tier: str, touch) -> None:
+    """Merge-strongest ledger write (QA panel 2026-07-09: plain assignment let
+    a weaker board twin overwrite its company's stronger recorded state — the
+    seed's 'nothing fires after seed' guarantee broke, and Hot re-fired against
+    a downgraded ledger). Mutates `notified` in place."""
+    key = ledger_key(account)
+    entry = {"tier": tier, "touch": touch,
+             "account_id": account.get("account_id"), "name": account.get("name")}
+    prev = notified.get(key)
+    if prev is not None:
+        prev_d = prev if isinstance(prev, dict) else {"tier": str(prev), "touch": None}
+        entry = stronger_state(prev_d, entry)
+    notified[key] = entry
+
+
+def _ledger_lookup(notified: dict, account: dict) -> tuple[str, str | None]:
+    """The strongest previously-notified state for an account across EVERY key
+    form its company may be recorded under: the company key (post-migration),
+    the raw account_id (pre-migration / fallback writes), and the account-id
+    body itself when it embeds the canonical name key (abm_<key> ids do).
+
+    Strongest = highest tier, then newest touch. Taking the max is the
+    conservative direction: identity churn can only ever SUPPRESS a duplicate
+    alert, never invent one — a genuinely new rise still beats any prior state."""
+    aid = account.get("account_id") or ""
+    name = account.get("name")
+    if name == aid:                 # display fallback, not a real name (see ledger_key)
+        name = None
+    ck = company_key(name)
+    canonical = "".join(company_name_words(name or ""))
+    body = aid.split("_", 1)[1] if "_" in aid else ""
+    # Every key form this company's history may live under: the company key
+    # (post-migration), the canonical un-articled key, this row's own id and
+    # id-body (pre-migration self), and the MINTED abm id for the company —
+    # `abm_<canonical>` is how cross.py names ABM identities, which is where a
+    # re-keyed csv/acc twin's pre-migration history actually lives.
+    probes = [ck, canonical, aid, body,
+              f"abm_{canonical}" if canonical else "", f"abm_{ck}" if ck else ""]
+    seen: set[str] = set()
+    candidates = []
+    for p in probes:
+        if p and p not in seen:
+            seen.add(p)
+            if p in notified:
+                candidates.append(notified[p])
+    if not candidates:
+        return "Lower", None
+    best_tier, best_touch = "Lower", None
+    for v in candidates:
+        tier, touch = _ledger_entry(v)
+        t_rank, b_rank = _TIER_RANK.get(tier.lower(), 0), _TIER_RANK.get(best_tier.lower(), 0)
+        if t_rank > b_rank:
+            best_tier, best_touch = tier, touch
+        elif t_rank == b_rank:
+            t_dt, b_dt = _touch_dt(touch), _touch_dt(best_touch)
+            if b_dt is None or (t_dt is not None and t_dt > b_dt):
+                best_touch = touch or best_touch
+    return best_tier, best_touch
+
+
+def ledger_key(account: dict) -> str:
+    """The key NEW ledger entries are written under: the company key, falling
+    back to the account_id when the account has no usable name. An id-as-name
+    (the board's display fallback when a name can't be resolved) is NOT a name —
+    normalizing it would mint a garbage key ('abm_dueco' -> 'abmdueco') that a
+    properly-named row of the same company could never match, re-creating the
+    exact re-fire bug this keying exists to kill."""
+    aid = account.get("account_id") or ""
+    name = account.get("name")
+    if not name or name == aid:
+        return aid
+    return company_key(name) or aid
+
+
 def _touch_dt(ts):
     """Parse an ISO touch timestamp to an aware datetime, or None. Robust to
     mixed offsets ('+00:00' vs '-04:00') and a trailing 'Z' — a plain string
@@ -354,12 +483,22 @@ def _touch_dt(ts):
         return None
 
 
-def accounts_to_notify(accounts: list[dict], notified: dict) -> list[dict]:
+def accounts_to_notify(accounts: list[dict], notified: dict,
+                       cutoff: str | None = None) -> list[dict]:
     """Accounts that should fire an AE/SDR handoff right now. PURE.
-    `notified` maps account_id -> {"tier","touch"} (or a legacy bare tier string).
+    `notified` maps ledger keys — company keys (see `company_key`) and/or
+    legacy account_ids — to {"tier","touch"} (or a legacy bare tier string);
+    `_ledger_lookup` resolves an account across every form its company may be
+    recorded under, so internal account-id re-keys (bulk imports minting new
+    identities for known companies, 2026-07-09) can never resurrect an
+    already-notified company as a "new" tier rise.
     Returns [{account, tier, role, prev, reason, touch}].
 
-    Two fire conditions:
+    Three gates:
+      - CUTOFF (Galyna 2026-06-25, enforced here since 2026-07-09): an account
+        whose newest touch predates `cutoff` (YYYY-MM-DD) never fires — newly
+        imported companies whose OLD history just attached must not read as
+        fresh activations. No touch at all also never fires.
       - ROSE: the tier climbed above the last tier we notified (Some→Warm→Hot).
         The only path for Some/Warm — same-tier activity never re-fires.
       - HOT REACTIVATION (Galyna 2026-07-05): an account that is ALREADY Hot
@@ -367,22 +506,40 @@ def accounts_to_notify(accounts: list[dict], notified: dict) -> list[dict]:
         touch we last notified it on. Requires a recorded baseline touch, so a
         never-seeded account can't back-fire its whole history on the first run
         (missing baseline = treated as already acknowledged)."""
-    out: list[dict] = []
+    # Per-company dedup FIRST (QA panel 2026-07-09, blocker): id twins of one
+    # company must be gated as ONE company — otherwise both twins fire in the
+    # same pass (an AE card AND an SDR card for one account). Keep the
+    # strongest row per ledger key (highest tier, then newest touch).
+    best: dict[str, dict] = {}
     for a in accounts:
+        key = ledger_key(a)
+        cur = best.get(key)
+        if cur is None:
+            best[key] = a
+            continue
+        pick = stronger_state(
+            {"tier": cur.get("tier"), "touch": cur.get("last_touch"), "_row": cur},
+            {"tier": a.get("tier"), "touch": a.get("last_touch"), "_row": a})
+        best[key] = pick["_row"]
+    out: list[dict] = []
+    for a in best.values():
         tier = a.get("tier") or "Lower"
         role = tier_role(tier)
         if not role:                                   # Lower / unknown → no handoff
             continue
-        prev_tier, prev_touch = _ledger_entry(notified.get(a.get("account_id")))
+        touch = a.get("last_touch")
+        if cutoff and (not touch or str(touch)[:10] < cutoff):
+            continue                                   # stale history — never alert
+        prev_tier, prev_touch = _ledger_lookup(notified, a)
         rose = _TIER_RANK.get(tier.lower(), 0) > _TIER_RANK.get(str(prev_tier).lower(), 0)
         reactivated = False
         if not rose and tier.lower() == "hot":
-            cur_dt, prev_dt = _touch_dt(a.get("last_touch")), _touch_dt(prev_touch)
+            cur_dt, prev_dt = _touch_dt(touch), _touch_dt(prev_touch)
             reactivated = cur_dt is not None and prev_dt is not None and cur_dt > prev_dt
         if rose or reactivated:
             out.append({"account": a, "tier": tier, "role": role, "prev": prev_tier,
                         "reason": "rose" if rose else "hot_activity",
-                        "touch": a.get("last_touch")})
+                        "touch": touch})
     return out
 
 

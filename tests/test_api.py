@@ -488,3 +488,26 @@ class TestAuth:
             bad = base64.b64encode(b"u:wrong").decode()
             assert c.get("/api/stats",
                          headers={"Authorization": f"Basic {bad}"}).status_code == 401
+
+
+class TestClayBridge:
+    """Clay enrichment bridge (MAR2-21): the results receiver is basic-auth
+    exempt but token-gated — a wrong or missing bridge token is a hard 403,
+    and with no token configured the endpoint refuses everything."""
+
+    def test_results_rejects_without_token_configured(self, client, monkeypatch):
+        monkeypatch.delenv("CLAY_BRIDGE_TOKEN", raising=False)
+        r = client.post("/api/enrichment/clay/results", json={"email": "a@b.com"})
+        assert r.status_code == 403
+
+    def test_results_rejects_wrong_token(self, client, monkeypatch):
+        monkeypatch.setenv("CLAY_BRIDGE_TOKEN", "right")
+        r = client.post("/api/enrichment/clay/results", json={"email": "a@b.com"},
+                        headers={"X-Bridge-Token": "wrong"})
+        assert r.status_code == 403
+
+    def test_dispatch_503_when_bridge_unconfigured(self, client, monkeypatch):
+        monkeypatch.delenv("N8N_CLAY_DISPATCH_URL", raising=False)
+        monkeypatch.delenv("CLAY_BRIDGE_TOKEN", raising=False)
+        r = client.post("/api/enrichment/clay/dispatch", json={})
+        assert r.status_code == 503

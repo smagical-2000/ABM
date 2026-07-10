@@ -181,7 +181,7 @@ def test_seed_baselines_to_now_then_nothing_fires(client):
     c.app.state.engagement_repo.engaged_accounts = lambda: [{**row, "last_touch": touch["v"]}]
 
     seeded = c.post("/api/engagement/notify-changes", params={"seed": "true"}).json()
-    assert seeded["seeded"] == 1 and seeded["format"] == "tier+touch"
+    assert seeded["seeded"] == 1 and seeded["format"] == "company-key tier+touch"
     # nothing fires right after seed (the "not like right now" guarantee)
     assert c.post("/api/engagement/notify-changes", params={"dry_run": "true"}).json()["due"] == 0
     # a NEW touch on the already-Hot account now re-fires

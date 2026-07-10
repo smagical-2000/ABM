@@ -74,7 +74,11 @@ def test_explicit_live_param_overrides_and_marks_ledger(client, monkeypatch):
     out = client.post("/api/engagement/notify-changes?stage=live").json()
     assert out["stage"] == "live" and out["posted"] == 1
     led = json.loads(app.state.engagement_repo.get_setting("notified_tiers"))
+    # MAR2-31: entries are company-keyed; this fixture's board can't resolve a
+    # display name (name falls back to the id), so ledger_key correctly falls
+    # back to the ACCOUNT ID rather than normalizing an id into a garbage key.
     assert led["abm_dueco"]["tier"].lower() == "hot"
+    assert led["abm_dueco"]["account_id"] == "abm_dueco"
     after = client.post("/api/engagement/notify-changes?dry_run=true").json()
     assert after["due"] == 0                 # consumed by the live push
 
@@ -100,3 +104,35 @@ def test_zero_point_touches_never_advance_last_touch(client):
     rows = app.state.engagement_repo.engaged_accounts()
     row = next(r for r in rows if r["account_id"] == "abm_dueco")
     assert row["last_touch"] == "2026-07-07T10:00:00+00:00"   # the scored touch, not the open
+
+
+def test_circuit_breaker_holds_and_allow_burst_overrides(client, monkeypatch):
+    """MAR2-31 breaker (QA panel: previously zero tests on the only guard
+    between an identity burst and a channel flood): due above the ceiling ->
+    ZERO sends, held response, ledger untouched; allow_burst=true overrides."""
+    import auto_search.engagement.notify as notify_mod
+    app = client.app
+    _seed_due_account(app)
+    app.state.engagement_repo.set_setting("notify_sane_max", "0")   # 1 due > 0 trips it
+    calls = []
+    monkeypatch.setattr(notify_mod, "activate_account",
+                        lambda a, e, **kw: calls.append(1) or True)
+    out = client.post("/api/engagement/notify-changes?stage=live").json()
+    assert out.get("held") is True and out["posted"] == 0 and calls == []
+    assert app.state.engagement_repo.get_setting("notified_tiers") in (None, "{}", "")
+    # deliberate override sends
+    out2 = client.post("/api/engagement/notify-changes?stage=live&allow_burst=true").json()
+    assert out2.get("held") is None and out2["posted"] == 1 and calls
+
+
+def test_endpoint_applies_activation_cutoff(client, monkeypatch):
+    """The endpoint wires the activation_cutoff setting into the pure gate:
+    with a cutoff after the account's only touch, nothing is due."""
+    app = client.app
+    _seed_due_account(app)                       # touch 2026-07-07
+    app.state.engagement_repo.set_setting("activation_cutoff", "2026-07-08")
+    out = client.post("/api/engagement/notify-changes?dry_run=true").json()
+    assert out["due"] == 0
+    app.state.engagement_repo.set_setting("activation_cutoff", "2026-07-01")
+    out2 = client.post("/api/engagement/notify-changes?dry_run=true").json()
+    assert out2["due"] == 1

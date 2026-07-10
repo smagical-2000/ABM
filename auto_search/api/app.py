@@ -2091,7 +2091,16 @@ def create_app() -> FastAPI:
         if not (url and token):
             raise HTTPException(status_code=503, detail="clay bridge env not configured")
         body = await _json_body(request)
-        limit = max(1, min(int(body.get("limit") or 100), 500))
+        # Bad limit is a client error, not a 500; a caller asking for 0 means 0.
+        raw_limit = body.get("limit", 100)
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400,
+                                detail="limit must be an integer") from None
+        if limit <= 0:
+            return {"dispatched": 0, "with_domain": 0}
+        limit = min(limit, 500)
         needs_filter = str(body.get("needs") or "any").lower()
         from auto_search.engagement.airtable_client import AirtableClient
         rows = await AirtableClient().records()
@@ -2106,22 +2115,25 @@ def create_app() -> FastAPI:
         # site, not just a company label. Two indexes, checked in order:
         #   1) captured contact's email_domain, by email OR LinkedIn member id
         #   2) the matched scored/ABM account's domain, by normalized company name
-        eng_repo = getattr(app.state, "engagement_repo", None)
+        # The WHOLE index build is best-effort — any failure degrades to no
+        # domain, never a failed dispatch (QA 2026-07-10: the contacts loop was
+        # outside the guard and could 500 the whole call).
         dom_by_email: dict[str, str] = {}
         dom_by_member: dict[str, str] = {}
-        if eng_repo is not None:
-            for c in eng_repo.contacts():
-                d = (c.get("email_domain") or "").strip().lower()
-                if not d:
-                    continue
-                if c.get("email"):
-                    dom_by_email.setdefault(c["email"].strip().lower(), d)
-                ext = c.get("external_id") or ""
-                if ext.startswith("linkedin:"):
-                    dom_by_member.setdefault(ext.split(":", 1)[1].strip().lower(), d)
         dom_by_company: dict[str, str] = {}
         try:
             from auto_search.normalize import normalize_company_name as _norm
+            eng_repo = getattr(app.state, "engagement_repo", None)
+            if eng_repo is not None:
+                for c in eng_repo.contacts():
+                    d = (c.get("email_domain") or "").strip().lower()
+                    if not d:
+                        continue
+                    if c.get("email"):
+                        dom_by_email.setdefault(c["email"].strip().lower(), d)
+                    ext = c.get("external_id") or ""
+                    if ext.startswith("linkedin:"):
+                        dom_by_member.setdefault(ext.split(":", 1)[1].strip().lower(), d)
             for a in app.state.scoring_repo.list_accounts():
                 if a.get("name") and a.get("domain"):
                     dom_by_company.setdefault(_norm(a["name"]), a["domain"])
@@ -2129,7 +2141,7 @@ def create_app() -> FastAPI:
                 if t.get("name") and t.get("domain"):
                     dom_by_company.setdefault(_norm(t["name"]), t["domain"])
         except Exception:  # noqa: BLE001 — domain is a bonus; never fail dispatch
-            logger.exception("clay dispatch: account-domain index failed")
+            logger.exception("clay dispatch: domain index failed (continuing without)")
 
         def _resolve_domain(f: dict) -> str | None:
             em = (f.get("Email") or "").strip().lower()
@@ -2173,24 +2185,39 @@ def create_app() -> FastAPI:
                 "batch_id": batch_id, "bridge_status": resp.status_code}
 
     async def _clay_fill(client, match_key: str, match_val: str, updates: dict, *,
-                         record_id: str | None = None) -> bool:
+                         record_id: str | None = None, verify: dict | None = None) -> bool:
         """Fill ONLY blank cells on the matched row (never overwrite a value a
         human or another source already set). Returns True if anything landed.
         Prefers a direct Airtable record_id (exact, no search); falls back to
-        finding the row by match_key/match_val (email or LinkedIn URL)."""
+        finding the row by match_key/match_val (email or LinkedIn URL).
+
+        `verify` (field -> expected value): when a record_id is trusted, and the
+        row ALREADY has that field populated, it must match — else the echoed
+        record_id points at a DIFFERENT person and we refuse to write (QA
+        2026-07-10: a wrong Clay-echoed id could otherwise land PII on the wrong
+        row)."""
         import httpx as _httpx
         rid = record_id or await client._find_id({match_key: match_val}, [match_key])
         if not rid:
             return False
         async with _httpx.AsyncClient(timeout=30) as hc:
-            got = await hc.get(f"{client._url()}/{rid}", headers=client._headers)
+            # _url / _headers are @property (every other call site uses them
+            # without parens) — calling them () raised TypeError on every row,
+            # a silent total outage the broad except swallowed (QA 2026-07-10).
+            got = await hc.get(f"{client._url}/{rid}", headers=client._headers)
             got.raise_for_status()
             current = got.json().get("fields", {})
+            for vk, vv in (verify or {}).items():
+                cur = str(current.get(vk) or "").strip().lower()
+                if cur and vv and cur != str(vv).strip().lower():
+                    logger.warning("clay fill: record %s %s=%r != expected %r — wrong "
+                                   "row, refusing", rid, vk, cur, vv)
+                    return False
             fill = {k: v for k, v in updates.items()
                     if v and not str(current.get(k) or "").strip()}
             if not fill:
                 return False
-            patched = await hc.patch(f"{client._url()}/{rid}", headers=client._headers,
+            patched = await hc.patch(f"{client._url}/{rid}", headers=client._headers,
                                      json={"fields": fill, "typecast": True})
             patched.raise_for_status()
         return True
@@ -2204,8 +2231,22 @@ def create_app() -> FastAPI:
         token = os.getenv("CLAY_BRIDGE_TOKEN")
         if not token or request.headers.get("x-bridge-token") != token:
             raise HTTPException(status_code=403, detail="forbidden")
-        body = await _json_body(request)
-        results = body.get("results") if isinstance(body.get("results"), list) else [body]
+        # Accept every shape Clay/n8n might send: {"results":[...]}, a single
+        # object, OR a bare top-level array (QA 2026-07-10: a bare array was
+        # silently coerced to {} and the whole batch dropped with a 200).
+        import json as _json
+        raw = await request.body()
+        try:
+            parsed = _json.loads(raw) if raw else {}
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid json") from None
+        if isinstance(parsed, list):
+            results = parsed
+        elif isinstance(parsed, dict):
+            results = (parsed["results"] if isinstance(parsed.get("results"), list)
+                       else [parsed])
+        else:
+            results = []
         from auto_search.engagement.airtable_client import AirtableClient
         primary = AirtableClient()
         mirror = None
@@ -2232,10 +2273,13 @@ def create_app() -> FastAPI:
                                     else ("LinkedIn URL", key_li))
             try:
                 # Primary: exact by record_id when Clay echoed it back; else find
-                # the row by email/LinkedIn. Mirror: its record ids differ, so it
+                # the row by email/LinkedIn. When we trust an echoed record_id and
+                # ALSO have the original email, cross-check it so a wrong id can't
+                # land PII on another person. Mirror: its record ids differ, so it
                 # always matches by email/LinkedIn.
+                verify = {"Email": key_email} if (record_id and key_email) else None
                 ok = await _clay_fill(primary, match_key, match_val, updates,
-                                      record_id=record_id or None)
+                                      record_id=record_id or None, verify=verify)
                 if mirror is not None and (key_email or key_li):
                     await _clay_fill(mirror, match_key, match_val, updates)
                 filled += 1 if ok else 0

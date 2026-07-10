@@ -511,3 +511,111 @@ class TestClayBridge:
         monkeypatch.delenv("CLAY_BRIDGE_TOKEN", raising=False)
         r = client.post("/api/enrichment/clay/dispatch", json={})
         assert r.status_code == 503
+
+
+class TestClayResultsFill:
+    """The results receiver's write path — the money/prod-safety property the
+    first QA pass left entirely unpinned (a _url() TypeError shipped undetected).
+    A fake AirtableClient records GET/PATCH so we assert exactly what lands,
+    never touching real Airtable."""
+
+    class _FakeAT:
+        instances = []
+
+        def __init__(self, *a, **k):
+            self.patched = []
+            self.rows = {
+                "recBLANK": {"First Name": "Blank", "Email": "", "Phone": ""},
+                "recHASEMAIL": {"First Name": "Has", "Email": "has@corp.com", "Phone": ""},
+                "recOTHER": {"First Name": "Other", "Email": "other@corp.com", "Phone": ""},
+            }
+            TestClayResultsFill._FakeAT.instances.append(self)
+
+        _url = "https://api.airtable.test/base/tbl"
+
+        @property
+        def _headers(self):
+            return {"Authorization": "Bearer x"}
+
+        async def _find_id(self, fields, merge_on):
+            key = merge_on[0]
+            for rid, f in self.rows.items():
+                if str(f.get(key, "")).strip().lower() == str(fields[key]).strip().lower():
+                    return rid
+            return None
+
+    def _client(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        from auto_search.db.engagement_repository import EngagementJsonRepository
+        from auto_search.db.repository import JsonFileRepository
+        from auto_search.db.scoring_repository import ScoringJsonRepository
+        for v in ("BASIC_AUTH_USER", "BASIC_AUTH_PASS", "DATABASE_URL"):
+            monkeypatch.delenv(v, raising=False)
+        monkeypatch.setenv("CLAY_BRIDGE_TOKEN", "secret")
+        monkeypatch.setattr(_app_module, "get_repository",
+                            lambda: JsonFileRepository(tmp_path / "s.json"))
+        monkeypatch.setattr(_app_module, "get_scoring_repository",
+                            lambda: ScoringJsonRepository(tmp_path / "sc.json"))
+        monkeypatch.setattr(_app_module, "get_engagement_repository",
+                            lambda: EngagementJsonRepository(tmp_path / "e.json"))
+        self._FakeAT.instances = []
+        monkeypatch.setattr("auto_search.engagement.airtable_client.AirtableClient", self._FakeAT)
+        # patch the real GET/PATCH httpx calls _clay_fill makes
+        real_get = self._FakeAT
+
+        class _Resp:
+            def __init__(self, data): self._d = data
+            def raise_for_status(self): pass
+            def json(self): return self._d
+
+        class _HC:
+            def __init__(self, *a, **k): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get(self, url, headers=None):
+                rid = url.rsplit("/", 1)[-1]
+                fat = real_get.instances[0]
+                return _Resp({"fields": fat.rows.get(rid, {})})
+            async def patch(self, url, headers=None, json=None):
+                rid = url.rsplit("/", 1)[-1]
+                real_get.instances[0].patched.append((rid, json["fields"]))
+                return _Resp({})
+        monkeypatch.setattr("httpx.AsyncClient", _HC)
+        return TestClient(_app_module.create_app())
+
+    def test_correct_token_fills_blank_only(self, tmp_path, monkeypatch):
+        c = self._client(tmp_path, monkeypatch)
+        # blank row -> phone lands; populated-email row -> email NOT overwritten
+        r = c.post("/api/enrichment/clay/results",
+                   headers={"X-Bridge-Token": "secret"},
+                   json={"results": [
+                       {"record_id": "recBLANK", "phone": "+1 555 111 2222"},
+                       {"record_id": "recHASEMAIL", "email": "new@corp.com"},
+                   ]})
+        assert r.status_code == 200
+        patched = self._FakeAT.instances[0].patched
+        by_rid = {rid: f for rid, f in patched}
+        assert by_rid["recBLANK"] == {"Phone": "+1 555 111 2222"}   # blank filled
+        assert "recHASEMAIL" not in by_rid                          # populated preserved
+
+    def test_wrong_record_id_with_conflicting_email_refuses(self, tmp_path, monkeypatch):
+        c = self._client(tmp_path, monkeypatch)
+        # record_id points at recOTHER (other@corp.com) but match_email says
+        # someone else -> must NOT write onto the wrong person
+        r = c.post("/api/enrichment/clay/results",
+                   headers={"X-Bridge-Token": "secret"},
+                   json={"record_id": "recOTHER", "phone": "+1 999",
+                         "match_email": "someoneelse@corp.com"})
+        assert r.status_code == 200
+        assert self._FakeAT.instances[0].patched == []              # refused
+
+    def test_bare_array_shape_is_processed(self, tmp_path, monkeypatch):
+        c = self._client(tmp_path, monkeypatch)
+        # a bare top-level array must not be silently dropped (received==1)
+        r = c.post("/api/enrichment/clay/results",
+                   headers={"X-Bridge-Token": "secret",
+                            "Content-Type": "application/json"},
+                   content=b'[{"record_id":"recBLANK","phone":"+1 700"}]')
+        assert r.status_code == 200 and r.json()["received"] == 1
+        assert self._FakeAT.instances[0].patched == [("recBLANK", {"Phone": "+1 700"})]

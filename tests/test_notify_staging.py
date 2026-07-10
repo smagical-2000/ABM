@@ -59,10 +59,21 @@ def test_staged_send_posts_test_only_and_keeps_account_due(client, monkeypatch):
     assert out["stage"] == "test" and out["posted"] == 1
     assert calls[0]["test"] is True          # [TEST] card
     assert calls[0]["webhook"] is None       # falls back to the PRIVATE webhook
-    # ledger untouched -> still due for the real push
+    # REAL ledger untouched -> still due for the live push...
     assert app.state.engagement_repo.get_setting("notified_tiers") in (None, "{}", "")
+    # ...but the TEST ledger has memory (2026-07-10 flood fix): a repeat
+    # auto-trigger in test stage must NOT re-post the same card.
+    import json as _json
+    tled = _json.loads(app.state.engagement_repo.get_setting("notified_tiers_test") or "{}")
+    assert tled and next(iter(tled.values()))["tier"].lower() == "hot"
     again = client.post("/api/engagement/notify-changes?dry_run=true").json()
-    assert again["due"] == 1                 # the account is STILL queued
+    assert again["due"] == 0                 # test channel: seen once, silent now
+    repeat = client.post("/api/engagement/notify-changes").json()
+    assert repeat["posted"] == 0             # no re-flood
+    # the LIVE view still owes the card: explicit stage=live sees it as due
+    live_view = client.post(
+        "/api/engagement/notify-changes?dry_run=true&stage=live").json()
+    assert live_view["due"] == 1
 
 
 def test_explicit_live_param_overrides_and_marks_ledger(client, monkeypatch):

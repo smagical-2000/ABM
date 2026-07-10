@@ -1264,7 +1264,18 @@ def create_app() -> FastAPI:
         # AUTO path too — a newly imported company whose old history just attached
         # must never read as a fresh activation.
         cutoff = (repo.get_setting("activation_cutoff") or "").strip()[:10] or None
-        due = engagement_notify.accounts_to_notify(board, ledger, cutoff=cutoff)
+        # Staging resolved BEFORE computing due: test mode has its own MEMORY
+        # (2026-07-10 flood: test sends marked nothing, so every auto-trigger
+        # re-posted the same cards). Test sends mark `notified_tiers_test`; that
+        # overlay suppresses repeats in TEST ONLY — the real ledger is untouched,
+        # so the explicit stage=live push still sees the account as due.
+        staged = ((stage or repo.get_setting("notify_stage") or "live")
+                  .strip().lower() == "test")
+        test_ledger = (json.loads(repo.get_setting("notified_tiers_test") or "{}")
+                       if staged else {})
+        effective = (engagement_notify.merge_ledgers(ledger, test_ledger)
+                     if staged else ledger)
+        due = engagement_notify.accounts_to_notify(board, effective, cutoff=cutoff)
         # CIRCUIT BREAKER (MAR2-31, after the 2026-07-09 139-due burst): an
         # abnormal due volume means something upstream shifted (bulk import,
         # identity churn, a sync bug) — sending ANY of it risks flooding real
@@ -1291,14 +1302,11 @@ def create_app() -> FastAPI:
                            "notify_sane_max.")
             return {"due": len(due), "posted": 0, "held": True, "sane_max": sane_max,
                     "stage": "held", "dry_run": False, "detail": []}
-        # STAGING GATE (Sunny, 2026-07-07): while the `notify_stage` setting is
-        # "test", every send goes to the PRIVATE test channel with a [TEST]
-        # prefix and the ledger is NOT marked — the same accounts stay due, so
-        # after human verification an explicit `stage=live` call pushes the
-        # exact same cards to the real channel. Automatic triggers never reach
-        # the main channel while staged. Param overrides the setting.
-        staged = ((stage or repo.get_setting("notify_stage") or "live")
-                  .strip().lower() == "test")
+        # STAGING GATE (Sunny, 2026-07-07): while staged, every send goes to the
+        # PRIVATE test channel with a [TEST] prefix. The REAL ledger is not
+        # marked (accounts stay due for the explicit stage=live push), but the
+        # TEST ledger is (2026-07-10) so the test channel sees each account ONCE
+        # per state, not on every auto-trigger. `staged` was resolved above.
         live = (not staged) and _live_routing_state(repo)["enabled"]
         ids_override = None if live else {}   # None = env ids (ping); {} = plain @Name (test)
         app_base = os.getenv("ENGAGEMENT_APP_URL")   # deep-link back to the ABM console
@@ -1324,7 +1332,12 @@ def create_app() -> FastAPI:
                                                         test=staged)
                 entry["posted"] = bool(ok)
                 if ok:
-                    if not staged:
+                    if staged:
+                        # TEST memory only — real ledger untouched, so the live
+                        # push still sees this account as due after verification.
+                        engagement_notify.record_notified(test_ledger, a, tier,
+                                                          d.get("touch"))
+                    else:
                         # Record BOTH tier and the touch we just notified on, so the
                         # same activity can't re-fire but a genuinely newer touch can.
                         # Company-keyed + merge-strongest (MAR2-31): survives
@@ -1333,8 +1346,11 @@ def create_app() -> FastAPI:
                         engagement_notify.record_notified(ledger, a, tier, d.get("touch"))
                     posted += 1
             fired.append(entry)
-        if not dry_run and not staged:
-            repo.set_setting("notified_tiers", json.dumps(ledger))
+        if not dry_run and posted:
+            if staged:
+                repo.set_setting("notified_tiers_test", json.dumps(test_ledger))
+            else:
+                repo.set_setting("notified_tiers", json.dumps(ledger))
         return {"due": len(due), "posted": posted, "live": live,
                 "stage": "test" if staged else "live",
                 "dry_run": dry_run, "detail": fired[:60]}

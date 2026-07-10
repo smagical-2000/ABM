@@ -294,3 +294,61 @@ def test_record_notified_never_downgrades():
                                  "account_id": "csv_new_ortho_partners"},
                            "Hot", "2026-07-10T00:00:00+00:00")
     assert led[key]["touch"] == "2026-07-10T00:00:00+00:00"
+
+
+def test_due_queue_orders_newest_touch_first():
+    """2026-07-10 flood: the due queue was board/score order, so the one
+    genuinely-new account ranked #118 of 154 and the send cap delivered 20
+    stale artifacts instead. Newest engagement must always be card #1."""
+    board = [
+        _acct("csv_old_backlog", "Old Backlog Co", tier="Hot",
+              touch="2026-06-26T00:00:00+00:00"),
+        _acct("csv_fresh_today", "Fresh Today Co", tier="Some",
+              touch="2026-07-10T13:00:00+00:00"),
+        _acct("csv_mid_week", "Mid Week Co", tier="Warm",
+              touch="2026-07-08T09:00:00+00:00"),
+    ]
+    due = notify.accounts_to_notify(board, {}, cutoff="2026-06-25")
+    assert [d["account"]["name"] for d in due] == [
+        "Fresh Today Co", "Mid Week Co", "Old Backlog Co"]
+
+
+def test_merge_ledgers_strongest_and_legacy_strings():
+    """merge_ledgers keeps the strongest state per key and survives legacy
+    bare-string values on either side (QA verify pass, 2026-07-10)."""
+    base = {"a": "Warm", "b": {"tier": "Hot", "touch": "2026-07-01T00:00:00+00:00"}}
+    over = {"a": {"tier": "Hot", "touch": None}, "b": "Some",
+            "c": {"tier": "Some", "touch": "2026-07-10T00:00:00+00:00"}}
+    m = notify.merge_ledgers(base, over)
+    assert notify._ledger_entry(m["a"])[0] == "Hot"     # overlay wins on tier
+    assert notify._ledger_entry(m["b"])[0] == "Hot"     # base keeps stronger
+    assert notify._ledger_entry(m["c"])[0] == "Some"    # new key adopted
+
+
+def test_state_advance_reposts_even_after_test_memory():
+    """The other half of 'ONCE per state': after a test send is recorded, a
+    genuine tier RISE (or hot + strictly newer touch) must fire again."""
+    test_led = {"freshco": {"tier": "Some", "touch": "2026-07-10T13:00:00+00:00"}}
+    # same state -> silent
+    board = [_acct("csv_freshco", "Fresh Co", tier="Some",
+                   touch="2026-07-10T13:00:00+00:00")]
+    assert notify.accounts_to_notify(board, test_led, cutoff="2026-06-25") == []
+    # tier rise -> fires again
+    board[0]["tier"] = "Warm"
+    due = notify.accounts_to_notify(board, test_led, cutoff="2026-06-25")
+    assert len(due) == 1 and due[0]["reason"] == "rose"
+    # hot + strictly newer touch -> fires again
+    test_led["freshco"] = {"tier": "Hot", "touch": "2026-07-10T13:00:00+00:00"}
+    board[0]["tier"] = "Hot"
+    board[0]["last_touch"] = "2026-07-10T15:00:00+00:00"
+    due = notify.accounts_to_notify(board, test_led, cutoff="2026-06-25")
+    assert len(due) == 1 and due[0]["reason"] == "hot_activity"
+
+
+def test_due_sort_survives_none_and_naive_touches():
+    board = [
+        _acct("csv_naive", "Naive Co", tier="Warm", touch="2026-07-09T09:00:00"),
+        _acct("csv_fresh", "Fresh Co", tier="Some", touch="2026-07-10T13:00:00+00:00"),
+    ]
+    due = notify.accounts_to_notify(board, {}, cutoff="2026-06-25")
+    assert [d["account"]["name"] for d in due] == ["Fresh Co", "Naive Co"]

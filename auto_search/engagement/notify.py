@@ -456,6 +456,30 @@ def _ledger_lookup(notified: dict, account: dict) -> tuple[str, str | None]:
     return best_tier, best_touch
 
 
+def merge_ledgers(base: dict, overlay: dict) -> dict:
+    """Union of two notify ledgers, keeping the STRONGEST state per key (highest
+    tier, then newest touch). Used to overlay the TEST-stage ledger on the real
+    one so test-channel sends have memory (2026-07-10 flood: test sends never
+    marked anything, so every auto-trigger re-posted the same cards) while the
+    real ledger — and therefore the explicit live push — stays untouched."""
+    out = dict(base)
+    for k, v in overlay.items():
+        cur = out.get(k)
+        if cur is None:
+            out[k] = v
+            continue
+        ct, ctouch = _ledger_entry(cur)
+        nt, ntouch = _ledger_entry(v)
+        cr, nr = _TIER_RANK.get(ct.lower(), 0), _TIER_RANK.get(nt.lower(), 0)
+        if nr > cr:
+            out[k] = v
+        elif nr == cr:
+            cd, nd = _touch_dt(ctouch), _touch_dt(ntouch)
+            if cd is None or (nd is not None and nd > cd):
+                out[k] = v
+    return out
+
+
 def ledger_key(account: dict) -> str:
     """The key NEW ledger entries are written under: the company key, falling
     back to the account_id when the account has no usable name. An id-as-name
@@ -477,8 +501,12 @@ def _touch_dt(ts):
     if not ts:
         return None
     try:
-        from datetime import datetime
-        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        from datetime import UTC, datetime
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        # offset-naive strings (no writer emits them today, but a future source
+        # might) would make aware-vs-naive comparisons crash the due sort — pin
+        # them to UTC exactly like engagement_repository._parse_iso does.
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
     except (ValueError, TypeError):
         return None
 
@@ -540,6 +568,14 @@ def accounts_to_notify(accounts: list[dict], notified: dict,
             out.append({"account": a, "tier": tier, "role": role, "prev": prev_tier,
                         "reason": "rose" if rose else "hot_activity",
                         "touch": touch})
+    # Newest engagement FIRST (2026-07-10 incident: the queue was board/score
+    # order, so the one genuinely-new account ranked #118 of 154 and the send
+    # cap delivered 20 stale artifacts instead). A fresh touch is exactly what
+    # a handoff is for — it must never lose its slot to backlog.
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+    _epoch = _dt.min.replace(tzinfo=_UTC)
+    out.sort(key=lambda d: _touch_dt(d.get("touch")) or _epoch, reverse=True)
     return out
 
 

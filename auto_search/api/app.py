@@ -1097,6 +1097,31 @@ def create_app() -> FastAPI:
             "reply_rate": round(100 * replied / delivered) if delivered else None,
         }
 
+    # NOTE: registered BEFORE the /{account_id} catch-all below — FastAPI
+    # matches in registration order, so a single-segment literal path placed
+    # after it would be swallowed as account_id="audit" (found the hard way:
+    # the first deploy 404'd this route).
+    @app.get("/api/engagement/audit")
+    def engagement_audit_report():
+        """Trust monitor (MAR2-32): recompute ground truth from raw events and
+        check the four invariants (twins, points drift, tile recompute,
+        tile/company divergence). Read-only; notify holds whenever this is red."""
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=503, detail="engagement store not available")
+        return engagement_audit.run_invariants(
+            repo, getattr(app.state, "scoring_repo", None), app.state.repo,
+            rows=_engaged_view())
+
+    @app.post("/api/engagement/heal")
+    def engagement_heal_now():
+        """Manually run the identity self-heal — the same routine that follows
+        every ingest and import (MAR2-32). Returns what moved."""
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=503, detail="engagement store not available")
+        return _heal_identities()
+
     @app.get("/api/engagement/{account_id}")
     def get_engagement_account(account_id: str):
         repo = getattr(app.state, "engagement_repo", None)
@@ -1428,27 +1453,6 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=422, detail="stage must be 'test' or 'live'")
         repo.set_setting("notify_stage", val)
         return {"stage": val}
-
-    @app.get("/api/engagement/audit")
-    def engagement_audit_report():
-        """Trust monitor (MAR2-32): recompute ground truth from raw events and
-        check the four invariants (twins, points drift, tile recompute,
-        tile/company divergence). Read-only; notify holds whenever this is red."""
-        repo = getattr(app.state, "engagement_repo", None)
-        if not repo:
-            raise HTTPException(status_code=503, detail="engagement store not available")
-        return engagement_audit.run_invariants(
-            repo, getattr(app.state, "scoring_repo", None), app.state.repo,
-            rows=_engaged_view())
-
-    @app.post("/api/engagement/heal")
-    def engagement_heal_now():
-        """Manually run the identity self-heal — the same routine that follows
-        every ingest and import (MAR2-32). Returns what moved."""
-        repo = getattr(app.state, "engagement_repo", None)
-        if not repo:
-            raise HTTPException(status_code=503, detail="engagement store not available")
-        return _heal_identities()
 
     @app.get("/api/ops/changelog")
     def ops_changelog_list(limit: int = 100):

@@ -153,3 +153,43 @@ def test_endpoint_applies_activation_cutoff(client, monkeypatch):
     app.state.engagement_repo.set_setting("activation_cutoff", "2026-07-01")
     out2 = client.post("/api/engagement/notify-changes?dry_run=true").json()
     assert out2["due"] == 1
+
+
+def test_audit_endpoint_routes_and_reports(client):
+    """MAR2-32 trust monitor over HTTP. Pins the ROUTE, not just the function —
+    the first deploy registered /api/engagement/audit after the /{account_id}
+    catch-all and FastAPI swallowed 'audit' as an account id (404)."""
+    _seed_due_account(client.app)
+    rep = client.get("/api/engagement/audit")
+    assert rep.status_code == 200
+    body = rep.json()
+    assert body["ok"] is True and body["violations"] == []
+    assert body["stats"]["tiles"] == 1
+
+    # heal endpoint routes too, and is a no-op on a clean store
+    healed = client.post("/api/engagement/heal")
+    assert healed.status_code == 200
+    assert healed.json().get("merged") == {}
+
+
+def test_interlock_holds_send_when_audit_red(client, monkeypatch):
+    """A board that fails its own audit must HOLD sends (fail-safe) while a
+    dry_run still passes through for inspection."""
+    import auto_search.engagement.notify as notify_mod
+    app = client.app
+    _seed_due_account(app)
+    # poison one event's points so I2 trips (stored 3 != canonical click 1)
+    app.state.engagement_repo.add_event({
+        "source": "replyio", "external_id": "e:click:c1", "channel": "email",
+        "kind": "click", "points": 3, "contact_ext": "c1", "company": "Due Co",
+        "account_id": "abm_dueco", "occurred_at": "2026-07-07T11:00:00+00:00"})
+    calls = []
+    monkeypatch.setattr(notify_mod, "activate_account",
+                        lambda a, e, **kw: calls.append(1) or True)
+    out = client.post("/api/engagement/notify-changes?stage=live").json()
+    assert out.get("held") is True and out.get("stage") == "audit"
+    assert out["posted"] == 0 and calls == []
+    assert any(v["code"] == "I2-points" for v in out["violations"])
+    # dry run is the inspection path: passes through, still posts nothing
+    dry = client.post("/api/engagement/notify-changes?dry_run=true").json()
+    assert dry.get("stage") != "audit" and calls == []

@@ -305,6 +305,33 @@
    "root_cause": "Points are stamped at ingest; the 2026-06 matrix correction migrated forward behavior but left two historical rows.",
    "guard": "tests/test_engagement_audit.py (I2 stored-points-vs-matrix drift) runs inside the notify interlock; prod rows corrected 2026-07-13",
    "lesson": "When a derived value is denormalized at write time, every change to the derivation needs a data migration plus a standing drift check."
+  },
+  {
+   "id": "stale-cron-container-bypasses-self-heal",
+   "date": "2026-07-14",
+   "area": "multi-service deploys x engagement identity (discovery-cron + engagement-preview, shared Postgres)",
+   "symptom": "The 14:30 daily sync re-minted 15 identity twins one day after the retro cleanup: it ran on the discovery-cron container deployed 7/10 - five days before the self-heal existed. Audit went red (I1), interlock held all sends; nothing healed until a manual endpoint heal.",
+   "root_cause": "Two services write the same Postgres; guards shipped to one. Env/code changes only apply per-service on redeploy, so a stale writer silently bypasses every new safeguard.",
+   "guard": "audit I5-stale-heal (tests/test_engagement_audit.py::test_ingest_without_heal_trips_I5) - ANY ingest without a follow-up heal marker turns the board red; both services now deploy from the same commit",
+   "lesson": "A safeguard on a shared store must either live IN the store's write path or be watchdogged by an invariant that any writer trips - never assume all writers run your newest code."
+  },
+  {
+   "id": "abm-domain-match-reminted-scored-twin",
+   "date": "2026-07-14",
+   "area": "auto_search/engagement/cross.py (CrossIndex)",
+   "symptom": "Leads with company 'Summa Health' + @summahealth.org emails crossed to abm_summahealthsystem even though csv_summa_health_system is scored: the scored row stores no domain, so the ABM target's domain won the match and re-minted the twin on every re-sync.",
+   "root_cause": "Scored-first matching only compared like-for-like (scored domain vs abm domain, scored key vs abm key); an abm hit whose company IS scored under a different key/domain had no bridge to the scored sibling.",
+   "guard": "tests/test_cross_sibling.py (alias + domain sibling rebind; abm-only unchanged); live-verified: match('Summa Health', @summahealth.org) -> csv_summa_health_system",
+   "lesson": "When two indexes describe one entity space, every hit on the weaker index must check for a sibling in the authoritative one before minting an id."
+  },
+  {
+   "id": "replyio-sync-failed-with-empty-error",
+   "date": "2026-07-14",
+   "area": "auto_search/engagement/sync.py + replyio_client.py",
+   "symptom": "Reply.io sync stuck status=failed with error='' since ~06-26 window; email signals ~3 weeks stale and nobody knew why - str(ReadTimeout) is empty.",
+   "root_cause": "error=str(exc) loses exception identity for timeout classes; 60s client timeout too small for 9k-contact roster pagination.",
+   "guard": "error falls back to type(exc).__name__ (sync.py, all three sources); client timeout 180s",
+   "lesson": "Never persist str(exc) alone - always include the exception type."
   }
  ]
 }

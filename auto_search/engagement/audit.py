@@ -83,6 +83,14 @@ def run_invariants(engagement_repo, scoring_repo, discovery_repo, *,
             violations.append({"code": "I3-recompute",
                                "detail": f"{len(bad)} tiles diverge from event "
                                          f"recompute, e.g. {bad[:3]}"})
+        # Ghosts: an account with scored events that the served board DROPPED
+        # is invisible everywhere downstream — the purest false negative.
+        ghosts = [aid for aid, got in calc.items()
+                  if got["score"] > 0 and aid not in {r.get("account_id") for r in board}]
+        if ghosts:
+            violations.append({"code": "I3-ghost",
+                               "detail": f"{len(ghosts)} accounts have scored events "
+                                         f"but no tile: {ghosts[:5]}"})
 
     # I4 — the exact MAR2-32 failure shape: a company whose MERGED heat is due
     # while no single tile fires. Post-heal every group is a singleton, so this

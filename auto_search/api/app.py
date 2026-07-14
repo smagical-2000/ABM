@@ -1361,24 +1361,50 @@ def create_app() -> FastAPI:
         # for a reviewed, genuinely-large batch. Dry runs are never held (they
         # ARE the way a human looks). The ceiling is a repo setting so it can
         # be tuned without a deploy.
+        raw_setting = repo.get_setting("notify_sane_max")
+        raw_env = os.getenv("ENGAGEMENT_NOTIFY_SANE_MAX")
+        ceiling_src = ("setting" if raw_setting else
+                       "env" if raw_env else "default")
         try:
-            sane_max = int(repo.get_setting("notify_sane_max")
-                           or os.getenv("ENGAGEMENT_NOTIFY_SANE_MAX", "25"))
+            sane_max = int(raw_setting or raw_env or "25")
         except ValueError:
-            sane_max = 25
+            sane_max, ceiling_src = 25, "default (unparseable override ignored)"
         if not dry_run and len(due) > sane_max and not allow_burst:
+            # Say exactly WHAT is held and WHY the ceiling is what it is — the
+            # 2026-07-14 01:14 alert ("1 accounts due (sane max 0)") was a stale
+            # emergency env ceiling on a long-lived container, and the generic
+            # "abnormal volume" copy sent the on-call chasing a bulk-import
+            # ghost. Small holds name names; ceiling<=0 declares itself.
+            names = ", ".join(str(d["account"].get("name") or d["account"].get("account_id"))
+                              for d in due[:5])
+            if sane_max <= 0:
+                title = f"Notify HELD: hold-all engaged (ceiling 0, {len(due)} due)"
+                why = (f"The ceiling is 0 from {ceiling_src} — every send is "
+                       "deliberately held (emergency stop). Clear the "
+                       "notify_sane_max setting / ENGAGEMENT_NOTIFY_SANE_MAX env "
+                       "(then redeploy if env) to restore the default of 25. ")
+            elif len(due) <= 5:
+                title = f"Notify HELD: {len(due)} due > ceiling {sane_max}"
+                why = ("Small batch held only because the ceiling is unusually "
+                       f"low (source: {ceiling_src}). ")
+            else:
+                title = f"Notify HELD: {len(due)} accounts due (ceiling {sane_max})"
+                why = ("Abnormal activation volume — usually identity churn "
+                       "after a bulk import, not real engagement. ")
+            logger.warning("notify breaker HELD: due=%d ceiling=%d (%s) held=[%s]",
+                           len(due), sane_max, ceiling_src, names)
             from auto_search.ops import alerts as ops_alerts
             if ops_alerts.should_alert(repo, "notify-burst", min_gap_hours=6):
                 ops_alerts.post_ops_alert(
                     kind="notify-burst", severity="failure", service="engagement-preview",
-                    title=f"Notify HELD: {len(due)} accounts due (sane max {sane_max})",
-                    detail="Abnormal activation volume — ZERO cards were sent. Usually "
-                           "identity churn after a bulk import, not real engagement. "
-                           "Inspect with notify-changes?dry_run=true; override with "
-                           "allow_burst=true only after review. Ceiling: repo setting "
-                           "notify_sane_max.")
+                    title=title,
+                    detail=f"{why}ZERO cards were sent. Held: {names}"
+                           f"{'…' if len(due) > 5 else ''}. Inspect with "
+                           "notify-changes?dry_run=true; override with "
+                           "allow_burst=true only after review.")
             return {"due": len(due), "posted": 0, "held": True, "sane_max": sane_max,
-                    "stage": "held", "dry_run": False, "detail": []}
+                    "ceiling_source": ceiling_src, "stage": "held",
+                    "dry_run": False, "detail": []}
         # STAGING GATE (Sunny, 2026-07-07): while staged, every send goes to the
         # PRIVATE test channel with a [TEST] prefix. The REAL ledger is not
         # marked (accounts stay due for the explicit stage=live push), but the

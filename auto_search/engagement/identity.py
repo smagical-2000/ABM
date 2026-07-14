@@ -116,4 +116,19 @@ def heal_identity_splits(engagement_repo, scoring_repo, discovery_repo, *,
                 for k in moved:
                     moved[k] += got.get(k, 0)
                 logger.info("identity heal: %s -> %s (%s)", old, canon[0], got)
+    # Observability marker (MAR2-32 v2): every REAL heal stamps when it ran and
+    # what it did. The audit's I5 compares this against the newest ingest — a
+    # writer that lands rows with no follow-up heal (the 2026-07-14 stale
+    # discovery-cron container) turns the board red instead of silently
+    # splitting identities. A crashed heal writes no marker; I5 catches that
+    # too. Best-effort: the marker must never fail a heal.
+    if not dry_run and hasattr(engagement_repo, "set_setting"):
+        try:
+            import json
+            from datetime import UTC, datetime
+            engagement_repo.set_setting("identity_heal_last", json.dumps(
+                {"at": datetime.now(UTC).isoformat(),
+                 "merged": len(merged), "manual": len(manual)}))
+        except Exception:  # noqa: BLE001
+            logger.exception("identity heal marker write failed")
     return {"merged": merged, "manual": manual, **moved, "dry_run": dry_run}

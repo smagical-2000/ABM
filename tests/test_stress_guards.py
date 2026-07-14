@@ -51,7 +51,8 @@ def client(tmp_path, monkeypatch):
 
 
 def _seed_hot(repo, aid="abm_dueco", company="Due Co", when="2026-07-07T10:00:00+00:00"):
-    """Matrix-true Hot (26 = 10 + 10 + 6)."""
+    """Matrix-true Hot (26 = 10 + 10 + 6). Stamps the heal marker afterwards —
+    the ingest pipeline always heals after persisting (I5)."""
     for ext, kind, pts in ((f"m:{aid}", "meeting_booked", 10),
                            (f"b:{aid}", "high_intent_lead", 10),
                            (f"r:{aid}", "reply", 6)):
@@ -59,6 +60,14 @@ def _seed_hot(repo, aid="abm_dueco", company="Due Co", when="2026-07-07T10:00:00
                         "kind": kind, "points": pts, "contact_ext": f"c:{aid}",
                         "company": company, "account_id": aid,
                         "occurred_at": when, "raw": {}})
+    _mark_healed(repo)
+
+
+def _mark_healed(repo):
+    import json
+    from datetime import UTC, datetime
+    repo.set_setting("identity_heal_last", json.dumps(
+        {"at": datetime.now(UTC).isoformat(), "merged": 0, "manual": 0}))
 
 
 def _capture_alerts(monkeypatch):
@@ -238,6 +247,7 @@ def test_deprecated_kind_with_wrong_points_is_ignored(tmp_path):
                     "contact_ext": "c", "company": "Acme Health",
                     "account_id": "csv_acme_health",
                     "occurred_at": "2026-05-01T00:00:00+00:00", "raw": {}})
+    _mark_healed(repo)
     rep = audit.run_invariants(
         repo, _Scoring([{"account_id": "csv_acme_health", "name": "Acme Health"}]),
         _Discovery([]))
@@ -254,6 +264,7 @@ def test_zero_point_open_never_moves_recompute_touch(tmp_path):
                     "kind": "open", "points": 0, "contact_ext": "c",
                     "company": "Acme Health", "account_id": "csv_acme_health",
                     "occurred_at": "2026-07-09T00:00:00+00:00", "raw": {}})
+    _mark_healed(repo)
     rep = audit.run_invariants(
         repo, _Scoring([{"account_id": "csv_acme_health", "name": "Acme Health"}]),
         _Discovery([]))
@@ -281,6 +292,7 @@ def test_audit_scales_to_thousands_of_events(tmp_path):
                         "account_id": f"csv_co_{i % 40}",
                         "occurred_at": "2026-07-01T00:00:00+00:00", "raw": {}})
     import time
+    _mark_healed(repo)
     t0 = time.monotonic()
     rep = audit.run_invariants(
         repo, _Scoring([{"account_id": f"csv_co_{i}", "name": f"Co {i}"}

@@ -51,6 +51,12 @@ def _seed_due_account(app):
                         "contact_ext": "c1", "company": "Due Co",
                         "account_id": "abm_dueco",
                         "occurred_at": "2026-07-07T10:00:00+00:00"})
+    # ingest pipeline always heals after persisting (I5, MAR2-32 v2)
+    import json as _json
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+    repo.set_setting("identity_heal_last", _json.dumps(
+        {"at": _dt.now(_UTC).isoformat(), "merged": 0, "manual": 0}))
 
 
 def test_staged_send_posts_test_only_and_keeps_account_due(client, monkeypatch):

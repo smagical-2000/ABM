@@ -46,7 +46,7 @@ class ReplyioClient:
     """
 
     def __init__(self, *, api_key: str | None = None,
-                 http: httpx.AsyncClient | None = None, timeout: float = 60.0) -> None:
+                 http: httpx.AsyncClient | None = None, timeout: float = 180.0) -> None:
         self._key = api_key or os.getenv("REPLYIO_API_KEY")
         if not self._key:
             raise RuntimeError("REPLYIO_API_KEY not set in .env")

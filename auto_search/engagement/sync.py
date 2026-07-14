@@ -124,7 +124,7 @@ async def run_sync(*, engagement_repo, scoring_repo, discovery_repo,
         return stats
     except Exception as exc:  # noqa: BLE001 — record failure; never crash the caller loop
         logger.exception("engagement sync failed")
-        engagement_repo.set_sync_state(SOURCE, status="failed", error=str(exc)[:300])
+        engagement_repo.set_sync_state(SOURCE, status="failed", error=(str(exc) or type(exc).__name__)[:300])
         raise
 
 
@@ -159,7 +159,7 @@ def run_podcast_sync(*, engagement_repo, scoring_repo, discovery_repo,
         return stats
     except Exception as exc:  # noqa: BLE001 — record failure; never crash the caller loop
         logger.exception("podcast sync failed")
-        engagement_repo.set_sync_state(PODCAST_SOURCE, status="failed", error=str(exc)[:300])
+        engagement_repo.set_sync_state(PODCAST_SOURCE, status="failed", error=(str(exc) or type(exc).__name__)[:300])
         raise
 
 
@@ -251,5 +251,5 @@ def run_sfdc_sync(*, engagement_repo, scoring_repo, discovery_repo, client=None,
         return stats
     except Exception as exc:  # noqa: BLE001 — record failure; never crash the caller loop
         logger.exception("sfdc sync failed")
-        engagement_repo.set_sync_state(SFDC_SOURCE, status="failed", error=str(exc)[:300])
+        engagement_repo.set_sync_state(SFDC_SOURCE, status="failed", error=(str(exc) or type(exc).__name__)[:300])
         raise

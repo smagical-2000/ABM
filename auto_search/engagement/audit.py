@@ -63,6 +63,26 @@ def run_invariants(engagement_repo, scoring_repo, discovery_repo, *,
         violations.append({"code": "I2-points",
                            "detail": f"stored points != canonical matrix: {drift}"})
 
+    # I5 — every ingest must be followed by the identity self-heal. On
+    # 2026-07-14 a stale discovery-cron container (built before the heal
+    # existed) wrote rows straight to the shared Postgres and re-minted 15
+    # twins; nothing in ITS process could heal them. This tripwire catches any
+    # writer that bypasses the heal — old containers, manual SQL, new services
+    # — forever. 5-minute tolerance covers same-run ordering.
+    newest_ingest = _dt_or_none(max(
+        (_ts(e.get("ingested_at")) for e in events), default=""))
+    marker = {}
+    if hasattr(engagement_repo, "get_setting"):
+        marker = json.loads(engagement_repo.get_setting("identity_heal_last") or "{}")
+    heal_at = _dt_or_none(str(marker.get("at") or ""))
+    if newest_ingest and (heal_at is None
+                          or (newest_ingest - heal_at).total_seconds() > 300):
+        violations.append({"code": "I5-stale-heal",
+                           "detail": f"newest ingest {newest_ingest} has no follow-up "
+                                     f"self-heal (last heal: {heal_at or 'never'}) — a "
+                                     "writer without the heal (stale container?) touched "
+                                     "the store"})
+
     board = rows
     if board is None:
         # Bare engaged_accounts rows carry no display name; enrich exactly like
@@ -134,3 +154,17 @@ def _ts(v) -> str:
     space separator, with/without fractional seconds all reduce to
     'YYYY-MM-DD HH:MM:SS'."""
     return str(v or "").replace("T", " ")[:19]
+
+
+def _dt_or_none(v):
+    """Parse an ISO-ish timestamp (str or stringified datetime) to an aware
+    datetime for arithmetic; None when blank or unparseable."""
+    from datetime import UTC, datetime
+    s = str(v or "").strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace(" ", "T"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+    except ValueError:
+        return None

@@ -39,14 +39,48 @@ def _ev(repo, aid, ext, kind, pts, when="2026-07-01T00:00:00+00:00",
                     "campaign": None, "occurred_at": when, "raw": {}})
 
 
+def _healed(repo):
+    """Stamp the heal marker as the ingest pipeline does — I5 requires every
+    ingest to be followed by a self-heal."""
+    import json
+    from datetime import UTC, datetime
+    repo.set_setting("identity_heal_last", json.dumps(
+        {"at": datetime.now(UTC).isoformat(), "merged": 0, "manual": 0}))
+
+
 def test_clean_store_passes(repo):
     scoring_repo = _Scoring([{"account_id": "csv_acme_health", "name": "Acme Health",
                               "domain": "acme.com"}])
     _ev(repo, "csv_acme_health", "crm:meeting:1", "meeting_booked", 10,
         company="Acme Health")
+    _healed(repo)
     rep = audit.run_invariants(repo, scoring_repo, _Discovery([]))
     assert rep["ok"] and rep["violations"] == []
     assert rep["stats"]["tiles"] == 1
+
+
+def test_ingest_without_heal_trips_I5(repo):
+    """The 2026-07-14 incident: a stale discovery-cron container (built before
+    the heal existed) wrote rows to the shared store — no marker follows the
+    ingest, so the board must go red instead of silently splitting."""
+    scoring_repo = _Scoring([{"account_id": "csv_acme_health", "name": "Acme Health"}])
+    _ev(repo, "csv_acme_health", "crm:meeting:1", "meeting_booked", 10,
+        company="Acme Health")
+    rep = audit.run_invariants(repo, scoring_repo, _Discovery([]))
+    assert not rep["ok"]
+    assert any(v["code"] == "I5-stale-heal" for v in rep["violations"])
+
+
+def test_real_heal_writes_marker_and_clears_I5(repo):
+    """End-to-end: ingest (red) → heal (marker) → green."""
+    from auto_search.engagement import identity
+    scoring_repo = _Scoring([{"account_id": "csv_acme_health", "name": "Acme Health"}])
+    _ev(repo, "csv_acme_health", "crm:meeting:1", "meeting_booked", 10,
+        company="Acme Health")
+    assert not audit.run_invariants(repo, scoring_repo, _Discovery([]))["ok"]
+    identity.heal_identity_splits(repo, scoring_repo, _Discovery([]))
+    rep = audit.run_invariants(repo, scoring_repo, _Discovery([]))
+    assert rep["ok"] is True
 
 
 def test_twin_split_trips_I1_and_I4(repo):
@@ -90,6 +124,7 @@ def test_domain_conflict_is_manual_review_not_violation(repo):
     discovery = _Discovery([{"name": "Healthfirst", "domain": "healthfirst.org"}])
     _ev(repo, "acc_healthfirst", "email:click:1", "click", 1, company="Healthfirst")
     _ev(repo, "abm_healthfirst", "email:click:2", "click", 1, company="Healthfirst")
+    _healed(repo)
     rep = audit.run_invariants(repo, scoring_repo, discovery)
     assert rep["ok"] is True
     assert len(rep["manual_review"]) == 1

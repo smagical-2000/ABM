@@ -195,6 +195,12 @@ def test_seed_baselines_to_now_then_nothing_fires(client):
     _ev("e:meet:c1", "meeting_booked", 10, "2026-07-04T10:00:00+00:00")
     _ev("e:bofu:c1", "high_intent_lead", 10, "2026-07-04T10:00:00+00:00")
     _ev("e:reply:c1", "reply", 6, "2026-07-04T10:00:00+00:00")
+    # ingest pipeline always heals after persisting (I5, MAR2-32 v2)
+    import json as _json
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+    repo.set_setting("identity_heal_last", _json.dumps(
+        {"at": _dt.now(_UTC).isoformat(), "merged": 0, "manual": 0}))
 
     seeded = c.post("/api/engagement/notify-changes", params={"seed": "true"}).json()
     assert seeded["seeded"] == 1 and seeded["format"] == "company-key tier+touch"

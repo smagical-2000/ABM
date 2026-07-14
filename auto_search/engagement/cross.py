@@ -49,6 +49,13 @@ class CrossIndex:
 
         self._a_domain: dict[str, dict] = {}
         self._a_key: dict[str, dict] = {}
+        # ABM target -> its SCORED sibling (same primary key or domain). When a
+        # contact matches an abm target only via an alias/variant name (e.g.
+        # company "Summa Health" vs scored name "Summa Health System"), crossing
+        # must resolve to the SCORED id — the merged-row rule. Without this, every
+        # daily re-sync re-minted an abm_ twin for an already-scored company and
+        # split its heat across two board tiles (MAR2-32, re-found 2026-07-14).
+        self._abm_sibling: dict[str, dict] = {}
         for t in abm_targets:
             name = t.get("name") or ""
             primary = normalize_company_name(name)
@@ -62,6 +69,9 @@ class CrossIndex:
             for key in (t.get("keys") or [primary]):
                 if _usable_name_key(key):
                     self._a_key.setdefault(key, rec)
+            sib = self._s_key.get(primary) or (self._s_domain.get(dom) if dom else None)
+            if sib:
+                self._abm_sibling[rec["account_id"]] = sib
 
     @property
     def size(self) -> tuple[int, int]:
@@ -77,6 +87,13 @@ class CrossIndex:
             lists = ("scored", "abm") if abm else ("scored",)
             return AccountMatch(scored["account_id"], scored["name"], s_tier, lists)
         if abm:
+            # Alias/variant hit on an abm target whose company IS scored: return
+            # the scored sibling (merged-row rule) so re-syncs can never re-mint
+            # an abm_ twin for a scored company.
+            sib = self._abm_sibling.get(abm["account_id"])
+            if sib:
+                return AccountMatch(sib["account_id"], sib["name"], a_tier,
+                                    ("scored", "abm"))
             return AccountMatch(abm["account_id"], abm["name"], a_tier, ("abm",))
         return None
 

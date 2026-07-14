@@ -419,7 +419,7 @@ def test_social_listening_panel_opens(page):
 def test_every_tab_mounts_without_console_errors(page):
     """Each nav tab renders cleanly — catches a white-screen on any tab, including
     the new Watch list (a fresh babel-compiled file)."""
-    for tab in ("Discovery", "Scored", "News", "Watch list", "Engagement", "Campaigns"):
+    for tab in ("Discovery", "Scored", "News", "Watch list", "Engagement", "Campaigns", "Outreach"):
         page.click(f"text={tab}")
         page.wait_for_timeout(700)
         real = [e for e in page.console_errors
@@ -605,3 +605,77 @@ def test_import_wizard_generic_list_shows_breakdown_and_leftouts(page):
     page.wait_for_selector("text=2 imported with a flag")
     assert page.get_by_text("Waud Capital Partners", exact=False).count() > 0
     assert not page.console_errors, page.console_errors
+
+
+# ── Outreach dashboard (SmartLead + HeyReach stats) ───────────────────────────
+
+
+def test_outreach_tab_renders_both_channel_cards(page):
+    """The Outreach tab (fresh babel-compiled outreach.jsx) renders headline
+    tiles, per-campaign rows, and the trend chart from a stubbed stats payload —
+    rates arrive server-computed and bind straight into the tiles. Endpoint is
+    MOCKED (no SmartLead/HeyReach network in tests); the aggregator's math is
+    covered in tests/test_outreach_stats.py."""
+    import json as _json
+    payload = {
+        "fetched_at": "2026-07-13T12:00:00+00:00", "cached": False,
+        "email": {
+            "configured": True,
+            "overall": {"leads": 500, "sent": 200, "opens": 120, "clicks": 30,
+                        "replies": 10, "bounces": 4, "unsubscribes": 2,
+                        "interested": 6, "open_rate": 60.0, "click_rate": 15.0,
+                        "reply_rate": 5.0, "bounce_rate": 2.0},
+            "campaigns": [
+                {"id": 1, "name": "Health Systems - Article Sequence",
+                 "status": "ACTIVE", "leads": 500, "sent": 200, "opens": 120,
+                 "clicks": 30, "replies": 10, "bounces": 4, "unsubscribes": 2,
+                 "interested": 6, "open_rate": 60.0, "click_rate": 15.0,
+                 "reply_rate": 5.0, "bounce_rate": 2.0}],
+            "campaigns_errored": 0},
+        "linkedin": {
+            "configured": True,
+            "overall": {"connections_sent": 100, "connections_accepted": 40,
+                        "accept_rate": 40.0, "messages_sent": 40,
+                        "message_replies": 10, "message_reply_rate": 25.0,
+                        "inmails_sent": 0, "inmail_replies": 0,
+                        "inmail_reply_rate": None, "profile_views": 7,
+                        "leads_contacted": 90, "interested": 3},
+            "trend": [{"date": "2026-07-12", "connectionsSent": 8},
+                      {"date": "2026-07-13", "connectionsSent": 12}],
+            "campaigns": [
+                {"id": 505509, "name": "Health Systems - LinkedIn",
+                 "status": "IN_PROGRESS", "connections_sent": 100,
+                 "connections_accepted": 40, "accept_rate": 40.0,
+                 "messages_sent": 40, "message_replies": 10,
+                 "message_reply_rate": 25.0, "inmails_sent": 0,
+                 "inmail_replies": 0, "inmail_reply_rate": None,
+                 "profile_views": 7, "leads_contacted": 90, "interested": 3}],
+            "campaigns_errored": 0},
+    }
+    page.route("**/api/outreach/stats*", lambda route: route.fulfill(
+        status=200, content_type="application/json", body=_json.dumps(payload)))
+    page.click("text=Outreach")
+    page.wait_for_selector("text=Outreach performance", timeout=10_000)
+    page.wait_for_selector("text=Email · SmartLead", timeout=10_000)
+    page.wait_for_selector("text=LinkedIn · HeyReach", timeout=10_000)
+    assert page.get_by_text("60.0%", exact=False).count() > 0    # email open rate tile
+    assert page.get_by_text("40.0%", exact=False).count() > 0    # accept rate tile
+    assert page.get_by_text("Health Systems - Article Sequence", exact=False).count() > 0
+    assert page.get_by_text("Connection requests per day", exact=False).count() > 0
+    real = [e for e in page.console_errors
+            if not any(x in e.lower() for x in ("favicon", "tailwind", "cdn", "font"))]
+    assert not real, f"console errors: {real[:5]}"
+
+
+def test_outreach_tab_unconfigured_channels_show_setup_notes(page):
+    """With neither executor configured the tab degrades to setup guidance —
+    never a white screen, never fake zeros."""
+    import json as _json
+    payload = {"fetched_at": "2026-07-13T12:00:00+00:00", "cached": False,
+               "email": {"configured": False}, "linkedin": {"configured": False}}
+    page.route("**/api/outreach/stats*", lambda route: route.fulfill(
+        status=200, content_type="application/json", body=_json.dumps(payload)))
+    page.click("text=Outreach")
+    page.wait_for_selector("text=SMARTLEAD_API_KEY", timeout=10_000)
+    page.wait_for_selector("text=HEYREACH_API_KEY", timeout=10_000)
+    assert page.get_by_text("Not connected", exact=False).count() >= 2

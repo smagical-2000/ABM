@@ -61,6 +61,7 @@ function NavSwitch({ view, onChange, scoredCount, pulse }) {
       {item('watch', 'Watch list')}
       {item('engagement', 'Engagement')}
       {item('campaigns', 'Campaigns')}
+      {item('outreach', 'Outreach')}
     </div>
   );
 }
@@ -459,7 +460,7 @@ function App() {
   const [view, setView] = useState(() => {
     try {
       const v = new URLSearchParams(window.location.search).get('view');
-      return ['discovery', 'scored', 'news', 'watch', 'engagement', 'campaigns'].includes(v) ? v : 'discovery';
+      return ['discovery', 'scored', 'news', 'watch', 'engagement', 'campaigns', 'outreach'].includes(v) ? v : 'discovery';
     } catch (_e) { return 'discovery'; }
   });
   const [toasts, setToasts] = useState([]);
@@ -1022,6 +1023,8 @@ function App() {
         <EngagementView pushToast={pushToast} />
       ) : view === 'campaigns' ? (
         <CampaignsView pushToast={pushToast} />
+      ) : view === 'outreach' ? (
+        <OutreachPage />
       ) : (
         <ScoredView refreshKey={scoredRefreshKey} pushToast={pushToast} onCount={setScoredCount} />
       )}

@@ -7,7 +7,7 @@ auth X-API-KEY (HEYREACH_API_KEY). Backs off on 429/5xx like the Reply.io client
 
 Surface (all verified against the live API + the official Postman collection):
   reads   check_key · list_campaigns (POST /campaign/GetAll) · list_senders
-          (POST /li_account/GetAll)
+          (POST /li_account/GetAll) · overall_stats (POST /stats/GetOverallStats)
   writes  add_leads_to_campaign (POST /campaign/AddLeadsToCampaignV2) ·
           stop_lead (POST /campaign/StopLeadInCampaign — the stop-rule lever) ·
           create_webhook (POST /webhooks/CreateWebhook)
@@ -70,6 +70,19 @@ class HeyReachClient:
                  "name": f"{a.get('firstName') or ''} {a.get('lastName') or ''}".strip(),
                  "active": a.get("isActive")}
                 for a in (data.get("items") or [])]
+
+    async def overall_stats(self, *, campaign_ids: list[int] | None = None,
+                            account_ids: list[int] | None = None,
+                            start: str | None = None, end: str | None = None) -> dict:
+        """Aggregate LinkedIn stats (POST /stats/GetOverallStats): connections
+        sent/accepted, messages sent/replied, InMail, interested tags, plus a
+        byDayStats trend map. Omit both dates for all-time (the API requires
+        the pair together). Verified shape 2026-07-13."""
+        body: dict = {"accountIds": account_ids or [],
+                      "campaignIds": campaign_ids or []}
+        if start and end:
+            body["startDate"], body["endDate"] = start, end
+        return await self._request("POST", "/stats/GetOverallStats", json=body)
 
     # ── writes ─────────────────────────────────────────────────────────
 

@@ -127,6 +127,10 @@ window.API = {
     method: 'POST', body: JSON.stringify(body),
   }),
 
+  // ── outreach dashboard (SmartLead email + HeyReach LinkedIn stats) ──────────
+  // Cached server-side ~10 min; pass refresh=true to force a live refetch.
+  outreachStats: (refresh = false) => http(`/api/outreach/stats${refresh ? '?refresh=1' : ''}`),
+
   // ── watch list: lone-standard-hire leads kept out of Discovery ──────────────
   parked: () => http('/api/discovery/parked'),                       // not yet qualified
   watchlistLeads: () => http('/api/panel?status=qualified&watchlist=only'),  // qualified, low intent

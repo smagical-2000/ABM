@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import re
+import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -45,6 +46,7 @@ from auto_search.abm import (
 from auto_search.api.auth import install_basic_auth
 from auto_search.campaigns import catalog as campaigns_catalog
 from auto_search.campaigns import enroll as campaigns_enroll
+from auto_search.campaigns import outreach_stats as campaigns_outreach
 from auto_search.campaigns import rules as campaigns_rules
 from auto_search.campaigns import runner as campaigns_runner
 from auto_search.campaigns import stoprules as campaigns_stoprules
@@ -1819,6 +1821,14 @@ def create_app() -> FastAPI:
         from auto_search.engagement.heyreach_client import HeyReachClient
         return HeyReachClient()
 
+    def _smartlead_or_none():
+        """A SmartleadClient when the key is configured, else None — the email
+        stats block just reports itself unconfigured (mirrors _heyreach_or_none)."""
+        if not os.getenv("SMARTLEAD_API_KEY"):
+            return None
+        from auto_search.engagement.smartlead_client import SmartleadClient
+        return SmartleadClient()
+
     async def _stop_sweep_after_sync() -> None:
         """Cross-channel stop rules after fresh replies land: reply anywhere ->
         pause the account's other channels. Best-effort; never fails a sync."""
@@ -2019,6 +2029,23 @@ def create_app() -> FastAPI:
         crepo.upsert_channel_sequence(key, channel, campaign_id=campaign_id,
                                       campaign_name=(body.get("campaign_name") or None))
         return {"ok": True, "channel_sequences": crepo.channel_sequences()}
+
+    @app.get("/api/outreach/stats")
+    async def outreach_stats(refresh: bool = False):
+        """The Outreach dashboard payload: SmartLead email performance (sent/
+        open/click/reply/bounce + interested) and HeyReach LinkedIn performance
+        (connects sent/accepted, message replies, trend), overall + per-campaign.
+        Cached in-process for 10 minutes; ?refresh=1 forces a live refetch.
+        Unconfigured/failed channels return their own state — never a 5xx that
+        blanks the tab."""
+        cache = getattr(app.state, "outreach_cache", None)
+        now = time.time()
+        if not refresh and cache and (now - cache["at"] < 600):
+            return {**cache["data"], "cached": True}
+        data = await campaigns_outreach.collect(
+            smartlead=_smartlead_or_none(), heyreach=_heyreach_or_none())
+        app.state.outreach_cache = {"at": now, "data": data}
+        return {**data, "cached": False}
 
     @app.post("/api/campaigns/webhooks/heyreach")
     async def campaigns_heyreach_webhook(request: Request, secret: str = ""):

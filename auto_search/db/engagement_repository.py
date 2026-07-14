@@ -66,6 +66,13 @@ class EngagementRepository(Protocol):
         idempotency (re-sync must not create duplicates)."""
         ...
 
+    def rekey_account(self, old_id: str, new_id: str) -> dict:
+        """Move every event/contact/activation from old_id to new_id (identity
+        self-heal, MAR2-32). If the new id already holds an activation, the old
+        one is dropped (earliest claim wins). Returns moved counts
+        {"events": n, "contacts": n, "activations": n}."""
+        ...
+
     def engaged_accounts(self) -> list[dict]:
         """The rollup: one row per matched account (score + counts + rates inputs),
         ranked by score then recency. Tier is applied by the caller (pure scorer)."""
@@ -341,6 +348,25 @@ class EngagementJsonRepository:
         self._flush()
         return is_new
 
+    def rekey_account(self, old_id, new_id) -> dict:
+        moved = {"events": 0, "contacts": 0, "activations": 0}
+        for e in self._store["events"].values():
+            if e.get("account_id") == old_id:
+                e["account_id"] = new_id
+                moved["events"] += 1
+        for c in self._store["contacts"].values():
+            if c.get("account_id") == old_id:
+                c["account_id"] = new_id
+                moved["contacts"] += 1
+        acts = self._store.setdefault("activations", {})
+        if old_id in acts:
+            acts.setdefault(new_id, acts[old_id])
+            del acts[old_id]
+            moved["activations"] = 1
+        if any(moved.values()):
+            self._flush()
+        return moved
+
     def engaged_accounts(self) -> list[dict]:
         ev: dict[str, dict] = {}
         scored_exts: dict[str, set] = {}   # account -> contact_exts with a scored event
@@ -611,6 +637,26 @@ class EngagementPostgresRepository:
                 {**r, "raw": Json(r["raw"])},
             ).fetchone()
         return bool(row["inserted"])
+
+    def rekey_account(self, old_id, new_id) -> dict:
+        # One connection context = one transaction: a crash mid-move can never
+        # leave a company half re-keyed.
+        with self._pool.connection() as conn:
+            ev = conn.execute(
+                "UPDATE engagement_events SET account_id = %s WHERE account_id = %s",
+                (new_id, old_id)).rowcount
+            ct = conn.execute(
+                "UPDATE engagement_contacts SET account_id = %s WHERE account_id = %s",
+                (new_id, old_id)).rowcount
+            conn.execute(
+                "INSERT INTO engagement_activations (account_id, activated_at) "
+                "SELECT %s, activated_at FROM engagement_activations "
+                "WHERE account_id = %s ON CONFLICT (account_id) DO NOTHING",
+                (new_id, old_id))
+            ac = conn.execute(
+                "DELETE FROM engagement_activations WHERE account_id = %s",
+                (old_id,)).rowcount
+        return {"events": ev, "contacts": ct, "activations": ac}
 
     def engaged_accounts(self) -> list[dict]:
         with self._pool.connection() as conn:

@@ -60,6 +60,8 @@ from auto_search.db.scoring_repository import (
     STALE_SCORING_SECONDS,
     get_scoring_repository,
 )
+from auto_search.engagement import audit as engagement_audit
+from auto_search.engagement import identity as engagement_identity
 from auto_search.engagement import notify as engagement_notify
 from auto_search.engagement import scoring as engagement_scoring
 from auto_search.engagement import sync as engagement_sync_mod
@@ -952,6 +954,33 @@ def create_app() -> FastAPI:
         out.sort(key=lambda x: (x.get("score") or 0, x.get("last_touch") or ""), reverse=True)
         return out
 
+    def _heal_identities() -> dict:
+        """Run the identity self-heal (MAR2-32) and carry the ai_classifications
+        keys of merged ids along. Best-effort: import/ops callers must never
+        fail because healing hiccuped."""
+        repo = getattr(app.state, "engagement_repo", None)
+        if repo is None:
+            return {"merged": {}}
+        try:
+            rep = engagement_identity.heal_identity_splits(
+                repo, getattr(app.state, "scoring_repo", None), app.state.repo)
+            import json as _json
+            merged = rep.get("merged") or {}
+            if merged:
+                ai = _json.loads(repo.get_setting("ai_classifications") or "{}")
+                changed = False
+                for old, new in merged.items():
+                    if old in ai:
+                        ai.setdefault(new, ai[old])
+                        del ai[old]
+                        changed = True
+                if changed:
+                    repo.set_setting("ai_classifications", _json.dumps(ai))
+            return rep
+        except Exception:  # noqa: BLE001 — healing is a guard, never a blocker
+            logger.exception("identity heal failed (continuing)")
+            return {"merged": {}}
+
     def _own_signals_provider(account) -> list[dict]:
         """The full own-signals provider for ScoringService (published on
         app.state; the lifespan wires it in). Match order: normalized-name key
@@ -1245,6 +1274,29 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=503, detail="engagement store not available")
         ledger = json.loads(repo.get_setting("notified_tiers") or "{}")
         board = _engaged_view()
+        # TRUST INTERLOCK (MAR2-32): never seed or send from a board that fails
+        # its own invariant audit — red means tiles/queue can't be trusted to
+        # reflect raw events (identity splits, points drift, view drift,
+        # tile/company divergence). Dry runs pass through: they ARE how a human
+        # inspects a red board. Ops alert is opt-in (setting audit_alerts=1).
+        audit_rep = engagement_audit.run_invariants(
+            repo, getattr(app.state, "scoring_repo", None), app.state.repo,
+            rows=board)
+        if not audit_rep["ok"] and not dry_run:
+            logger.error("notify HELD by audit: %s", audit_rep["violations"])
+            if repo.get_setting("audit_alerts") == "1":
+                from auto_search.ops import alerts as ops_alerts
+                if ops_alerts.should_alert(repo, "audit-hold", min_gap_hours=6):
+                    ops_alerts.post_ops_alert(
+                        kind="audit-hold", severity="failure",
+                        service="engagement-preview",
+                        title=f"Notify HELD: engagement audit failed "
+                              f"({len(audit_rep['violations'])} violations)",
+                        detail="; ".join(f"{v['code']}: {v['detail']}"
+                                         for v in audit_rep["violations"])[:900])
+            return {"due": 0, "posted": 0, "held": True, "stage": "audit",
+                    "violations": audit_rep["violations"], "dry_run": False,
+                    "detail": []}
         if seed:
             # Baseline = the state as of NOW: each account's current tier AND its latest
             # touch are recorded as "already notified". So a tier rise OR a strictly-newer
@@ -1376,6 +1428,27 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=422, detail="stage must be 'test' or 'live'")
         repo.set_setting("notify_stage", val)
         return {"stage": val}
+
+    @app.get("/api/engagement/audit")
+    def engagement_audit_report():
+        """Trust monitor (MAR2-32): recompute ground truth from raw events and
+        check the four invariants (twins, points drift, tile recompute,
+        tile/company divergence). Read-only; notify holds whenever this is red."""
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=503, detail="engagement store not available")
+        return engagement_audit.run_invariants(
+            repo, getattr(app.state, "scoring_repo", None), app.state.repo,
+            rows=_engaged_view())
+
+    @app.post("/api/engagement/heal")
+    def engagement_heal_now():
+        """Manually run the identity self-heal — the same routine that follows
+        every ingest and import (MAR2-32). Returns what moved."""
+        repo = getattr(app.state, "engagement_repo", None)
+        if not repo:
+            raise HTTPException(status_code=503, detail="engagement store not available")
+        return _heal_identities()
 
     @app.get("/api/ops/changelog")
     def ops_changelog_list(limit: int = 100):
@@ -3096,6 +3169,10 @@ def create_app() -> FastAPI:
         # re-import that deduped everything must not claim flagged rows (QA F4).
         imported_names = {a.name for a in csv_fresh}
         flagged = [n for n in flagged if n in imported_names]
+        # MAR2-32 guard: an import is the moment a company already carrying
+        # engagement history under abm_<key> gains its scored twin — heal now,
+        # not at the next sync, so the board never shows a split.
+        healed = _heal_identities()
         return {
             "schema_label": result.schema_label,
             "segment": result.segment,
@@ -3107,6 +3184,7 @@ def create_app() -> FastAPI:
             "flagged": flagged[:15],
             "import_label": label,
             "accounts": csv_rows + moved,
+            "identity_healed": len(healed.get("merged") or {}),
         }
 
     @app.get("/api/scoring/imports")

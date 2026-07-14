@@ -40,11 +40,17 @@ def _seed_due_account(app):
                          "company": "Due Co", "company_key": "dueco",
                          "account_id": "abm_dueco", "match_tier": "domain",
                          "matched_lists": ["abm"], "delivered": 1})
-    repo.add_event({"source": "replyio", "external_id": "e:reply:c1",
-                       "channel": "email", "kind": "meeting_booked", "points": 21,
-                       "contact_ext": "c1", "company": "Due Co",
-                       "account_id": "abm_dueco",
-                       "occurred_at": "2026-07-07T10:00:00+00:00"})
+    # Hot via MATRIX-TRUE points (10+10+6=26): the audit interlock (MAR2-32)
+    # holds any board whose stored points diverge from the canonical matrix,
+    # so fixtures must seed like production ingests, not shortcut totals.
+    for ext, kind, pts in (("e:meet:c1", "meeting_booked", 10),
+                           ("e:bofu:c1", "high_intent_lead", 10),
+                           ("e:reply:c1", "reply", 6)):
+        repo.add_event({"source": "replyio", "external_id": ext,
+                        "channel": "email", "kind": kind, "points": pts,
+                        "contact_ext": "c1", "company": "Due Co",
+                        "account_id": "abm_dueco",
+                        "occurred_at": "2026-07-07T10:00:00+00:00"})
 
 
 def test_staged_send_posts_test_only_and_keeps_account_due(client, monkeypatch):

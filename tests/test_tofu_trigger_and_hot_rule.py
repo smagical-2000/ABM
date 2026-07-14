@@ -167,24 +167,40 @@ def client(tmp_path, monkeypatch):
                         lambda: JsonFileRepository(tmp_path / "s.json"))
     monkeypatch.setattr(_app_module, "get_scoring_repository",
                         lambda: ScoringJsonRepository(tmp_path / "sc.json"))
+    # engagement repo MUST be tmp too — without this the app falls back to the
+    # developer's local ./data store, and the seed/audit tests read whatever
+    # happens to be on the machine (invisible while the old test stubbed
+    # engaged_accounts; real events made it matter).
+    from auto_search.db.engagement_repository import EngagementJsonRepository
+    monkeypatch.setattr(_app_module, "get_engagement_repository",
+                        lambda: EngagementJsonRepository(tmp_path / "eng.json"))
     with TestClient(_app_module.create_app()) as c:
         yield c, _app_module
 
 
 def test_seed_baselines_to_now_then_nothing_fires(client):
+    """Seeds REAL matrix-true events (not a faked engaged_accounts row): the
+    MAR2-32 audit interlock holds any board whose tiles diverge from raw
+    events, so this test exercises seed semantics on a board that passes it."""
     c, _ = client
-    touch = {"v": "2026-07-04T10:00:00+00:00"}   # mutable so the test can advance it
-    row = {"account_id": "abm_hot", "score": 25, "clicks": 0, "replies": 0,
-           "meetings": 0, "contacts": 0, "delivered": 0, "opened": 0,
-           "replied_sends": 0}
-    # _engaged_view is a create_app closure; its data seam is repo.engaged_accounts.
-    c.app.state.engagement_repo.engaged_accounts = lambda: [{**row, "last_touch": touch["v"]}]
+    repo = c.app.state.engagement_repo
+
+    def _ev(ext, kind, pts, when):
+        repo.add_event({"source": "replyio", "external_id": ext,
+                        "channel": "email", "kind": kind, "points": pts,
+                        "contact_ext": "c1", "company": "Hot Co",
+                        "account_id": "abm_hot", "occurred_at": when, "raw": {}})
+
+    # Hot (26 = 10+10+6) as production would ingest it
+    _ev("e:meet:c1", "meeting_booked", 10, "2026-07-04T10:00:00+00:00")
+    _ev("e:bofu:c1", "high_intent_lead", 10, "2026-07-04T10:00:00+00:00")
+    _ev("e:reply:c1", "reply", 6, "2026-07-04T10:00:00+00:00")
 
     seeded = c.post("/api/engagement/notify-changes", params={"seed": "true"}).json()
     assert seeded["seeded"] == 1 and seeded["format"] == "company-key tier+touch"
     # nothing fires right after seed (the "not like right now" guarantee)
     assert c.post("/api/engagement/notify-changes", params={"dry_run": "true"}).json()["due"] == 0
-    # a NEW touch on the already-Hot account now re-fires
-    touch["v"] = "2026-07-05T15:00:00+00:00"
+    # NEW activity on the already-Hot account (a fresh scored touch) re-fires
+    _ev("e:click:c1", "click", 1, "2026-07-05T15:00:00+00:00")
     due = c.post("/api/engagement/notify-changes", params={"dry_run": "true"}).json()
     assert due["due"] == 1 and due["detail"][0]["reason"] == "hot_activity"

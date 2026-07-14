@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
+from auto_search.engagement import identity as identity_mod
 from auto_search.engagement import ingest as ingest_mod
 from auto_search.engagement import podcast as podcast_mod
 from auto_search.engagement import sfdc as sfdc_mod
@@ -57,6 +58,18 @@ def cross_and_persist(*, engagement_repo, scoring_repo, discovery_repo,
     for c in contact_rows:
         engagement_repo.upsert_contact(c)
     new_events = sum(1 for e in event_rows if engagement_repo.add_event(e))
+    # Identity self-heal (MAR2-32): every ingest is a moment a company's history
+    # can sit split across a stale abm_<key> twin and its scored id (a bulk
+    # import minting csv_* is the classic birth). Heal immediately so a split
+    # never outlives the ingest that would expose it. Best-effort — healing
+    # must never fail a sync (the rows above are already persisted).
+    try:
+        healed = identity_mod.heal_identity_splits(
+            engagement_repo, scoring_repo, discovery_repo)
+        if healed.get("merged"):
+            logger.info("identity heal after ingest: %s", healed["merged"])
+    except Exception:  # noqa: BLE001
+        logger.exception("identity heal failed (ingest already persisted)")
     return matched, new_events
 
 

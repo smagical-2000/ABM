@@ -163,3 +163,62 @@ def test_one_channel_failing_never_blanks_the_other():
     assert "smartlead down" in payload["email"]["error"]
     assert payload["linkedin"]["overall"]["connections_sent"] == 100
     assert payload["fetched_at"]
+
+
+# ── QA findings, 2026-07-14 (each fix guarded) ───────────────────────────
+
+
+def test_err_redacts_api_key_in_urls():
+    """BLOCKER guard: SmartLead auths via ?api_key= and httpx error strings
+    embed the full URL — the key must never reach the payload/UI/logs."""
+    e = RuntimeError("Client error '401 Unauthorized' for url "
+                     "'https://server.smartlead.ai/api/v1/campaigns?api_key=SECRET123'")
+    out = outreach_stats._err(e)
+    assert "SECRET123" not in out
+    assert "api_key=***" in out
+
+
+def test_err_survives_leading_newlines():
+    assert outreach_stats._err(RuntimeError("\nsecond line")) == "second line"
+    assert outreach_stats._err(RuntimeError("")) == "RuntimeError"
+
+
+class NonDictSmartlead:
+    """API returns a JSON list body for one campaign's analytics."""
+    async def list_campaigns(self):
+        return SL_CAMPAIGNS
+
+    async def campaign_analytics(self, cid):
+        return ["not", "a", "dict"] if cid == 2 else SL_RAW[cid]
+
+
+def test_email_non_dict_body_drops_row_not_channel():
+    out = _run(outreach_stats.collect_email(NonDictSmartlead()))
+    assert "error" not in out
+    assert out["campaigns_errored"] == 1
+    assert [r["id"] for r in out["campaigns"]] == [1]
+
+
+class NonDictHeyreach(FakeHeyreach):
+    async def overall_stats(self, *, campaign_ids=None, account_ids=None,
+                            start=None, end=None):
+        return []          # unexpected top-level shape
+
+
+def test_linkedin_non_dict_overall_is_channel_error_not_crash():
+    out = _run(outreach_stats.collect_linkedin(
+        NonDictHeyreach(HR_OVERALL, HR_PER, HR_CAMPAIGNS)))
+    assert out["configured"] is True
+    assert "unexpected response shape" in out["error"]
+
+
+def test_collect_belt_turns_escaped_exception_into_channel_error():
+    """Even a collector-level escape must not 500 the endpoint."""
+    class Hostile:
+        def __getattr__(self, name):        # every method access detonates
+            raise RuntimeError("total meltdown")
+    payload = _run(outreach_stats.collect(
+        smartlead=Hostile(),
+        heyreach=FakeHeyreach(HR_OVERALL, HR_PER, HR_CAMPAIGNS)))
+    assert payload["email"]["error"]
+    assert payload["linkedin"]["overall"]["connections_sent"] == 100

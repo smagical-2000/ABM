@@ -418,8 +418,15 @@ def test_social_listening_panel_opens(page):
 
 def test_every_tab_mounts_without_console_errors(page):
     """Each nav tab renders cleanly — catches a white-screen on any tab, including
-    the new Watch list (a fresh babel-compiled file)."""
-    for tab in ("Discovery", "Scored", "News", "Watch list", "Engagement", "Campaigns", "Outreach"):
+    the new Watch list (a fresh babel-compiled file). The Outreach stats route is
+    stubbed: the tab would otherwise call the LIVE SmartLead/HeyReach APIs when
+    real keys sit in the local .env (QA, 2026-07-14)."""
+    import json as _json
+    page.route("**/api/outreach/stats*", lambda route: route.fulfill(
+        status=200, content_type="application/json", body=_json.dumps(
+            {"fetched_at": "2026-07-13T12:00:00+00:00", "cached": False,
+             "email": {"configured": False}, "linkedin": {"configured": False}})))
+    for tab in ("Discovery", "Scored", "News", "Watch list", "Engagement", "Outreach"):
         page.click(f"text={tab}")
         page.wait_for_timeout(700)
         real = [e for e in page.console_errors
@@ -436,8 +443,17 @@ def test_engagement_tab_shows_account(page):
 
 
 # ── Phase 3: campaign automation ──────────────────────────────────────────────
+# The Campaigns tab is HIDDEN as of 2026-07-14 (Sunny): its NAV_TABS entry and
+# the campaigns.jsx script include were removed from app.jsx / index.html while
+# the enrollment console is parked. The code stays in the repo. When the tab
+# returns, restore those two lines and drop these skips.
+
+_CAMPAIGNS_TAB_HIDDEN = pytest.mark.skip(
+    reason="Campaigns tab hidden 2026-07-14 (Sunny) — restore NAV_TABS entry + "
+           "campaigns.jsx include in index.html, then unskip")
 
 
+@_CAMPAIGNS_TAB_HIDDEN
 def test_campaigns_tab_ready_list_with_reasons(page):
     """The Campaigns tab (fresh babel-compiled campaigns.jsx) renders the
     ready-to-enroll worklist: the seeded account qualifies (High fit + Warm heat
@@ -454,6 +470,7 @@ def test_campaigns_tab_ready_list_with_reasons(page):
     assert not real, f"console errors: {real[:5]}"
 
 
+@_CAMPAIGNS_TAB_HIDDEN
 def test_campaigns_sequences_tab_and_preview_run(page):
     """The Sequences mapping editor renders every catalog group with its state,
     and a Preview run (dry) round-trips the whole backend path — reporting the

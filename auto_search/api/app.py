@@ -2044,7 +2044,10 @@ def create_app() -> FastAPI:
             return {**cache["data"], "cached": True}
         data = await campaigns_outreach.collect(
             smartlead=_smartlead_or_none(), heyreach=_heyreach_or_none())
-        app.state.outreach_cache = {"at": now, "data": data}
+        # Only cache clean pulls: a transient executor failure must not pin
+        # "Fetch failed" on every viewer for the full TTL (QA, 2026-07-14).
+        if not (data["email"].get("error") or data["linkedin"].get("error")):
+            app.state.outreach_cache = {"at": now, "data": data}
         return {**data, "cached": False}
 
     @app.post("/api/campaigns/webhooks/heyreach")

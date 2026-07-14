@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import UTC, datetime
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,22 @@ def _num(v) -> int:
         return int(float(v))
     except (TypeError, ValueError):
         return 0
+
+
+# SmartLead auths via an api_key QUERY PARAM, and httpx error strings embed the
+# full request URL — so every error message is redacted before it can reach the
+# payload, the UI, or a log line. (QA blocker, 2026-07-14.)
+_KEY_RE = re.compile(r"api_key=[^&\s'\"]+")
+
+
+def _err(e: BaseException) -> str:
+    """First non-empty line, secrets redacted — httpx appends an MDN footer
+    that is noise in an operator-facing setup note, and its first line can
+    carry a key-bearing URL."""
+    for line in str(e).splitlines():
+        if line.strip():
+            return _KEY_RE.sub("api_key=***", line)
+    return e.__class__.__name__
 
 
 def _rate(n: int, d: int) -> float | None:
@@ -71,13 +88,14 @@ async def collect_email(smartlead) -> dict:
             *(smartlead.campaign_analytics(c["id"]) for c in campaigns),
             return_exceptions=True)
     except Exception as e:  # noqa: BLE001 — channel-level failure is a payload state
-        logger.warning("outreach: smartlead fetch failed: %s", e)
-        return {"configured": True, "error": str(e)}
+        logger.warning("outreach: smartlead fetch failed: %s", _err(e))
+        return {"configured": True, "error": _err(e)}
     rows, dropped = [], 0
     for c, raw in zip(campaigns, raws, strict=True):
-        if isinstance(raw, Exception):
+        if isinstance(raw, Exception) or not isinstance(raw, dict):
             dropped += 1
-            logger.warning("outreach: smartlead campaign %s failed: %s", c["id"], raw)
+            logger.warning("outreach: smartlead campaign %s failed: %s", c["id"],
+                           _err(raw) if isinstance(raw, Exception) else "non-dict body")
             continue
         rows.append(shape_email_campaign(raw))
     totals = {k: sum(r[k] for r in rows) for k in
@@ -137,13 +155,16 @@ async def collect_linkedin(heyreach) -> dict:
             *(heyreach.overall_stats(campaign_ids=[c["id"]]) for c in campaigns),
             return_exceptions=True)
     except Exception as e:  # noqa: BLE001 — channel-level failure is a payload state
-        logger.warning("outreach: heyreach fetch failed: %s", e)
-        return {"configured": True, "error": str(e)}
+        logger.warning("outreach: heyreach fetch failed: %s", _err(e))
+        return {"configured": True, "error": _err(e)}
+    if not isinstance(overall_raw, dict):
+        return {"configured": True, "error": "unexpected response shape from GetOverallStats"}
     rows, dropped = [], 0
     for c, raw in zip(campaigns, raws, strict=True):
-        if isinstance(raw, Exception):
+        if isinstance(raw, Exception) or not isinstance(raw, dict):
             dropped += 1
-            logger.warning("outreach: heyreach campaign %s failed: %s", c["id"], raw)
+            logger.warning("outreach: heyreach campaign %s failed: %s", c["id"],
+                           _err(raw) if isinstance(raw, Exception) else "non-dict body")
             continue
         rows.append({"id": c["id"], "name": c["name"], "status": c["status"],
                      **shape_linkedin_stats(raw)})
@@ -157,8 +178,17 @@ async def collect_linkedin(heyreach) -> dict:
 
 
 async def collect(*, smartlead, heyreach) -> dict:
-    """The full dashboard payload; channels fetched concurrently, isolated."""
+    """The full dashboard payload; channels fetched concurrently, isolated.
+    Belt on the channel collectors: even an unexpected escape becomes that
+    channel's error state, never a 500 that blanks the whole tab."""
     email, linkedin = await asyncio.gather(collect_email(smartlead),
-                                           collect_linkedin(heyreach))
+                                           collect_linkedin(heyreach),
+                                           return_exceptions=True)
+    if isinstance(email, BaseException):
+        logger.warning("outreach: email collector escaped: %s", _err(email))
+        email = {"configured": True, "error": _err(email)}
+    if isinstance(linkedin, BaseException):
+        logger.warning("outreach: linkedin collector escaped: %s", _err(linkedin))
+        linkedin = {"configured": True, "error": _err(linkedin)}
     return {"fetched_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "email": email, "linkedin": linkedin}

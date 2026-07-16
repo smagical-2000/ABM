@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 POSITIVE_CATEGORIES = {"interested", "meeting request", "information request",
                        "meeting booked", "positive"}
 
-_REPLY_EVENTS_HEYREACH = {"MESSAGE_REPLY_RECEIVED", "INMAIL_REPLY_RECEIVED"}
+_REPLY_EVENTS_HEYREACH = {"MESSAGE_REPLY_RECEIVED", "EVERY_MESSAGE_REPLY_RECEIVED",
+                          "INMAIL_REPLY_RECEIVED"}
 _MEETING_CATEGORIES = {"meeting booked"}                      # Sunny 2026-07-15: the 10-pt
 # tag is "Meeting Booked" ONLY; Meeting Request is a positive reply, not a meeting.
 _POSITIVE_REPLY_CATEGORIES = {"interested", "meeting request", "information request",
@@ -45,6 +46,13 @@ def _dig(d: dict, *keys, default=""):
         if v:
             return str(v)
     return default
+
+
+def _esc(text: str) -> str:
+    """Slack mrkdwn escape for lead-controlled strings (names, companies, reply
+    bodies come from arbitrary cold-email recipients — unescaped <url|label>
+    would render as a legit-looking link in a channel AEs act on)."""
+    return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _category(payload: dict) -> str:
@@ -78,8 +86,17 @@ def _card(header: str, lines: list[str], snippet: str = "") -> dict:
 # ── builders (pure) ──────────────────────────────────────────────────────
 
 
+_CARD_EVENTS_SMARTLEAD = {"EMAIL_REPLY", "LEAD_CATEGORY_UPDATED"}
+
+
 def smartlead_event_to_card(payload: dict) -> dict | None:
-    """SmartLead webhook event -> Slack card, or None when not a positive reply."""
+    """SmartLead webhook event -> Slack card, or None when not a positive reply.
+    Gated on BOTH the event type and the category: click/open events echo the
+    lead's CURRENT category, so an already-Interested lead's (bot) click would
+    otherwise post a false "positive reply" card (QA, 2026-07-15)."""
+    etype = _dig(payload, "event_type", "eventType").upper()
+    if etype not in _CARD_EVENTS_SMARTLEAD:
+        return None
     cat = _category(payload)
     if cat.lower() not in POSITIVE_CATEGORIES:
         return None
@@ -88,17 +105,18 @@ def smartlead_event_to_card(payload: dict) -> dict | None:
             or _dig(payload, "lead_name") or "Someone")
     email = _dig(payload, "lead_email", "sl_lead_email", "to_email", "email")
     company = _dig(payload, "company_name", "lead_company")
-    campaign = _dig(payload, "campaign_name") or f"campaign {_dig(payload, 'campaign_id')}"
+    campaign = (_dig(payload, "campaign_name") or _dig(payload, "campaign_id")
+                or "unknown campaign")
     reply = payload.get("reply_message") or payload.get("reply_body") or ""
     if isinstance(reply, dict):
         reply = reply.get("text") or reply.get("html") or ""
-    lines = [f"*{name}*" + (f" · {company}" if company else ""),
-             f"Category: *{cat}*  ·  Campaign: {campaign}"]
+    lines = [f"*{_esc(name)}*" + (f" · {_esc(company)}" if company else ""),
+             f"Category: *{_esc(cat)}*  ·  Campaign: {_esc(campaign)}"]
     if email:
-        lines.append(f"Email: {email}")
+        lines.append(f"Email: {_esc(email)}")
     inbox = _dig(payload, "app_url", "appUrl") or SMARTLEAD_INBOX
     lines.append(f"<{inbox}|Open in SmartLead inbox>")
-    return _card("Positive email reply", lines, _snippet(str(reply)))
+    return _card("Positive email reply", lines, _esc(_snippet(str(reply))))
 
 
 def heyreach_event_to_card(payload: dict) -> dict | None:
@@ -117,13 +135,13 @@ def heyreach_event_to_card(payload: dict) -> dict | None:
     if isinstance(msg, dict):
         msg = msg.get("text") or msg.get("body") or ""
     kind = "InMail reply" if etype.startswith("INMAIL") else "LinkedIn reply"
-    lines = [f"*{name}*" + (f" · {company}" if company else ""),
-             f"{kind}  ·  Campaign: {campaign}"]
+    lines = [f"*{_esc(name)}*" + (f" · {_esc(company)}" if company else ""),
+             f"{kind}  ·  Campaign: {_esc(campaign)}"]
     if profile:
         lines.append(f"<{profile}|LinkedIn profile>  ·  <{HEYREACH_INBOX}|Open HeyReach inbox>")
     else:
         lines.append(f"<{HEYREACH_INBOX}|Open HeyReach inbox>")
-    return _card("LinkedIn response", lines, _snippet(str(msg)))
+    return _card("LinkedIn response", lines, _esc(_snippet(str(msg))))
 
 
 # ── engagement mapping (pure) ────────────────────────────────────────────
@@ -157,7 +175,12 @@ def smartlead_event_to_engagement(payload: dict) -> dict | None:
             "company": _dig(payload, "company_name", "lead_company"),
             "title": _dig(payload, "lead_title", "title"),
             "campaign": _dig(payload, "campaign_name") or _dig(payload, "campaign_id"),
-            "external_id": f"outbound:{kind}:{email}"}
+            "external_id": f"outbound:{kind}:{email}",
+            # Prefer the event's own timestamp so a SmartLead webhook RETRIGGER
+            # cannot restamp an old touch as today (phantom momentum guard).
+            "occurred_at": _dig(payload, "event_timestamp", "time_replied",
+                                "time_clicked", "sent_time", "time"),
+            "raw": payload}
 
 
 # ── I/O ──────────────────────────────────────────────────────────────────

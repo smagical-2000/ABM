@@ -154,9 +154,9 @@ CREATE OR REPLACE VIEW engaged_accounts AS
 WITH e AS (
     SELECT account_id,
            SUM(points)                                   AS score,
-           COUNT(*) FILTER (WHERE kind = 'click')         AS clicks,
-           COUNT(*) FILTER (WHERE kind = 'reply')         AS replies,
-           COUNT(*) FILTER (WHERE kind = 'meeting_booked') AS meetings,
+           COUNT(*) FILTER (WHERE kind IN ('click', 'outbound_click'))          AS clicks,
+           COUNT(*) FILTER (WHERE kind IN ('reply', 'outbound_reply'))          AS replies,
+           COUNT(*) FILTER (WHERE kind IN ('meeting_booked', 'outbound_meeting_booked')) AS meetings,
            -- last_touch = latest SCORED touch only. Zero-point rows (delivered/
            -- open/bounce) must never advance it: the Hot-reactivation rule
            -- compares it against the notify ledger, so a mere email OPEN moving

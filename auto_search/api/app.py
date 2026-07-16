@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import re
+import secrets as _secrets
 import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -894,7 +895,7 @@ def create_app() -> FastAPI:
     # Activity view — an email click isn't "they moved" (mirrors the lean bar the
     # user/Galyna asked for: a real worklist, not noise). A TOFU form lead now
     # scores 6 (a real lead), so it surfaces like the other meaningful touches.
-    _ACTIVITY_NOISE = frozenset({"click"})
+    _ACTIVITY_NOISE = frozenset({"click", "outbound_click"})
 
     def _recent_touch_by_account(repo, *, days: int = 14) -> dict[str, dict]:
         """account_id -> the most significant MEANINGFUL touch in the last `days`
@@ -1090,9 +1091,9 @@ def create_app() -> FastAPI:
             **_classify(s, d, _ai.get(account_id)),
             "domain": s.get("domain") or d.get("domain"),
             "score": score, "tier": engagement_scoring.tier_for(score),
-            "clicks": sum(1 for e in events if e.get("kind") == "click"),
-            "replies": sum(1 for e in events if e.get("kind") == "reply"),
-            "meetings": sum(1 for e in events if e.get("kind") == "meeting_booked"),
+            "clicks": sum(1 for e in events if e.get("kind") in ("click", "outbound_click")),
+            "replies": sum(1 for e in events if e.get("kind") in ("reply", "outbound_reply")),
+            "meetings": sum(1 for e in events if e.get("kind") in ("meeting_booked", "outbound_meeting_booked")),
             "contacts": len(engaged), "delivered": delivered, "opened": opened,
             "replied_sends": replied,
             "last_touch": max((e.get("occurred_at") for e in events if e.get("occurred_at")),
@@ -2057,8 +2058,22 @@ def create_app() -> FastAPI:
         """Shared-secret gate for the outreach response receivers (auth-exempt
         paths, same pattern as the heat-scoring HeyReach webhook)."""
         want = os.getenv("OUTREACH_WEBHOOK_SECRET")
-        if not want or secret != want:
+        if not want or not _secrets.compare_digest(secret or "", want):
             raise HTTPException(status_code=403, detail="bad secret")
+
+    def _cross_index_cached():
+        """The engagement cross-index, TTL-cached on app.state (10 min, same
+        pattern as outreach_cache). build_index scans the whole scored book +
+        ABM table — rebuilding it PER webhook event let a click burst stall the
+        event loop for seconds (QA, 2026-07-15). The index only changes on
+        scoring runs / ABM imports, so a 10-minute lag is harmless."""
+        cache = getattr(app.state, "cross_index_cache", None)
+        now = time.time()
+        if cache and (now - cache["at"] < 600):
+            return cache["index"]
+        index = engagement_sync_mod.build_index(app.state.scoring_repo, app.state.repo)
+        app.state.cross_index_cache = {"at": now, "index": index}
+        return index
 
     def _ingest_outbound_touch(touch: dict) -> bool:
         """Cross an outbound SmartLead touch (click/reply/meeting) to an ABM
@@ -2067,11 +2082,10 @@ def create_app() -> FastAPI:
         erepo = getattr(app.state, "engagement_repo", None)
         if not erepo:
             return False
-        index = engagement_sync_mod.build_index(app.state.scoring_repo, app.state.repo)
-        m = index.match(company=touch.get("company"), email=touch.get("email"))
+        m = _cross_index_cached().match(company=touch.get("company"), email=touch.get("email"))
         if not m:
             return False
-        now_iso = datetime.now(UTC).isoformat()
+        occurred = touch.get("occurred_at") or datetime.now(UTC).isoformat()
         contact_ext = f"em:{touch['email']}"
         erepo.upsert_contact({
             "source": "smartlead", "external_id": contact_ext,
@@ -2085,8 +2099,8 @@ def create_app() -> FastAPI:
             "points": engagement_scoring.points_for(touch["kind"]),
             "contact_ext": contact_ext, "company": touch.get("company"),
             "account_id": m.account_id, "campaign": touch.get("campaign") or "",
-            "occurred_at": now_iso,
-            "raw": {"name": touch.get("name"), "kind": touch["kind"]}})
+            "occurred_at": occurred,
+            "raw": touch.get("raw") or {"name": touch.get("name"), "kind": touch["kind"]}})
         return True
 
     @app.post("/api/outreach/webhooks/smartlead")
@@ -2102,9 +2116,9 @@ def create_app() -> FastAPI:
         body = await _json_body(request)
         payload = body if isinstance(body, dict) else {}
         card = campaigns_responses.smartlead_event_to_card(payload)
-        sent = campaigns_responses.post_card(card) if card else False
+        sent = (await asyncio.to_thread(campaigns_responses.post_card, card)) if card else False
         touch = campaigns_responses.smartlead_event_to_engagement(payload)
-        matched = _ingest_outbound_touch(touch) if touch else False
+        matched = (await asyncio.to_thread(_ingest_outbound_touch, touch)) if touch else False
         return {"ok": True, "forwarded": bool(card and sent),
                 "engagement": {"kind": touch["kind"], "matched": matched} if touch else None}
 
@@ -2115,7 +2129,7 @@ def create_app() -> FastAPI:
         _outreach_webhook_guard(secret)
         body = await _json_body(request)
         card = campaigns_responses.heyreach_event_to_card(body if isinstance(body, dict) else {})
-        sent = campaigns_responses.post_card(card) if card else False
+        sent = (await asyncio.to_thread(campaigns_responses.post_card, card)) if card else False
         return {"ok": True, "forwarded": bool(card and sent)}
 
     @app.post("/api/campaigns/webhooks/heyreach")
@@ -2143,8 +2157,7 @@ def create_app() -> FastAPI:
         lead = body.get("lead") or {}
         profile = str(lead.get("profileUrl") or lead.get("profile_url") or "")
         company = lead.get("companyName") or lead.get("company")
-        index = engagement_sync_mod.build_index(app.state.scoring_repo, app.state.repo)
-        m = index.match(company=company, email=lead.get("emailAddress"))
+        m = _cross_index_cached().match(company=company, email=lead.get("emailAddress"))
         if not m:
             return {"ok": True, "matched": False}       # untracked company — dropped
         now_iso = datetime.now(UTC).isoformat()

@@ -66,6 +66,11 @@ const KIND = {
   low_intent_lead: { label:'TOFU lead (form)',   dot:'#94a3b8', weight:6 },
   linkedin_tofu:   { label:'TOFU lead (LinkedIn ad)', dot:'#0a66c2', weight:6 },
   click:           { label:'Click',              dot:'#0ea5e9', weight:1 },
+  outbound_meeting_booked:{ label:'Meeting booked (outbound)', dot:'#6366f1', weight:10, big:true },
+  outbound_reply:  { label:'Reply (outbound)',   dot:'#10b981', weight:6 },
+  outbound_click:  { label:'Click (outbound)',   dot:'#0ea5e9', weight:1 },
+  linkedin_reply:  { label:'LinkedIn reply',     dot:'#0a66c2', weight:6 },
+  linkedin_connect:{ label:'LinkedIn connect',   dot:'#0a66c2', weight:2 },
 };
 const kindOf = (k)=> KIND[k] || { label:k||'Touch', dot:'#d4d4d8', weight:1 };
 const MATCH = { domain:{label:'Domain',fg:'#059669'}, name:{label:'Name',fg:'#0284c7'} };

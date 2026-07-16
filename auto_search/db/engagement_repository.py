@@ -380,11 +380,11 @@ class EngagementJsonRepository:
                                        "meetings": 0, "last_touch": None})
             slot["score"] += int(e.get("points") or 0)
             kind = e.get("kind")
-            if kind == "click":
+            if kind in ("click", "outbound_click"):
                 slot["clicks"] += 1
-            elif kind == "reply":
+            elif kind in ("reply", "outbound_reply"):
                 slot["replies"] += 1
-            elif kind == "meeting_booked":
+            elif kind in ("meeting_booked", "outbound_meeting_booked"):
                 slot["meetings"] += 1
             ot = e.get("occurred_at")
             # last_touch = latest SCORED touch only (zero-point delivered/open/

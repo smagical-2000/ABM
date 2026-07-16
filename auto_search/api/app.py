@@ -47,6 +47,7 @@ from auto_search.api.auth import install_basic_auth
 from auto_search.campaigns import catalog as campaigns_catalog
 from auto_search.campaigns import enroll as campaigns_enroll
 from auto_search.campaigns import outreach_stats as campaigns_outreach
+from auto_search.campaigns import response_notify as campaigns_responses
 from auto_search.campaigns import rules as campaigns_rules
 from auto_search.campaigns import runner as campaigns_runner
 from auto_search.campaigns import stoprules as campaigns_stoprules
@@ -534,7 +535,9 @@ def create_app() -> FastAPI:
     # query param instead (403 inside the handler on mismatch).
     auth_enabled = install_basic_auth(
         app, exempt_paths=("/api/health", "/api/campaigns/webhooks/heyreach",
-                           "/api/enrichment/clay/results"))
+                           "/api/enrichment/clay/results",
+                           "/api/outreach/webhooks/smartlead",
+                           "/api/outreach/webhooks/heyreach"))
     if not auth_enabled and is_production():
         raise RuntimeError(
             "Refusing to start in production without auth: set BASIC_AUTH_USER "
@@ -2049,6 +2052,34 @@ def create_app() -> FastAPI:
         if not (data["email"].get("error") or data["linkedin"].get("error")):
             app.state.outreach_cache = {"at": now, "data": data}
         return {**data, "cached": False}
+
+    def _outreach_webhook_guard(secret: str) -> None:
+        """Shared-secret gate for the outreach response receivers (auth-exempt
+        paths, same pattern as the heat-scoring HeyReach webhook)."""
+        want = os.getenv("OUTREACH_WEBHOOK_SECRET")
+        if not want or secret != want:
+            raise HTTPException(status_code=403, detail="bad secret")
+
+    @app.post("/api/outreach/webhooks/smartlead")
+    async def outreach_webhook_smartlead(request: Request, secret: str = ""):
+        """SmartLead event receiver -> Slack, POSITIVE replies only (Interested /
+        Meeting Request / Information Request). Everything else is acknowledged
+        and dropped. Never 5xxes back at SmartLead."""
+        _outreach_webhook_guard(secret)
+        body = await _json_body(request)
+        card = campaigns_responses.smartlead_event_to_card(body if isinstance(body, dict) else {})
+        sent = campaigns_responses.post_card(card) if card else False
+        return {"ok": True, "forwarded": bool(card and sent)}
+
+    @app.post("/api/outreach/webhooks/heyreach")
+    async def outreach_webhook_heyreach(request: Request, secret: str = ""):
+        """HeyReach event receiver -> Slack: message/InMail replies only.
+        Connection accepts and sends are acknowledged and dropped."""
+        _outreach_webhook_guard(secret)
+        body = await _json_body(request)
+        card = campaigns_responses.heyreach_event_to_card(body if isinstance(body, dict) else {})
+        sent = campaigns_responses.post_card(card) if card else False
+        return {"ok": True, "forwarded": bool(card and sent)}
 
     @app.post("/api/campaigns/webhooks/heyreach")
     async def campaigns_heyreach_webhook(request: Request, secret: str = ""):

@@ -30,8 +30,8 @@ POINTS: dict[str, int] = {
     # Outbound (SmartLead) — same canonical weights as their inbound twins, but
     # distinct kinds so the tracker timeline reads "outbound ..." explicitly.
     "outbound_click": 1,           # clicked a link in an outbound SmartLead email
-    "outbound_reply": 6,           # replied to an outbound SmartLead email
-    "outbound_meeting_booked": 10, # categorized Meeting Request/booked in SmartLead
+    "outbound_reply": 6,           # POSITIVE-categorized reply to an outbound email
+    "outbound_meeting_booked": 10, # SmartLead category "Meeting Booked"
 }
 
 # Touches we record for rates + the timeline but that score zero — kept explicit

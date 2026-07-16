@@ -66,20 +66,29 @@ def test_smartlead_engagement_mapping():
                      "name": "", "company": "Mercy Health", "title": "",
                      "campaign": "Health Systems",
                      "external_id": "outbound:outbound_click:jane@hosp.org"}
-    reply = rn.smartlead_event_to_engagement({
-        "event_type": "EMAIL_REPLY", "lead_email": "j@h.org"})
-    assert reply["kind"] == "outbound_reply"
-    meet = rn.smartlead_event_to_engagement({
+    # a raw reply adds NOTHING — heat lands only on positive categorization
+    assert rn.smartlead_event_to_engagement({
+        "event_type": "EMAIL_REPLY", "lead_email": "j@h.org"}) is None
+    pos = rn.smartlead_event_to_engagement({
+        "event_type": "LEAD_CATEGORY_UPDATED", "lead_email": "j@h.org",
+        "lead_category": {"new_name": "Interested"}})
+    assert pos["kind"] == "outbound_reply"
+    # Meeting Request is a positive reply (6), NOT a booked meeting (10)
+    mreq = rn.smartlead_event_to_engagement({
         "event_type": "LEAD_CATEGORY_UPDATED", "lead_email": "j@h.org",
         "lead_category": {"new_name": "Meeting Request"}})
+    assert mreq["kind"] == "outbound_reply"
+    meet = rn.smartlead_event_to_engagement({
+        "event_type": "LEAD_CATEGORY_UPDATED", "lead_email": "j@h.org",
+        "lead_category": {"new_name": "Meeting Booked"}})
     assert meet["kind"] == "outbound_meeting_booked"
 
 
 def test_smartlead_engagement_mapping_drops_noise():
-    # non-meeting category change, opens, missing email -> no touch
+    # negative category, opens, missing email -> no touch
     assert rn.smartlead_event_to_engagement({
         "event_type": "LEAD_CATEGORY_UPDATED", "lead_email": "j@h.org",
-        "lead_category": "Interested"}) is None
+        "lead_category": "Not Interested"}) is None
     assert rn.smartlead_event_to_engagement({
         "event_type": "EMAIL_OPEN", "lead_email": "j@h.org"}) is None
     assert rn.smartlead_event_to_engagement({

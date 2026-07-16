@@ -28,7 +28,10 @@ POSITIVE_CATEGORIES = {"interested", "meeting request", "information request",
                        "meeting booked", "positive"}
 
 _REPLY_EVENTS_HEYREACH = {"MESSAGE_REPLY_RECEIVED", "INMAIL_REPLY_RECEIVED"}
-_MEETING_CATEGORIES = {"meeting request", "meeting booked"}
+_MEETING_CATEGORIES = {"meeting booked"}                      # Sunny 2026-07-15: the 10-pt
+# tag is "Meeting Booked" ONLY; Meeting Request is a positive reply, not a meeting.
+_POSITIVE_REPLY_CATEGORIES = {"interested", "meeting request", "information request",
+                              "positive"}
 SMARTLEAD_INBOX = "https://app.smartlead.ai/app/master-inbox"
 HEYREACH_INBOX = "https://app.heyreach.io/inbox"
 
@@ -128,19 +131,24 @@ def heyreach_event_to_card(payload: dict) -> dict | None:
 
 def smartlead_event_to_engagement(payload: dict) -> dict | None:
     """SmartLead webhook event -> an outbound engagement touch, or None.
-    outbound_click (1) / outbound_reply (6) / outbound_meeting_booked (10) —
-    the receiver crosses it to an ABM account and stores it; unmatched leads
-    are dropped there, same policy as every other engagement source."""
+    outbound_click (1) / outbound_reply (6, positive-categorized replies only) /
+    outbound_meeting_booked (10, category "Meeting Booked" only) — the receiver
+    crosses it to an ABM account and stores it; unmatched leads are dropped
+    there, same policy as every other engagement source."""
     etype = _dig(payload, "event_type", "eventType").upper()
     email = _dig(payload, "lead_email", "sl_lead_email", "to_email", "email").lower()
     if not email:
         return None
+    cat = _category(payload).lower()
     if etype in ("EMAIL_LINK_CLICK", "EMAIL_LINK_CLICKED", "LINK_CLICKED"):
         kind = "outbound_click"
-    elif etype == "EMAIL_REPLY":
-        kind = "outbound_reply"
-    elif etype == "LEAD_CATEGORY_UPDATED" and _category(payload).lower() in _MEETING_CATEGORIES:
+    elif etype == "LEAD_CATEGORY_UPDATED" and cat in _MEETING_CATEGORIES:
         kind = "outbound_meeting_booked"
+    elif etype == "LEAD_CATEGORY_UPDATED" and cat in _POSITIVE_REPLY_CATEGORIES:
+        # Sentiment-gated reply heat (Sunny 2026-07-15): a raw EMAIL_REPLY adds
+        # nothing — the 6 pts land only when the reply is categorized positive,
+        # so a "not interested" reply can never warm an account.
+        kind = "outbound_reply"
     else:
         return None
     name = " ".join(v for v in (_dig(payload, "first_name", "lead_first_name"),

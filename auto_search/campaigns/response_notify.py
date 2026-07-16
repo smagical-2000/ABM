@@ -28,6 +28,9 @@ POSITIVE_CATEGORIES = {"interested", "meeting request", "information request",
                        "meeting booked", "positive"}
 
 _REPLY_EVENTS_HEYREACH = {"MESSAGE_REPLY_RECEIVED", "INMAIL_REPLY_RECEIVED"}
+_MEETING_CATEGORIES = {"meeting request", "meeting booked"}
+SMARTLEAD_INBOX = "https://app.smartlead.ai/app/master-inbox"
+HEYREACH_INBOX = "https://app.heyreach.io/inbox"
 
 
 def _dig(d: dict, *keys, default=""):
@@ -90,6 +93,8 @@ def smartlead_event_to_card(payload: dict) -> dict | None:
              f"Category: *{cat}*  ·  Campaign: {campaign}"]
     if email:
         lines.append(f"Email: {email}")
+    inbox = _dig(payload, "app_url", "appUrl") or SMARTLEAD_INBOX
+    lines.append(f"<{inbox}|Open in SmartLead inbox>")
     return _card("Positive email reply", lines, _snippet(str(reply)))
 
 
@@ -112,8 +117,39 @@ def heyreach_event_to_card(payload: dict) -> dict | None:
     lines = [f"*{name}*" + (f" · {company}" if company else ""),
              f"{kind}  ·  Campaign: {campaign}"]
     if profile:
-        lines.append(f"<{profile}|LinkedIn profile>")
+        lines.append(f"<{profile}|LinkedIn profile>  ·  <{HEYREACH_INBOX}|Open HeyReach inbox>")
+    else:
+        lines.append(f"<{HEYREACH_INBOX}|Open HeyReach inbox>")
     return _card("LinkedIn response", lines, _snippet(str(msg)))
+
+
+# ── engagement mapping (pure) ────────────────────────────────────────────
+
+
+def smartlead_event_to_engagement(payload: dict) -> dict | None:
+    """SmartLead webhook event -> an outbound engagement touch, or None.
+    outbound_click (1) / outbound_reply (6) / outbound_meeting_booked (10) —
+    the receiver crosses it to an ABM account and stores it; unmatched leads
+    are dropped there, same policy as every other engagement source."""
+    etype = _dig(payload, "event_type", "eventType").upper()
+    email = _dig(payload, "lead_email", "sl_lead_email", "to_email", "email").lower()
+    if not email:
+        return None
+    if etype in ("EMAIL_LINK_CLICK", "EMAIL_LINK_CLICKED", "LINK_CLICKED"):
+        kind = "outbound_click"
+    elif etype == "EMAIL_REPLY":
+        kind = "outbound_reply"
+    elif etype == "LEAD_CATEGORY_UPDATED" and _category(payload).lower() in _MEETING_CATEGORIES:
+        kind = "outbound_meeting_booked"
+    else:
+        return None
+    name = " ".join(v for v in (_dig(payload, "first_name", "lead_first_name"),
+                                _dig(payload, "last_name", "lead_last_name")) if v)
+    return {"kind": kind, "email": email, "name": name,
+            "company": _dig(payload, "company_name", "lead_company"),
+            "title": _dig(payload, "lead_title", "title"),
+            "campaign": _dig(payload, "campaign_name") or _dig(payload, "campaign_id"),
+            "external_id": f"outbound:{kind}:{email}"}
 
 
 # ── I/O ──────────────────────────────────────────────────────────────────

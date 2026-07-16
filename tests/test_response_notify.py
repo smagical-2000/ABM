@@ -44,3 +44,50 @@ def test_post_card_never_raises_without_webhook(monkeypatch):
     monkeypatch.delenv("SLACK_OUTREACH_WEBHOOK", raising=False)
     assert rn.post_card({"blocks": []}) is False
     assert rn.post_card(None) is False
+
+
+def test_cards_carry_inbox_deep_links():
+    sl = rn.smartlead_event_to_card({"lead_category": "Interested",
+                                     "first_name": "A", "campaign_name": "X"})
+    assert rn.SMARTLEAD_INBOX in str(sl)
+    sl2 = rn.smartlead_event_to_card({"lead_category": "Interested",
+                                      "app_url": "https://app.smartlead.ai/app/inbox/123"})
+    assert "inbox/123" in str(sl2)          # payload deep link wins when present
+    hr = rn.heyreach_event_to_card({"eventType": "MESSAGE_REPLY_RECEIVED",
+                                    "lead": {"firstName": "B"}, "campaign": {}})
+    assert rn.HEYREACH_INBOX in str(hr)
+
+
+def test_smartlead_engagement_mapping():
+    click = rn.smartlead_event_to_engagement({
+        "event_type": "EMAIL_LINK_CLICK", "lead_email": "Jane@Hosp.org",
+        "company_name": "Mercy Health", "campaign_name": "Health Systems"})
+    assert click == {"kind": "outbound_click", "email": "jane@hosp.org",
+                     "name": "", "company": "Mercy Health", "title": "",
+                     "campaign": "Health Systems",
+                     "external_id": "outbound:outbound_click:jane@hosp.org"}
+    reply = rn.smartlead_event_to_engagement({
+        "event_type": "EMAIL_REPLY", "lead_email": "j@h.org"})
+    assert reply["kind"] == "outbound_reply"
+    meet = rn.smartlead_event_to_engagement({
+        "event_type": "LEAD_CATEGORY_UPDATED", "lead_email": "j@h.org",
+        "lead_category": {"new_name": "Meeting Request"}})
+    assert meet["kind"] == "outbound_meeting_booked"
+
+
+def test_smartlead_engagement_mapping_drops_noise():
+    # non-meeting category change, opens, missing email -> no touch
+    assert rn.smartlead_event_to_engagement({
+        "event_type": "LEAD_CATEGORY_UPDATED", "lead_email": "j@h.org",
+        "lead_category": "Interested"}) is None
+    assert rn.smartlead_event_to_engagement({
+        "event_type": "EMAIL_OPEN", "lead_email": "j@h.org"}) is None
+    assert rn.smartlead_event_to_engagement({
+        "event_type": "EMAIL_REPLY"}) is None
+
+
+def test_outbound_kinds_scored():
+    from auto_search.engagement import scoring
+    assert scoring.points_for("outbound_click") == 1
+    assert scoring.points_for("outbound_reply") == 6
+    assert scoring.points_for("outbound_meeting_booked") == 10

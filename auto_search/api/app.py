@@ -2060,16 +2060,53 @@ def create_app() -> FastAPI:
         if not want or secret != want:
             raise HTTPException(status_code=403, detail="bad secret")
 
+    def _ingest_outbound_touch(touch: dict) -> bool:
+        """Cross an outbound SmartLead touch (click/reply/meeting) to an ABM
+        account and store it as engagement heat. Unmatched leads are dropped —
+        the same policy as every other engagement source. Returns matched?"""
+        erepo = getattr(app.state, "engagement_repo", None)
+        if not erepo:
+            return False
+        index = engagement_sync_mod.build_index(app.state.scoring_repo, app.state.repo)
+        m = index.match(company=touch.get("company"), email=touch.get("email"))
+        if not m:
+            return False
+        now_iso = datetime.now(UTC).isoformat()
+        contact_ext = f"em:{touch['email']}"
+        erepo.upsert_contact({
+            "source": "smartlead", "external_id": contact_ext,
+            "email": touch["email"], "company": touch.get("company"),
+            "company_key": normalize_company_name(touch.get("company") or ""),
+            "title": touch.get("title"), "account_id": m.account_id,
+            "match_tier": m.tier, "matched_lists": list(m.lists)})
+        erepo.add_event({
+            "source": "smartlead", "external_id": touch["external_id"],
+            "channel": "email", "kind": touch["kind"],
+            "points": engagement_scoring.points_for(touch["kind"]),
+            "contact_ext": contact_ext, "company": touch.get("company"),
+            "account_id": m.account_id, "campaign": touch.get("campaign") or "",
+            "occurred_at": now_iso,
+            "raw": {"name": touch.get("name"), "kind": touch["kind"]}})
+        return True
+
     @app.post("/api/outreach/webhooks/smartlead")
     async def outreach_webhook_smartlead(request: Request, secret: str = ""):
-        """SmartLead event receiver -> Slack, POSITIVE replies only (Interested /
-        Meeting Request / Information Request). Everything else is acknowledged
-        and dropped. Never 5xxes back at SmartLead."""
+        """SmartLead event receiver, two independent jobs:
+        1. Slack: POSITIVE replies only (Interested / Meeting Request /
+           Information Request) -> SLACK_OUTREACH_WEBHOOK.
+        2. Engagement tracker: clicks / replies / meeting-booked categorizations
+           become outbound_click(1) / outbound_reply(6) /
+           outbound_meeting_booked(10) heat on the matched ABM account.
+        Everything else is acknowledged and dropped. Never 5xxes at SmartLead."""
         _outreach_webhook_guard(secret)
         body = await _json_body(request)
-        card = campaigns_responses.smartlead_event_to_card(body if isinstance(body, dict) else {})
+        payload = body if isinstance(body, dict) else {}
+        card = campaigns_responses.smartlead_event_to_card(payload)
         sent = campaigns_responses.post_card(card) if card else False
-        return {"ok": True, "forwarded": bool(card and sent)}
+        touch = campaigns_responses.smartlead_event_to_engagement(payload)
+        matched = _ingest_outbound_touch(touch) if touch else False
+        return {"ok": True, "forwarded": bool(card and sent),
+                "engagement": {"kind": touch["kind"], "matched": matched} if touch else None}
 
     @app.post("/api/outreach/webhooks/heyreach")
     async def outreach_webhook_heyreach(request: Request, secret: str = ""):

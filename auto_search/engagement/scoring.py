@@ -27,6 +27,11 @@ POINTS: dict[str, int] = {
     "linkedin_tofu": 6,     # reaction on a Magical TOFU LinkedIn ad → Airtable (TOFU engagement)
     "linkedin_reply": 6,    # replied to our HeyReach outreach DM (≈ email reply weight)
     "linkedin_connect": 2,  # accepted our connection request (matrix: LinkedIn_Connect 2)
+    # Outbound (SmartLead) — same canonical weights as their inbound twins, but
+    # distinct kinds so the tracker timeline reads "outbound ..." explicitly.
+    "outbound_click": 1,           # clicked a link in an outbound SmartLead email
+    "outbound_reply": 6,           # replied to an outbound SmartLead email
+    "outbound_meeting_booked": 10, # categorized Meeting Request/booked in SmartLead
 }
 
 # Touches we record for rates + the timeline but that score zero — kept explicit

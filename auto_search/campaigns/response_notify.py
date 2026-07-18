@@ -119,6 +119,52 @@ def smartlead_event_to_card(payload: dict) -> dict | None:
     return _card("Positive email reply", lines, _esc(_snippet(str(reply))))
 
 
+# ── HeyReach heat kind (webhook -> engagement scoring) ───────────────────────
+# A connection request in every one of our HeyReach campaigns carries a
+# personalized note (verified against all 5 live sequences, 2026-07-18), so
+# accepting one is a warm, intent-bearing signal (linkedin_connect_message, 10)
+# — distinct from a bare accept (linkedin_connect, 2). "Had a note" is resolved
+# from the webhook payload (if HeyReach echoes it) or a campaign allowlist.
+_CONNECT_MESSAGE_KEYS = ("connectionMessage", "connection_message", "connectMessage",
+                         "message", "note")
+
+
+def heyreach_connect_message(body: dict) -> str | None:
+    """The connection-request note HeyReach echoes on CONNECTION_REQUEST_ACCEPTED,
+    if the payload carries one — checked across the field shapes HeyReach uses,
+    at the top level and inside `lead`. Returns the first non-empty note, else
+    None. Reply-message text is NOT a connect note (different key set). PURE."""
+    if not isinstance(body, dict):
+        return None
+    lead = body.get("lead") if isinstance(body.get("lead"), dict) else {}
+    for src in (body, lead):
+        for k in _CONNECT_MESSAGE_KEYS:
+            v = src.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+            if isinstance(v, dict):                      # {"text": "..."} shape
+                t = v.get("text") or v.get("body")
+                if isinstance(t, str) and t.strip():
+                    return t.strip()
+    return None
+
+
+def heyreach_event_kind(event_type: str, *, has_connect_message: bool) -> str | None:
+    """Map a HeyReach webhook `eventType` to an engagement heat kind. PURE.
+
+    CONNECTION_REQUEST_ACCEPTED -> `linkedin_connect_message` (10) when the accepted
+    request carried our personalized note, else the bare `linkedin_connect` (2).
+    Reply / InMail-reply events -> `linkedin_reply` (6). Anything else -> None
+    (the webhook ignores it). Deliberately conservative: an unknown-message state
+    scores the LOWER 2, never the higher 10."""
+    et = (event_type or "").strip().upper()
+    if et == "CONNECTION_REQUEST_ACCEPTED":
+        return "linkedin_connect_message" if has_connect_message else "linkedin_connect"
+    if et in _REPLY_EVENTS_HEYREACH:
+        return "linkedin_reply"
+    return None
+
+
 def heyreach_event_to_card(payload: dict) -> dict | None:
     """HeyReach webhook event -> Slack card, or None when not a reply event."""
     etype = _dig(payload, "eventType", "event_type", "type").upper()

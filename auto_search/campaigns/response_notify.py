@@ -149,17 +149,17 @@ def heyreach_connect_message(body: dict) -> str | None:
     return None
 
 
-def heyreach_event_kind(event_type: str, *, has_connect_message: bool) -> str | None:
+def heyreach_event_kind(event_type: str) -> str | None:
     """Map a HeyReach webhook `eventType` to an engagement heat kind. PURE.
 
-    CONNECTION_REQUEST_ACCEPTED -> `linkedin_connect_message` (10) when the accepted
-    request carried our personalized note, else the bare `linkedin_connect` (2).
-    Reply / InMail-reply events -> `linkedin_reply` (6). Anything else -> None
-    (the webhook ignores it). Deliberately conservative: an unknown-message state
-    scores the LOWER 2, never the higher 10."""
+    Every connection request in our campaigns carries a personalized note (all 5
+    live sequences verified 2026-07-18), so an ACCEPTED connect is a warm,
+    intent-bearing signal scored `linkedin_connect_message` (10). Sunny (2026-07-18):
+    only the messaged 10-pt signal — no bare-connect 2-pt tier for now. Reply /
+    InMail-reply events -> `linkedin_reply` (6). Anything else -> None (ignored)."""
     et = (event_type or "").strip().upper()
     if et == "CONNECTION_REQUEST_ACCEPTED":
-        return "linkedin_connect_message" if has_connect_message else "linkedin_connect"
+        return "linkedin_connect_message"
     if et in _REPLY_EVENTS_HEYREACH:
         return "linkedin_reply"
     return None

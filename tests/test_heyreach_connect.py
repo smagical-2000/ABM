@@ -22,36 +22,23 @@ _app = importlib.import_module("auto_search.api.app")
 # ── pure: kind mapping ───────────────────────────────────────────────────
 
 
-def test_connect_with_note_is_10():
-    assert rn.heyreach_event_kind("CONNECTION_REQUEST_ACCEPTED",
-                                  has_connect_message=True) == "linkedin_connect_message"
+def test_connect_accept_is_10():
+    # Sunny 2026-07-18: every accept is a messaged connect -> 10, no bare-2 tier.
+    assert rn.heyreach_event_kind("CONNECTION_REQUEST_ACCEPTED") == "linkedin_connect_message"
     assert scoring.points_for("linkedin_connect_message") == 10
 
 
-def test_bare_connect_is_2():
-    assert rn.heyreach_event_kind("CONNECTION_REQUEST_ACCEPTED",
-                                  has_connect_message=False) == "linkedin_connect"
-    assert scoring.points_for("linkedin_connect") == 2
-
-
-def test_reply_events_map_regardless_of_note():
+def test_reply_events_map():
     for et in ("MESSAGE_REPLY_RECEIVED", "EVERY_MESSAGE_REPLY_RECEIVED",
                "INMAIL_REPLY_RECEIVED"):
-        assert rn.heyreach_event_kind(et, has_connect_message=True) == "linkedin_reply"
-        assert rn.heyreach_event_kind(et, has_connect_message=False) == "linkedin_reply"
+        assert rn.heyreach_event_kind(et) == "linkedin_reply"
+    assert scoring.points_for("linkedin_reply") == 6
 
 
 def test_case_insensitive_and_unknown_ignored():
-    assert rn.heyreach_event_kind("connection_request_accepted",
-                                  has_connect_message=True) == "linkedin_connect_message"
-    assert rn.heyreach_event_kind("SEEN_BY_LEAD", has_connect_message=True) is None
-    assert rn.heyreach_event_kind("", has_connect_message=True) is None
-
-
-def test_unknown_message_state_scores_the_lower_2_never_10():
-    # conservative default: absent/unknown note must never mint the higher score
-    assert rn.heyreach_event_kind("CONNECTION_REQUEST_ACCEPTED",
-                                  has_connect_message=False) == "linkedin_connect"
+    assert rn.heyreach_event_kind("connection_request_accepted") == "linkedin_connect_message"
+    assert rn.heyreach_event_kind("SEEN_BY_LEAD") is None
+    assert rn.heyreach_event_kind("") is None
 
 
 # ── pure: payload note extraction ────────────────────────────────────────
@@ -89,7 +76,6 @@ def client(tmp_path, monkeypatch):
     repo = JsonFileRepository(tmp_path / "s.json")
     repo.replace_abm_targets([{"name": "Acme Health", "domain": "acme.com"}])  # cross target
     eng = EngagementJsonRepository(tmp_path / "eng.json")
-    eng.set_setting("heyreach_message_campaigns", '["509139"]')                # allowlist
     monkeypatch.setattr(_app, "get_repository", lambda: repo)
     monkeypatch.setattr(_app, "get_scoring_repository", lambda: ScoringJsonRepository(tmp_path / "sc.json"))
     monkeypatch.setattr(_app, "get_engagement_repository", lambda: eng)
@@ -107,34 +93,26 @@ def _connect_events(client):
     return [e for e in ev if str(e.get("kind")).startswith("linkedin_connect")]
 
 
-def test_webhook_note_in_payload_scores_10(client):
+def test_webhook_connect_accept_scores_10_with_note_audit(client):
     r = _post(client, {"eventType": "CONNECTION_REQUEST_ACCEPTED",
                        "lead": {"profileUrl": "https://linkedin.com/in/jane",
                                 "companyName": "Acme Health"},
                        "connectionMessage": "Hi Jane, would love to connect!",
-                       "campaignId": "999"})   # not on allowlist, but payload has the note
+                       "campaignId": "509139"})
     assert r.json().get("kind") == "linkedin_connect_message"
     ce = _connect_events(client)
     assert ce and ce[0]["kind"] == "linkedin_connect_message" and ce[0]["points"] == 10
     assert "connectNote" in ce[0]["raw"]         # audit trail stored
 
 
-def test_webhook_allowlisted_campaign_scores_10_without_payload_note(client):
+def test_webhook_connect_accept_scores_10_without_payload_note(client):
+    # no note echoed in the payload -> still 10 (our connects always carry a note)
     r = _post(client, {"eventType": "CONNECTION_REQUEST_ACCEPTED",
                        "lead": {"profileUrl": "https://linkedin.com/in/joe",
                                 "companyName": "Acme Health"},
-                       "campaignId": "509139"})   # on allowlist
+                       "campaignId": "111"})
     assert r.json().get("kind") == "linkedin_connect_message"
     assert _connect_events(client)[0]["points"] == 10
-
-
-def test_webhook_bare_connect_unknown_campaign_scores_2(client):
-    r = _post(client, {"eventType": "CONNECTION_REQUEST_ACCEPTED",
-                       "lead": {"profileUrl": "https://linkedin.com/in/sam",
-                                "companyName": "Acme Health"},
-                       "campaignId": "111"})   # not on allowlist, no note -> bare accept
-    assert r.json().get("kind") == "linkedin_connect"
-    assert _connect_events(client)[0]["points"] == 2
 
 
 def test_webhook_reply_still_scores_6(client):

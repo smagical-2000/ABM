@@ -2148,20 +2148,11 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=503, detail="engagement store not available")
         body = await _json_body(request)
         event_type = str(body.get("eventType") or body.get("event_type") or "").upper()
-        # A CONNECTION_REQUEST_ACCEPTED where the request carried our personalized
-        # note scores 10 (linkedin_connect_message), a bare accept 2 (MAR2). "Had a
-        # note" = HeyReach echoed it in the payload OR the campaign is on the
-        # messaged-campaign allowlist (setting `heyreach_message_campaigns`, seeded
-        # from the live sequences — all our campaigns send a note today).
-        import json as _json
-        try:
-            msg_campaigns = {str(c) for c in
-                             _json.loads(erepo.get_setting("heyreach_message_campaigns") or "[]")}
-        except (ValueError, TypeError):
-            msg_campaigns = set()
+        # Every connection request in our campaigns carries a personalized note, so
+        # an ACCEPTED connect scores 10 (linkedin_connect_message). We still capture
+        # the note text (when HeyReach echoes it) for the audit trail.
         connect_note = campaigns_responses.heyreach_connect_message(body)
-        has_note = bool(connect_note) or str(body.get("campaignId") or "") in msg_campaigns
-        kind = campaigns_responses.heyreach_event_kind(event_type, has_connect_message=has_note)
+        kind = campaigns_responses.heyreach_event_kind(event_type)
         if not kind:
             return {"ok": True, "ignored": event_type or "unknown"}
         lead = body.get("lead") or {}

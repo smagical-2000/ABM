@@ -424,6 +424,52 @@ function TimelineRow({ g }){
   );
 }
 
+// ── TIER JOURNEY (Sunny 2026-07-18): when the account crossed Some/Warm/Hot and
+//    how many points to the next tier. Crossing dates come from the SAME touches
+//    the score sums (cumulative points in occurred_at order), so the dates always
+//    agree with the math the board shows.
+const TIER_STEPS=[['Some',6],['Warm',12],['Hot',21]];
+function tierCrossings(events){
+  const evs=[...(events||[])].filter(e=>(e.pts||0)>0).sort((a,b)=>(a.ts||'').localeCompare(b.ts||''));
+  let run=0; const hit={};
+  evs.forEach(e=>{ run+=(e.pts||0)*(e.count||1);
+    TIER_STEPS.forEach(([t,n])=>{ if(!hit[t]&&run>=n) hit[t]=e.ts||''; }); });
+  return hit;
+}
+function TierJourney({ events, score }){
+  const hit=tierCrossings(events);
+  const next=TIER_STEPS.find(([,n])=>score<n);
+  const fmt=ts=>ts?new Date(ts).toLocaleDateString('en-US',{month:'short',day:'numeric'}):null;
+  const floor=score>=21?21:score>=12?12:score>=6?6:0;
+  const pct=next?Math.max(6,Math.min(100,Math.round(((score-floor)/(next[1]-floor))*100))):100;
+  return (
+    <div style={{borderRadius:12,border:'1px solid #f4f4f5',padding:'14px 18px',marginTop:14}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+        <div style={TX.label}>Tier journey</div>
+        <span style={{fontSize:12,fontWeight:600,color:next?HEAT[next[0]].fg:HEAT.Hot.fg}}>
+          {next?`${next[1]-score} pts to ${next[0]}`:'Top tier'}
+        </span>
+      </div>
+      <div style={{display:'flex',alignItems:'center'}}>
+        {TIER_STEPS.map(([t,n],i)=>{ const done=score>=n, d=fmt(hit[t]);
+          return (
+            <React.Fragment key={t}>
+              {i>0&&<div style={{flex:1,height:2,background:done?HEAT[t].solid:'#f4f4f5',opacity:done?.45:1,margin:'0 6px',borderRadius:999}}/>}
+              <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:3,minWidth:64}}>
+                <span style={{width:10,height:10,borderRadius:'50%',background:done?HEAT[t].solid:'#e4e4e7',boxShadow:done?`0 0 0 3px ${HEAT[t].soft}`:'none'}}/>
+                <span style={{fontSize:11.5,fontWeight:600,color:done?HEAT[t].fg:'#a1a1aa'}}>{t} · {n}</span>
+                <span style={{...TX.meta,fontSize:10.5}}>{done?(d?`hit ${d}`:'hit —'):`needs ${n}`}</span>
+              </div>
+            </React.Fragment>
+          ); })}
+      </div>
+      {next&&<div style={{marginTop:10,height:4,borderRadius:999,background:'#f4f4f5',overflow:'hidden'}}>
+        <div style={{height:'100%',width:pct+'%',background:HEAT[next[0]].solid,opacity:.6,borderRadius:999}}/>
+      </div>}
+    </div>
+  );
+}
+
 function DetailDrawer({ account:a, detail, accounts, onClose, onActivate }){
   if(!a) return null;
   const tier=tierOf(a.score), hc=HEAT[tier];
@@ -467,6 +513,8 @@ function DetailDrawer({ account:a, detail, accounts, onClose, onActivate }){
             <Sparkline series={a.series} color={col} w={392} h={64}/>
             <div style={{display:'flex',justifyContent:'space-between',marginTop:6,...TX.meta}}><span>8 weeks ago</span><span>this week</span></div>
           </div>
+
+          <TierJourney events={d.events} score={a.score}/>
 
           <div style={{...TX.label,marginTop:22,marginBottom:10}}>Score breakdown</div>
           <div style={{borderRadius:12,border:'1px solid #f4f4f5',overflow:'hidden'}}>

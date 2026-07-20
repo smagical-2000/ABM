@@ -103,7 +103,7 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
               mirror_client=None, max_reactions: int = 50,
               max_contacts: int | None = None,
               max_leads: int | None = None, dry_run: bool = True,
-              allow_empty_store: bool = False,
+              allow_empty_store: bool = False, enrich: bool = True,
               now: str | None = None) -> dict:
     """Run the pipeline. Returns {dry_run, stats, results}. Never raises per-contact —
     one failure is counted and skipped so the batch always completes. `max_leads` stops
@@ -176,24 +176,29 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
             stats["no_company"] += 1
             continue
 
-        # ABM match is a FLAG, not a gate (2026-07-08, Sunny): every reactor is
-        # captured; the match only decides Reply.io enrollment, heat scoring,
-        # and the Slack lead card. Non-ABM leads land in Airtable tagged "No".
-        m = index.match(company=company, domain=domain)
-        abm_match = bool(m and "abm" in m.lists)
-
         first, last = _split_name(enr.get("full_name") or r.get("name"))
         display = enr.get("full_name") or r.get("name")
         if not (first or last):                              # no usable name — don't create junk
             stats["no_name"] += 1
             continue
 
-        ap = await apollo.match_contact(
-            linkedin_url=enriched_url, first_name=first, last_name=last, domain=domain) or {}
+        # `enrich=False` = heat-only pass (backfills): skip ALL paid lookups
+        # (Apollo + the phone waterfall below) — crossing/heat still run.
+        ap = ({} if not enrich else
+              (await apollo.match_contact(linkedin_url=enriched_url, first_name=first,
+                                          last_name=last, domain=domain) or {}))
         email = ap.get("email")
         phone = ap.get("phone")
         title = ap.get("title") or enr.get("job_title") or r.get("position")
 
+        # ABM match is a FLAG, not a gate (2026-07-08, Sunny): every reactor is
+        # captured; the match only decides Reply.io enrollment, heat scoring,
+        # and the Slack lead card. It runs ONCE, post-enrichment (2026-07-20,
+        # the Morkous miss), so the corporate email domain Apollo just found
+        # always participates — a name variant ("Nationwide Children's" vs list
+        # "Nationwide Childrens") can't bin an ABM person as non-ABM.
+        m = index.match(company=company, domain=domain, email=email)
+        abm_match = bool(m and "abm" in m.lists)
         company = company or (m.name if m else None) or domain
         campaign_id = la.campaign_for(r["category"])
         # Phone via the cost-ordered WATERFALL (Apollo -> Salesforce -> FullEnrich,
@@ -203,7 +208,7 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
         # healthcare reactor gets a phone too. (SFDC tier runs in the reconcile
         # backfill leg, where sales-entered numbers live; the live scan captures
         # brand-new reactors who aren't in SFDC yet, so it uses Apollo->FullEnrich.)
-        if not dry_run:
+        if not dry_run and enrich:
             phone, phone_src, fe_attempted = await phone_waterfall.resolve_phone(
                 first_name=first, last_name=last, email=email, domain=domain,
                 company=company, linkedin=enriched_url, apollo_phone=phone,
@@ -217,11 +222,13 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
                 stats["fullenrich_lookups"] += 1
             elif not phone and fullenrich_used >= fullenrich_cap:
                 stats["fullenrich_capped"] += 1
-        if not (email or phone):
+        if not (email or phone) and enrich:
             stats["no_email_or_phone"] += 1     # nothing to reach them by — not a lead
             # Persist the contact anyway (no lead, no heat): it's the durable
             # dedup key, so this dead-end isn't re-billed through Apollo +
             # FullEnrich every 15 minutes. Clay waterfall re-attempts later.
+            # (`enrich=False` heat-only passes skip this gate: no lookups ran,
+            # so a missing email/phone is expected — crossing/heat still run.)
             if not dry_run:
                 contact_rows.append(_contact_row(r, enr, email, domain, company, title))
             continue

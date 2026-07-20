@@ -47,6 +47,26 @@ ZERO_POINT_KINDS = frozenset({"delivered", "open", "bounce"})
 # engagement_schema.sql hardcodes the same literal — keep them in sync.)
 DEPRECATED_KINDS = frozenset({"sales_accepted_opportunity"})
 
+# ── click cap (Sunny 2026-07-20, AGT-1453) ───────────────────────────────────
+# Corporate email-security scanners auto-click every link in an email (216
+# clicks in 4 days, 80+ inside a 7-minute burst), so raw click volume is
+# bot-dominated and uncapped clicks silently inflate accounts to fake Hot.
+# Rule: click-kind events contribute AT MOST `CLICK_CAP` points per account —
+# a 37-click storm scores exactly like 3 real clicks. Events stay stored in
+# full (audit trail + rates); the cap applies wherever heat is AGGREGATED. The
+# engaged_accounts SQL view, the JSON rollup, scores_before, the audit
+# recompute, and the drawer's tier-journey strip must stay in lockstep with
+# `capped_score` (the SQL twin lives in engagement_schema.sql).
+CLICK_KINDS = frozenset({"click", "outbound_click", "email_click"})
+CLICK_CAP = 3
+
+
+def capped_score(total: int, click_points: int) -> int:
+    """Account heat with the click cap applied: click points beyond CLICK_CAP
+    are subtracted from the raw sum. PURE."""
+    return int(total) - max(int(click_points) - CLICK_CAP, 0)
+
+
 # Heat tier thresholds (inclusive lower bound), highest first.
 _TIERS: tuple[tuple[int, str], ...] = ((21, "Hot"), (12, "Warm"), (6, "Some"), (0, "Lower"))
 

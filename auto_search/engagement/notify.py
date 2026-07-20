@@ -43,7 +43,7 @@ _KIND = {
 def build_card(account: dict, events: list[dict], *, dms: list[dict] | None = None,
                research: dict | None = None, app_url: str | None = None,
                sdr: str | None = None, ae: str | None = None, dm_limit: int = 5,
-               test: bool = False) -> dict:
+               test: bool = False, reason: str | None = None) -> dict:
     """Build the Slack message (Block Kit) for an activated account. PURE.
 
     `dms` are the enriched decision-makers (name/title/email/phone) — the sales
@@ -61,7 +61,12 @@ def build_card(account: dict, events: list[dict], *, dms: list[dict] | None = No
 
     bits = []
     if ae:   # lead line — the AE call to action, tagged when a Slack id is known
-        bits.append(f"{ae} your account *{name}* — move to status {tier}")
+        # A Hot-reactivation (Galyna 2026-07-05) is NOT a tier move — the account
+        # was already Hot and has fresh activity. Say that, or the card reads
+        # like a duplicate "move to Hot" (Sunny 2026-07-20).
+        action = ("Hot again — new activity since the last handoff"
+                  if reason == "hot_activity" else f"move to status {tier}")
+        bits.append(f"{ae} your account *{name}* — {action}")
     bits.append(f"*Heat:* {score} pts ({tier})")
     breakdown = _breakdown(events)
     if breakdown:
@@ -125,12 +130,13 @@ def activate_account(account: dict, events: list[dict], *, dms: list[dict] | Non
                      research: dict | None = None, app_url: str | None = None,
                      sdr: str | None = None, ae: str | None = None, dm_limit: int = 5,
                      test: bool = False, webhook: str | None = None,
+                     reason: str | None = None,
                      http: httpx.Client | None = None) -> bool:
     """Build + post the activation card (with enriched decision-makers + intel brief).
     Returns True if Slack accepted it."""
     return post_card(build_card(account, events, dms=dms, research=research,
                                 app_url=app_url, sdr=sdr, ae=ae, dm_limit=dm_limit,
-                                test=test),
+                                test=test, reason=reason),
                      webhook=webhook, http=http)
 
 

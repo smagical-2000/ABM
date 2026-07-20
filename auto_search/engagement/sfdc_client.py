@@ -113,7 +113,13 @@ class SalesforceClient:
             "Website, Title, LeadSource, Status, Rating, MQL__c, Seats_Requested__c, "
             "In_Healthcare__c, Primary_Purpose__c, Employee_Range__c, IsConverted, "
             "CreatedDate FROM Lead "
-            f"WHERE LeadSource IN ({sources}) AND CreatedDate >= {since}T00:00:00Z "
+            # COMPOUND BOFU (2026-07-20): marketing writes campaign-prefixed
+            # sources like 'CS Headspace | BOFU' — Griffen's High-Intent
+            # dashboard counts them, so the exact IN-list silently dropped every
+            # compound-BOFU inbound (Trevor/FCS, Wendy/Optum). The LIKE arm
+            # keeps us aligned with the dashboard definition.
+            f"WHERE (LeadSource IN ({sources}) OR LeadSource LIKE '%| BOFU') "
+            f"AND CreatedDate >= {since}T00:00:00Z "
             "ORDER BY CreatedDate DESC")
 
     def iter_tradeshow_leads(self, *, since: str = SINCE_DEFAULT) -> Iterator[dict]:
@@ -137,7 +143,13 @@ class SalesforceClient:
         yield from self.query(
             "SELECT Id, FirstName, LastName, Company, Email, BN_Email_Domain__c, "
             "Website, Title, LeadSource, Status, CreatedDate FROM Lead "
-            "WHERE LeadSource LIKE '%| TOFU' "
+            # 'TOFU Engagement Campaign' (2026-07-20): the Airtable automation's
+            # label for OUR OWN LinkedIn-capture echoes pushed into SFDC. Pulled
+            # here so a capture the runner missed still scores; the sync then
+            # suppresses true echoes via sfdc.filter_tofu_echoes so nobody we
+            # already scored at capture time counts twice.
+            "WHERE (LeadSource LIKE '%| TOFU' "
+            "OR LeadSource = 'TOFU Engagement Campaign') "
             f"AND CreatedDate >= {since}T00:00:00Z ORDER BY CreatedDate DESC")
 
     # iter_sales_accepted_opportunities was removed in the 2026-06 review — SAO is

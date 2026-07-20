@@ -153,7 +153,14 @@ CREATE TABLE IF NOT EXISTS engagement_settings (
 CREATE OR REPLACE VIEW engaged_accounts AS
 WITH e AS (
     SELECT account_id,
-           SUM(points)                                   AS score,
+           -- Heat with the CLICK CAP (Sunny 2026-07-20, AGT-1453): click-kind
+           -- points count at most 3 per account so a link-scanner burst can't
+           -- inflate a tier. Keep kinds + cap in lockstep with CLICK_KINDS /
+           -- CLICK_CAP / capped_score() in engagement/scoring.py.
+           SUM(points)
+             - GREATEST(COALESCE(SUM(points) FILTER (
+                   WHERE kind IN ('click', 'outbound_click', 'email_click')), 0) - 3, 0)
+                                                         AS score,
            COUNT(*) FILTER (WHERE kind IN ('click', 'outbound_click'))          AS clicks,
            COUNT(*) FILTER (WHERE kind IN ('reply', 'outbound_reply'))          AS replies,
            COUNT(*) FILTER (WHERE kind IN ('meeting_booked', 'outbound_meeting_booked')) AS meetings,

@@ -449,6 +449,15 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001
         logger.exception("engagement init failed")
         app.state.engagement_repo = None
+    # I6 fleet anchor: record the API's own build beat at boot — stale_writers
+    # judges every cron against THIS beat, so only a writer that runs old code
+    # AFTER the new API came up can flag. Best-effort; never blocks startup.
+    if app.state.engagement_repo is not None:
+        try:
+            from auto_search.ops.heartbeat import beat
+            beat("api", repo=app.state.engagement_repo)
+        except Exception:  # noqa: BLE001
+            logger.exception("api heartbeat failed (continuing)")
     app.state.engagement_running = False           # one sync at a time
     # Campaign automation store (Phase 3). Additive + isolated — never block startup.
     try:
@@ -1073,7 +1082,13 @@ def create_app() -> FastAPI:
         opening a drawer doesn't recompute the whole board."""
         allc = dedupe_contacts(contacts)                 # all recipients, for rate math
         engaged = engaging_contacts(contacts, events)    # only people who actually engaged
-        score = sum(e.get("points") or 0 for e in events)
+        # Click cap (AGT-1453): the drawer (and the manual /activate packet built
+        # from it) must serve the same capped heat as the board/baseline/audit —
+        # an uncapped sum here let a scanner storm inflate the sales-facing score.
+        total = sum(e.get("points") or 0 for e in events)
+        click_pts = sum(e.get("points") or 0 for e in events
+                        if e.get("kind") in engagement_scoring.CLICK_KINDS)
+        score = engagement_scoring.capped_score(total, click_pts)
         delivered = sum(c.get("delivered") or 0 for c in allc)
         opened = sum(c.get("opened") or 0 for c in allc)
         replied = sum(c.get("replied") or 0 for c in allc)
@@ -1127,6 +1142,15 @@ def create_app() -> FastAPI:
         if not repo:
             raise HTTPException(status_code=503, detail="engagement store not available")
         return _heal_identities()
+
+    @app.get("/api/engagement/due")
+    def engagement_due():
+        """The evaluator, productized (2026-07-20): the ONE place that computes
+        which accounts are due for activation. Read-only — identical to
+        notify-changes?dry_run=true. Hand-built send lists are banned; review
+        this, then push via notify-changes or a surgical activate.
+        MUST register before the /{account_id} catch-all (MAR2-32 route trap)."""
+        return engagement_notify_changes(dry_run=True)
 
     @app.get("/api/engagement/{account_id}")
     def get_engagement_account(account_id: str):
@@ -1405,9 +1429,10 @@ def create_app() -> FastAPI:
                     kind="notify-burst", severity="failure", service="engagement-preview",
                     title=title,
                     detail=f"{why}ZERO cards were sent. Held: {names}"
-                           f"{'…' if len(due) > 5 else ''}. Inspect with "
-                           "notify-changes?dry_run=true; override with "
-                           "allow_burst=true only after review.")
+                           f"{'…' if len(due) > 5 else ''}.",
+                    runbook="Inspect with notify-changes?dry_run=true (or GET "
+                            "/api/engagement/due); send with allow_burst=true "
+                            "only after a human reviews the list.")
             return {"due": len(due), "posted": 0, "held": True, "sane_max": sane_max,
                     "ceiling_source": ceiling_src, "stage": "held",
                     "dry_run": False, "detail": []}
@@ -1426,6 +1451,12 @@ def create_app() -> FastAPI:
                      else engagement_notify.resolve_sdr(a, ids=ids_override))
             entry = {"account": a.get("name"), "from": d["prev"], "to": tier,
                      "reason": d.get("reason"),
+                     # Identify + quantify each due row (2026-07-20): hand-built
+                     # send lists drifted twice from name-string lookups — the
+                     # dry-run detail is THE evaluator output, so it must carry
+                     # the account_id and numbers reviewers act on.
+                     "account_id": a.get("account_id"),
+                     "score": a.get("score"), "last_touch": d.get("touch"),
                      "role": "AE" if is_ae else "SDR", "owner": owner,
                      "channel": ("test-preview" if staged else
                                  (("AE" if is_ae else "SDR") + " channel") if live
@@ -1438,7 +1469,7 @@ def create_app() -> FastAPI:
                 events = repo.events_for_account(a["account_id"])
                 ok = engagement_notify.activate_account(a, events, ae=owner, app_url=app_url,
                                                         webhook=webhook, dm_limit=0,
-                                                        test=staged)
+                                                        test=staged, reason=d.get("reason"))
                 entry["posted"] = bool(ok)
                 if ok:
                     if staged:
@@ -3537,7 +3568,9 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health():
-        return {"ok": True}
+        # BUILD_STAMP lets ship.sh verify fleet build parity after a deploy —
+        # Railway "SUCCESS" alone is not proof the new code is serving.
+        return {"ok": True, "build": os.getenv("BUILD_STAMP", "unset")}
 
     # ── static UI (mounted last so /api/* wins) ────────────────────────
     if _WEB_DIR.is_dir():

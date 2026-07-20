@@ -108,17 +108,34 @@ def _report(failed: dict[str, str], recovered: list[str]) -> None:
         logging.getLogger(__name__).exception("run_daily reporting failed")
 
 
+def _heartbeat(service: str) -> None:
+    """I6 fleet-parity heartbeat (shared impl in ops/heartbeat.py): a stale
+    container betrays itself on its FIRST run, by name — not 10 days later via
+    a twin it minted (the 2026-07-10→20 stale tofu-cron)."""
+    from auto_search.ops.heartbeat import beat
+    beat(service)
+
+
 def main() -> int:
     # Deploy verification: Railway "SUCCESS" is not proof this code is running —
     # the stamp printed here must match the .build-stamp shipped with the deploy.
     import os
     print(f"[run_daily] rev {os.getenv('RAILWAY_GIT_COMMIT_SHA', '?')[:9]} "
           f"build {os.getenv('BUILD_STAMP', '?')}", flush=True)
+    _heartbeat("discovery-cron")
     legs = (("discovery", "run_discovery.py", "--days", "1", "--no-limit"),
             ("social", "run_social.py", "--since-hours", "24", "--max-enrich", "100"),
             ("sfdc", "run_engagement_sfdc.py", "--since", "2026-01-01"),
+            # Reply.io was never a daily leg — its heat froze whenever nobody ran
+            # it by hand (last manual sync 2026-07-14; found 2026-07-20).
+            ("replyio", "run_engagement_replyio.py"),
             ("podcast", "run_engagement_podcast.py"),
-            ("competitor", "run_competitor_news.py"))
+            ("competitor", "run_competitor_news.py"),
+            # Reconcile: diff the last 14 days of SFDC leads/meetings against the
+            # engagement store and ALERT on anything we silently missed — label
+            # drift ('CS Headspace | BOFU', 'TOFU Engagement Campaign') gets
+            # caught in 24h instead of weeks.
+            ("reconcile", "run_reconcile_sfdc.py"))
     failed: dict[str, str] = {}
     recovered: list[str] = []
     for name, script, *args in legs:
@@ -142,6 +159,13 @@ def main() -> int:
             print(f"\n[run_daily] tracking reconcile rc={tracking_rc} (non-fatal)", flush=True)
     else:
         print("\n[run_daily] tracking reconcile skipped (mirror env unset)", flush=True)
+
+    # Daily digest LAST — one card summarizing what ingested / scored / is due /
+    # was held and why, so silence stops being ambiguous (a missing digest is
+    # itself the alarm). Best-effort like notify.
+    digest_rc, _, _ = _leg("digest", "run_digest.py")
+    if digest_rc:
+        print(f"\n[run_daily] digest rc={digest_rc} (non-fatal)", flush=True)
 
     _report(failed, recovered)
     if failed:

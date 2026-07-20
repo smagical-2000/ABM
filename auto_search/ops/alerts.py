@@ -36,33 +36,46 @@ _SEVERITY_HEAD = {"failure": "ALERT", "warning": "WARNING", "recovered": "RECOVE
 
 
 def build_alert_card(*, kind: str, title: str, detail: str = "", service: str = "",
-                     build: str = "", severity: str = "failure",
-                     now: datetime | None = None) -> dict:
+                     build: str = "", severity: str = "failure", qa: bool = False,
+                     runbook: str = "", now: datetime | None = None) -> dict:
     """Pure: one ops event -> a Slack Block Kit payload. `kind` is the stable
-    incident key (e.g. 'daily-cron'); `detail` (error tail) renders as code."""
+    incident key (e.g. 'daily-cron'); `detail` (error tail) renders as code.
+    `qa=True` prefixes [QA] so a stress-test alert can never read as a real
+    incident (the 2026-07-18 'ceiling 0' scare); `runbook` renders as a
+    what-to-do line so the reader acts instead of guessing."""
     head = _SEVERITY_HEAD.get(severity, "ALERT")
+    if qa:
+        head = f"QA · {head}"
     ts = (now or datetime.now(UTC)).strftime("%b %d, %H:%M UTC")
     sections: list[dict] = [
         {"type": "header", "text": {"type": "plain_text", "text": f"[{head}] {title}"[:150]}}]
     if detail:
         sections.append({"type": "section", "text": {
             "type": "mrkdwn", "text": f"```{detail[-1500:]}```"}})
+    if runbook:
+        sections.append({"type": "section", "text": {
+            "type": "mrkdwn", "text": f"*→ What to do:* {runbook[:600]}"}})
     ctx = " · ".join(x for x in (kind, service, f"build {build}" if build else "", ts) if x)
     sections.append({"type": "context", "elements": [{"type": "mrkdwn", "text": ctx}]})
     return {"blocks": sections}
 
 
 def post_ops_alert(*, kind: str, title: str, detail: str = "", service: str = "",
-                   severity: str = "failure", webhook: str | None = None) -> bool:
+                   severity: str = "failure", qa: bool | None = None,
+                   runbook: str = "", webhook: str | None = None) -> bool:
     """Post one alert. True on a 2xx. No webhook configured -> log + False;
-    never raises (the job being reported on must not die reporting)."""
+    never raises (the job being reported on must not die reporting).
+    `qa=None` auto-detects from ALERTS_QA_MODE=1 (set it in stress-test envs)."""
     hook = (webhook or os.getenv("SLACK_OPS_ALERTS_WEBHOOK")
             or os.getenv("SLACK_ENGAGEMENT_WEBHOOK"))
     if not hook:
         logger.warning("ops alert (no webhook configured, not posted): [%s] %s", kind, title)
         return False
+    if qa is None:
+        qa = (os.getenv("ALERTS_QA_MODE") or "").strip() in ("1", "true", "True")
     card = build_alert_card(kind=kind, title=title, detail=detail, service=service,
-                            build=os.getenv("BUILD_STAMP", ""), severity=severity)
+                            build=os.getenv("BUILD_STAMP", ""), severity=severity,
+                            qa=qa, runbook=runbook)
     try:
         r = httpx.post(hook, json=card, timeout=15)
         r.raise_for_status()

@@ -429,10 +429,16 @@ function TimelineRow({ g }){
 //    the score sums (cumulative points in occurred_at order), so the dates always
 //    agree with the math the board shows.
 const TIER_STEPS=[['Some',6],['Warm',12],['Hot',21]];
+// Click cap (AGT-1453): click-kind points count at most 3 per account — keep in
+// lockstep with CLICK_KINDS / CLICK_CAP in engagement/scoring.py, or the journey
+// strip would show crossings the capped board score never reached.
+const CLICK_KINDS=['click','outbound_click','email_click'];
 function tierCrossings(events){
   const evs=[...(events||[])].filter(e=>(e.pts||0)>0).sort((a,b)=>(a.ts||'').localeCompare(b.ts||''));
-  let run=0; const hit={};
-  evs.forEach(e=>{ run+=(e.pts||0)*(e.count||1);
+  let run=0, clk=0; const hit={};
+  evs.forEach(e=>{ let pts=(e.pts||0)*(e.count||1);
+    if(CLICK_KINDS.includes(e.kind)){ const take=Math.max(0,Math.min(pts,3-clk)); clk+=pts; pts=take; }
+    run+=pts;
     TIER_STEPS.forEach(([t,n])=>{ if(!hit[t]&&run>=n) hit[t]=e.ts||''; }); });
   return hit;
 }

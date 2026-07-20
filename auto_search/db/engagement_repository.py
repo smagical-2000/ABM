@@ -32,7 +32,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
-from auto_search.engagement.scoring import DEPRECATED_KINDS
+from auto_search.engagement.scoring import (
+    CLICK_CAP,
+    CLICK_KINDS,
+    DEPRECATED_KINDS,
+    capped_score,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +101,16 @@ class EngagementRepository(Protocol):
 
     def recent_events(self, *, limit: int = 200) -> list[dict]:
         """Most recent meaningful touches across all accounts (the Inbox feed)."""
+        ...
+
+    def contact_emails_for_source(self, source: str) -> set[str]:
+        """Every non-empty contact email stored under `source` — the capture
+        ledger the SFDC echo filter checks (narrow read; never a full-row scan)."""
+        ...
+
+    def external_ids_for_source(self, source: str) -> set[str]:
+        """Every event external_id stored under `source` — the existing-ids set
+        the reconcile tripwire diffs against (narrow read; never a full-row scan)."""
         ...
 
     def claim_activation(self, account_id: str, *, at: str | None = None) -> bool:
@@ -376,10 +391,12 @@ class EngagementJsonRepository:
                 continue
             if (e.get("points") or 0) > 0:
                 scored_exts.setdefault(aid, set()).add(e.get("contact_ext"))
-            slot = ev.setdefault(aid, {"score": 0, "clicks": 0, "replies": 0,
-                                       "meetings": 0, "last_touch": None})
+            slot = ev.setdefault(aid, {"score": 0, "click_pts": 0, "clicks": 0,
+                                       "replies": 0, "meetings": 0, "last_touch": None})
             slot["score"] += int(e.get("points") or 0)
             kind = e.get("kind")
+            if kind in CLICK_KINDS:
+                slot["click_pts"] += int(e.get("points") or 0)
             if kind in ("click", "outbound_click"):
                 slot["clicks"] += 1
             elif kind in ("reply", "outbound_reply"):
@@ -412,6 +429,8 @@ class EngagementJsonRepository:
                 if key not in ks:
                     ks.add(key)
                     slot["contacts"] += 1
+        for slot in ev.values():   # click cap (AGT-1453) — lockstep w/ the SQL view
+            slot["score"] = capped_score(slot["score"], slot.pop("click_pts", 0))
         rows = [_engaged_row(aid, ev.get(aid, {}), cc.get(aid, {}))
                 for aid in (set(ev) | set(cc))]
         rows.sort(key=lambda r: (r["score"], r.get("last_touch") or ""), reverse=True)
@@ -426,12 +445,17 @@ class EngagementJsonRepository:
 
     def scores_before(self, cutoff: str) -> dict[str, int]:
         out: dict[str, int] = {}
+        clicks: dict[str, int] = {}
         for e in self._store["events"].values():
             aid = e.get("account_id")
             oc = e.get("occurred_at") or ""
             if aid and oc and oc[:10] < cutoff[:10] and e.get("kind") not in DEPRECATED_KINDS:
-                out[aid] = out.get(aid, 0) + int(e.get("points") or 0)
-        return out
+                pts = int(e.get("points") or 0)
+                out[aid] = out.get(aid, 0) + pts
+                if e.get("kind") in CLICK_KINDS:
+                    clicks[aid] = clicks.get(aid, 0) + pts
+        # Click cap (AGT-1453) — the baseline must use the same math as the board.
+        return {aid: capped_score(s, clicks.get(aid, 0)) for aid, s in out.items()}
 
     def account_weekly_series(self, *, weeks: int = 8) -> dict[str, list[int]]:
         rows = [(e.get("account_id"), e.get("occurred_at"), e.get("points"))
@@ -453,6 +477,14 @@ class EngagementJsonRepository:
                        if e.get("kind") not in DEPRECATED_KINDS),
                       key=lambda e: e.get("occurred_at") or "", reverse=True)
         return rows[:limit]
+
+    def contact_emails_for_source(self, source) -> set:
+        return {c["email"] for c in self._store["contacts"].values()
+                if c.get("source") == source and c.get("email")}
+
+    def external_ids_for_source(self, source) -> set:
+        return {e["external_id"] for e in self._store["events"].values()
+                if e.get("source") == source and e.get("external_id")}
 
     def claim_activation(self, account_id, *, at=None) -> bool:
         acts = self._store.setdefault("activations", {})
@@ -677,9 +709,16 @@ class EngagementPostgresRepository:
         return [_norm(dict(r)) for r in rows]
 
     def scores_before(self, cutoff: str) -> dict[str, int]:
+        # Click cap (AGT-1453): the IN-list + cap come from the canonical
+        # scoring constants, so a scoring.py change can never silently diverge
+        # from this SQL twin. Safe interpolation: internal frozenset + int only.
+        click_in = ",".join(f"'{k}'" for k in sorted(CLICK_KINDS))
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT account_id, SUM(points) AS s FROM engagement_events "
+                "SELECT account_id, SUM(points) "
+                "  - GREATEST(COALESCE(SUM(points) FILTER (WHERE kind IN "
+                f"    ({click_in})), 0) - {CLICK_CAP}, 0) AS s "
+                "FROM engagement_events "
                 "WHERE account_id IS NOT NULL AND kind <> 'sales_accepted_opportunity' "
                 "AND occurred_at::date < %s::date GROUP BY account_id", (cutoff[:10],)
             ).fetchall()
@@ -724,6 +763,27 @@ class EngagementPostgresRepository:
                 (limit,),
             ).fetchall()
         return [_norm(dict(r)) for r in rows]
+
+    def contact_emails_for_source(self, source) -> set:
+        # Narrow read (uses the (source, external_id) PK prefix) — the echo
+        # filter needs only the email column, never the full contact rows.
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT email FROM engagement_contacts "
+                "WHERE source = %s AND email IS NOT NULL AND email <> ''",
+                (source,),
+            ).fetchall()
+        return {r["email"] for r in rows}
+
+    def external_ids_for_source(self, source) -> set:
+        # Same narrow shape over events — the reconcile diff needs only ids,
+        # not a 250k-row recent_events scan.
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT external_id FROM engagement_events WHERE source = %s",
+                (source,),
+            ).fetchall()
+        return {r["external_id"] for r in rows}
 
     def claim_activation(self, account_id, *, at=None) -> bool:
         # Atomic claim: INSERT … ON CONFLICT DO NOTHING returns the row only when it

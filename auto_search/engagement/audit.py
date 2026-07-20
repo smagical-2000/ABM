@@ -19,8 +19,10 @@ violations — a standing red light nobody can clear trains people to ignore it.
 from __future__ import annotations
 
 import json
+import os
 
 from auto_search.engagement import identity, notify, scoring
+from auto_search.ops import heartbeat
 
 # recent_events() is the one full-scan primitive both repos share; cap it so a
 # pathological store can't stall the notifier. At the cap, I3 is skipped (never
@@ -54,11 +56,17 @@ def run_invariants(engagement_repo, scoring_repo, discovery_repo, *,
             drift[kind] = drift.get(kind, 0) + 1
         aid = e.get("account_id")
         if aid:
-            slot = calc.setdefault(aid, {"score": 0, "touch": None})
+            slot = calc.setdefault(aid, {"score": 0, "click_pts": 0, "touch": None})
             slot["score"] += pts
+            if kind in scoring.CLICK_KINDS:
+                slot["click_pts"] += pts
             occ = _ts(e.get("occurred_at"))
             if pts > 0 and occ and (slot["touch"] is None or occ > slot["touch"]):
                 slot["touch"] = occ
+    # The board serves click-CAPPED heat (AGT-1453) — the independent recompute
+    # must apply the same cap, or I3 would flag every clicked account as drift.
+    for slot in calc.values():
+        slot["score"] = scoring.capped_score(slot["score"], slot.pop("click_pts", 0))
     if drift:
         violations.append({"code": "I2-points",
                            "detail": f"stored points != canonical matrix: {drift}"})
@@ -82,6 +90,23 @@ def run_invariants(engagement_repo, scoring_repo, discovery_repo, *,
                                      f"self-heal (last heal: {heal_at or 'never'}) — a "
                                      "writer without the heal (stale container?) touched "
                                      "the store"})
+
+    # I6 — fleet build parity (2026-07-20): every cron heartbeats its
+    # BUILD_STAMP on run start, and the API heartbeats its own at boot. Any
+    # writer that beat AFTER the API's beat on a DIFFERENT build is a stale
+    # container caught on its first run, by name — not 10 days later via the
+    # twins it mints (linkedin-tofu-cron, 2026-07-10→20). Anchoring on the
+    # API's own beat (not a 24h window) means a routine deploy's lingering
+    # pre-deploy beats can't false-red healthy crons. Skipped when either side
+    # has no stamp (local/dev) or the API has never beaten (no anchor).
+    own_stamp = (os.getenv("BUILD_STAMP") or "").strip()
+    if own_stamp and own_stamp != "unset" and hasattr(engagement_repo, "get_setting"):
+        stale = heartbeat.stale_writers(heartbeat.read_stamps(engagement_repo), own_stamp)
+        if stale:
+            violations.append({"code": "I6-fleet",
+                               "detail": f"writers on a different build than the API "
+                                         f"({own_stamp}): {stale} — redeploy them "
+                                         "(scripts/ship.sh deploys the whole fleet)"})
 
     board = rows
     if board is None:

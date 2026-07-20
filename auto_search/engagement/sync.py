@@ -20,6 +20,7 @@ from auto_search.engagement import podcast as podcast_mod
 from auto_search.engagement import sfdc as sfdc_mod
 from auto_search.engagement.cross import build_index
 from auto_search.engagement.replyio_client import ReplyioClient
+from auto_search.normalize import normalize_company_name
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +185,58 @@ def run_podcast_url_sync(*, engagement_repo, scoring_repo, discovery_repo, url: 
                             discovery_repo=discovery_repo, rows=rows, now=now)
 
 
+def collect_sfdc_rows(client, engagement_repo, *, since: str, now: str
+                      ) -> tuple[list, list, dict]:
+    """Fetch + parse + echo-filter the four SFDC lead/meeting signals. The ONE
+    pipeline both the daily sync and the reconcile tripwire run — a filter that
+    lives in only one of them is exactly how label drift went unseen for weeks.
+    Returns (contact_rows, event_rows, counts) with counts keyed
+    high_intent/tradeshow/low_intent/meetings (raw record counts, pre-filter)."""
+    hi_leads = list(client.iter_high_intent_leads(since=since))
+    ts_leads = list(client.iter_tradeshow_leads(since=since))
+    lo_leads = list(client.iter_low_intent_leads(since=since))
+    # Booked meetings (Event Type=Meeting) replace the old SAO signal per the
+    # 2026-06 review: capture an actual booked meeting, not the SAO opp stage.
+    # Opportunities are deliberately NOT pulled (parse([], opps=[]) below).
+    try:
+        _since_d = datetime.fromisoformat(since).date()
+        meeting_days = max(1, (datetime.now(UTC).date() - _since_d).days + 1)
+    except ValueError:
+        meeting_days = 180
+    meetings = list(client.iter_meetings(days=meeting_days))
+
+    c1, e1 = sfdc_mod.parse_leads(hi_leads, kind="high_intent_lead",
+                                  channel="form", campaign_field="LeadSource", now=now)
+    c2, e2 = sfdc_mod.parse_leads(ts_leads, kind="tradeshow", channel="event",
+                                  campaign_field="Tradeshow__c", now=now)
+    c3, e3 = sfdc_mod.parse_leads(lo_leads, kind="low_intent_lead",
+                                  channel="content", campaign_field="LeadSource", now=now)
+    # Echo suppression (2026-07-20): 'TOFU Engagement Campaign' leads are our
+    # own Airtable automation pushing LinkedIn captures into SFDC — anyone
+    # already scored at capture must not score twice, and dupe leads for one
+    # person collapse to the oldest (stable external_id). The person key
+    # (name+company, from the raw leads) is what collapses the SAME human
+    # re-created under a second email (the Pamela case).
+    captured = engagement_repo.contact_emails_for_source("linkedin_ads")
+    person_keys: dict[str, str] = {}
+    for ld in lo_leads:
+        lid = str(ld.get("Id") or "").strip()
+        name = f"{ld.get('FirstName') or ''} {ld.get('LastName') or ''}".strip()
+        if lid and name:
+            person_keys[lid] = normalize_company_name(
+                f"{name} {ld.get('Company') or ''}")
+    c3, e3 = sfdc_mod.filter_tofu_echoes(c3, e3, captured_emails=captured,
+                                         person_key_by_lid=person_keys)
+    # meeting_booked only — opportunities intentionally empty (not captured for now).
+    c4, e4 = sfdc_mod.parse(meetings, [], now=now)
+    # leads key by Lead id, meetings by account key — distinct namespaces, no
+    # collision; both cross to the same accounts and roll up per account×kind.
+    contacts_by_id = {c["external_id"]: c for c in (c1 + c2 + c3 + c4)}
+    counts = {"high_intent": len(hi_leads), "tradeshow": len(ts_leads),
+              "low_intent": len(lo_leads), "meetings": len(meetings)}
+    return list(contacts_by_id.values()), e1 + e2 + e3 + e4, counts
+
+
 def run_sfdc_sync(*, engagement_repo, scoring_repo, discovery_repo, client=None,
                   since: str = "2026-01-01", now: str | None = None) -> dict:
     """Pull Salesforce (read-only) LEAD engagement -> cross -> store. Idempotent;
@@ -205,43 +258,18 @@ def run_sfdc_sync(*, engagement_repo, scoring_repo, discovery_repo, client=None,
     now = now or datetime.now(UTC).isoformat()
     engagement_repo.set_sync_state(SFDC_SOURCE, status="running")
     try:
-        hi_leads = list(client.iter_high_intent_leads(since=since))
-        ts_leads = list(client.iter_tradeshow_leads(since=since))
-        lo_leads = list(client.iter_low_intent_leads(since=since))
-        # Booked meetings (Event Type=Meeting) replace the old SAO signal per the
-        # 2026-06 review: capture an actual booked meeting, not the SAO opp stage.
-        # Opportunities are deliberately NOT pulled (parse([], opps=[]) below).
-        try:
-            _since_d = datetime.fromisoformat(since).date()
-            meeting_days = max(1, (datetime.now(UTC).date() - _since_d).days + 1)
-        except ValueError:
-            meeting_days = 180
-        meetings = list(client.iter_meetings(days=meeting_days))
+        contact_rows, event_rows, counts = collect_sfdc_rows(
+            client, engagement_repo, since=since, now=now)
         # ELT raw landing: keep what we transform from, for replay/audit.
-        engagement_repo.land_raw(
-            "sfdc_leads", {"high_intent": len(hi_leads), "tradeshow": len(ts_leads),
-                           "low_intent": len(lo_leads), "meetings": len(meetings)},
-            source=SFDC_SOURCE)
-
-        c1, e1 = sfdc_mod.parse_leads(hi_leads, kind="high_intent_lead",
-                                      channel="form", campaign_field="LeadSource", now=now)
-        c2, e2 = sfdc_mod.parse_leads(ts_leads, kind="tradeshow", channel="event",
-                                      campaign_field="Tradeshow__c", now=now)
-        c3, e3 = sfdc_mod.parse_leads(lo_leads, kind="low_intent_lead",
-                                      channel="content", campaign_field="LeadSource", now=now)
-        # meeting_booked only — opportunities intentionally empty (not captured for now).
-        c4, e4 = sfdc_mod.parse(meetings, [], now=now)
-        # leads key by Lead id, meetings by account key — distinct namespaces, no
-        # collision; both cross to the same accounts and roll up per account×kind.
-        contacts_by_id = {c["external_id"]: c for c in (c1 + c2 + c3 + c4)}
-        contact_rows, event_rows = list(contacts_by_id.values()), e1 + e2 + e3 + e4
+        engagement_repo.land_raw("sfdc_leads", counts, source=SFDC_SOURCE)
         matched, new_events = cross_and_persist(
             engagement_repo=engagement_repo, scoring_repo=scoring_repo,
             discovery_repo=discovery_repo, contact_rows=contact_rows,
             event_rows=event_rows, persist_unmatched=False)
         stats = {
-            "high_intent_leads": len(hi_leads), "tradeshow_leads": len(ts_leads),
-            "low_intent_leads": len(lo_leads), "meetings": len(meetings),
+            "high_intent_leads": counts["high_intent"],
+            "tradeshow_leads": counts["tradeshow"],
+            "low_intent_leads": counts["low_intent"], "meetings": counts["meetings"],
             "contacts": len(contact_rows), "events": len(event_rows),
             "new_events": new_events, "matched_contacts": matched,
             "unresolved_contacts": len(contact_rows) - matched,

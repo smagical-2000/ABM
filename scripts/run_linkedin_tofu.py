@@ -135,6 +135,9 @@ def main() -> int:
     # (A stale Docker layer cache once served old code under a SUCCESS deploy.)
     print(f"[run_linkedin_tofu] rev {os.getenv('RAILWAY_GIT_COMMIT_SHA', 'unknown')[:9]} "
           f"build {os.getenv('BUILD_STAMP', 'unset')}", flush=True)
+    # I6 fleet-parity heartbeat: a stale container names itself on first run.
+    from auto_search.ops.heartbeat import beat
+    beat("linkedin-tofu-cron")
 
     # The kill switch: a live run does nothing until the env flag is explicitly on.
     if not args.dry_run and os.getenv("LINKEDIN_TOFU_CRON_ENABLED") != "1":

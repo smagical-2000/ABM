@@ -42,14 +42,13 @@ function TabButton({ active, onClick, label, count, accent }) {
 // ── Header nav switch — NAV_TABS is the single source of truth ──────────────
 // The nav buttons, the ?view= deep-link whitelist, and the page render switch
 // all key off this list: add/remove a tab in ONE place.
-// 'campaigns' is intentionally absent (hidden 2026-07-14, Sunny) — the code
-// stays in the repo; re-enable by restoring its entry + script include.
 const NAV_TABS = [
   { key: 'discovery',  label: 'Discovery' },
   { key: 'scored',     label: 'Scored' },
   { key: 'news',       label: 'News' },
   { key: 'watch',      label: 'Watch list' },
   { key: 'engagement', label: 'Engagement' },
+  { key: 'campaigns',  label: 'Campaigns' },
   { key: 'outreach',   label: 'Outreach' },
 ];
 const NAV_KEYS = NAV_TABS.map((t) => t.key);
@@ -1028,6 +1027,8 @@ function App() {
         <WatchView pushToast={pushToast} />
       ) : view === 'engagement' ? (
         <EngagementView pushToast={pushToast} />
+      ) : view === 'campaigns' ? (
+        <CampaignsView pushToast={pushToast} />
       ) : view === 'outreach' ? (
         <OutreachPage />
       ) : (

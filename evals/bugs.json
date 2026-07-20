@@ -332,6 +332,60 @@
    "root_cause": "error=str(exc) loses exception identity for timeout classes; 60s client timeout too small for 9k-contact roster pagination.",
    "guard": "error falls back to type(exc).__name__ (sync.py, all three sources); client timeout 180s",
    "lesson": "Never persist str(exc) alone - always include the exception type."
+  },
+  {
+   "id": "click-scanner-inflation",
+   "date": "2026-07-20",
+   "area": "engagement heat aggregation (scoring.py, engaged_accounts view, scores_before, audit recompute, drawer, UI journey strip)",
+   "symptom": "Email-security scanners auto-click every link (216 clicks in 4 days, 80+ in a 7-minute burst); uncapped 1-pt clicks pushed ~30 accounts over tier lines (BHG/TeleMed2U Lower->Hot) and the circuit breaker held 37 due.",
+   "root_cause": "Raw click volume is bot-dominated, but heat summed every stored click point with no per-account ceiling, so a scanner storm read as real engagement everywhere heat was aggregated.",
+   "guard": "tests/test_ship_batch.py::test_capped_score_math + ::test_json_repo_board_and_baseline_apply_cap + ::test_audit_recompute_matches_capped_board + ::test_drawer_account_score_applies_click_cap",
+   "lesson": "CLICK_CAP=3 (scoring.capped_score) must be applied at EVERY read path that aggregates heat \u2014 SQL view, JSON rollup, scores_before baseline, audit recompute, the drawer's _engaged_one, the UI journey strip. A cap applied at N-1 of N surfaces just moves the lie to the last one."
+  },
+  {
+   "id": "compound-bofu-invisible",
+   "date": "2026-07-20",
+   "area": "auto_search/engagement/sfdc_client.py (high-intent lead SOQL)",
+   "symptom": "High-intent inbound leads whose LeadSource was a compound label ('CS Headspace | BOFU' \u2014 Trevor/FCS, Wendy/Optum) never reached the engagement store for weeks; Griffen's dashboard counted them, our board didn't.",
+   "root_cause": "The high-intent filter matched LeadSource 'BOFU' exactly; SFDC's labels drifted to '<campaign> | BOFU' compounds and the equality arm silently excluded them.",
+   "guard": "tests/test_ship_batch.py::test_high_intent_catches_compound_bofu",
+   "lesson": "Align label filters to the org's own dashboard definition (add the LIKE '%| BOFU' arm) and treat every SFDC label as drift-prone \u2014 the daily reconcile leg exists because labels and filters move independently."
+  },
+  {
+   "id": "tofu-echo-label-drift",
+   "date": "2026-07-20",
+   "area": "sfdc_client low-intent SOQL + auto_search/engagement/sfdc.py filter_tofu_echoes",
+   "symptom": "The Airtable automation stamps LeadSource 'TOFU Engagement Campaign' (not '| TOFU'), so every echoed LinkedIn capture was invisible to the SFDC sync \u2014 and naively adding the label would have double-counted already-captured people (Crystal) and duped one person's multiple leads (Pamela x2).",
+   "root_cause": "Our own capture pipeline writes leads back into SFDC under a label the sync didn't know; ingesting that echo raw re-scores people who already earned linkedin_tofu heat at capture time, and re-created leads (second email from enrichment) mint duplicate signals for one human.",
+   "guard": "tests/test_ship_batch.py::test_low_intent_includes_tofu_echo_label + ::test_tofu_echo_suppressed_and_dupes_collapse + ::test_tofu_echo_person_key_collapses_multi_email_dupes",
+   "lesson": "When a source echoes YOUR OWN writes back at you, ingest it only through an echo filter: capture suppression + per-PERSON collapse (name+company key, not just email \u2014 one human can arrive under two addresses). A new label gets added with its feedback loop mapped, not just its SOQL arm."
+  },
+  {
+   "id": "non-intro-meeting-heat",
+   "date": "2026-07-20",
+   "area": "auto_search/engagement/sfdc.py parse() meetings loop",
+   "symptom": "Every SFDC Type=Meeting scored 10 \u2014 a 'Technical Demo' made Commonwealth a false Hot rise.",
+   "root_cause": "The booked-meeting heat signal is defined as a NEW introductory meeting (Griffen's definition, ratified by Sunny 2026-07-20), but the parser counted demos, follow-ups and internal syncs \u2014 pipeline motion, not a new-meeting signal.",
+   "guard": "tests/test_ship_batch.py::test_meetings_intro_only",
+   "lesson": "Encode the business definition of a signal (subject carries 'Intro'), not the CRM's record type \u2014 Type=Meeting is a container, not an intent signal."
+  },
+  {
+   "id": "stale-container-fleet-drift",
+   "date": "2026-07-20",
+   "area": "multi-service Railway fleet (linkedin-tofu-cron) x shared Postgres deploys",
+   "symptom": "linkedin-tofu-cron ran a July-10 build for 10 days while web services were redeployed repeatedly: it minted abm_ twins, dropped a heat event, and re-redded the audit every 15 minutes.",
+   "root_cause": "Deploys were per-service with no build-parity check, so one cron silently kept writing the shared store with 10-day-old code that predated the safeguards it was bypassing.",
+   "guard": "tests/test_ship_batch.py::test_stale_writer_after_api_beat_is_flagged (heartbeat.stale_writers, the logic audit I6 runs) + scripts/ship.sh single-path fleet deploy with stamp verification",
+   "lesson": "Every writer heartbeats its BUILD_STAMP on run start and the audit anchors on the API's own boot beat \u2014 a writer that beats AFTER the new API on a different build is stale by definition (no wall-clock window to false-red a routine deploy) \u2014 and there is exactly ONE way to deploy the fleet."
+  },
+  {
+   "id": "hand-built-send-list-drift",
+   "date": "2026-07-20",
+   "area": "engagement notify (chat-side send lists vs the notify-changes evaluator)",
+   "symptom": "Hand-built send lists keyed by name strings missed ledger entries twice: Centene/Summa/CAO were proposed for activation although already baselined Hot (ledger key variants).",
+   "root_cause": "The due-for-activation computation lived only inside POST /notify-changes; humans (and chat agents) re-derived it by eyeballing the board with their own keys, which drift from company_key/_ledger_lookup.",
+   "guard": "tests/test_ship_batch.py::test_due_endpoint_matches_notify_changes_dry_run",
+   "lesson": "Productize the evaluator: GET /api/engagement/due IS notify-changes?dry_run=true, every consumer (digest, chat review, human) reads that one endpoint, and docs/RULES.md bans hand-built lists."
   }
  ]
 }

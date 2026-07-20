@@ -81,6 +81,47 @@ def parse_leads(leads: list[dict], *, kind: str = "high_intent_lead",
     return contact_rows, event_rows
 
 
+TOFU_ECHO_SOURCE = "TOFU Engagement Campaign"
+
+
+def filter_tofu_echoes(contact_rows: list[dict], event_rows: list[dict], *,
+                       captured_emails: set[str],
+                       person_key_by_lid: dict[str, str] | None = None
+                       ) -> tuple[list[dict], list[dict]]:
+    """Drop SFDC low-intent rows that are ECHOES of our own LinkedIn capture. PURE.
+
+    'TOFU Engagement Campaign' leads are created by the Airtable automation from
+    people the LinkedIn runner already captured — anyone in `captured_emails`
+    already got linkedin_tofu heat at capture time and must not score twice.
+    The automation also re-creates a lead when enrichment lands a second email
+    (Pamela Mixon, 2026-07-20: two SFDC leads, two emails, one human) — echo
+    leads collapse per PERSON to the OLDEST lead, so the canonical external_id
+    is stable across re-pulls. `person_key_by_lid` (Lead id -> lowercased
+    name+company key, built by the caller from the raw leads) is what lets the
+    two-email Pamela case collapse; a lid without a person key falls back to
+    its email, so plain same-email dupes still collapse when the map is absent.
+    Non-echo rows pass through untouched."""
+    emails = {c.get("external_id"): (c.get("email") or "").strip().lower()
+              for c in contact_rows}
+    captured = {(e or "").strip().lower() for e in captured_emails if e}
+    keys = person_key_by_lid or {}
+    drop: set[str] = set()
+    seen: set[str] = set()
+    echoes = [ev for ev in event_rows if (ev.get("campaign") or "") == TOFU_ECHO_SOURCE]
+    for ev in sorted(echoes, key=lambda ev: ev.get("occurred_at") or ""):
+        lid = ev.get("contact_ext")
+        em = emails.get(lid, "")
+        pk = keys.get(lid) or em       # person key when known, else the email
+        if em and em in captured:      # already scored at capture time
+            drop.add(lid)
+        elif pk and pk in seen:        # duplicate SFDC lead for one person
+            drop.add(lid)
+        elif pk:
+            seen.add(pk)
+    return ([c for c in contact_rows if c.get("external_id") not in drop],
+            [ev for ev in event_rows if ev.get("contact_ext") not in drop])
+
+
 def parse(meetings: list[dict], opportunities: list[dict], *, now: str | None = None
           ) -> tuple[list[dict], list[dict]]:
     """Map SFDC meeting + opportunity records to (contact_rows, event_rows).
@@ -95,6 +136,13 @@ def parse(meetings: list[dict], opportunities: list[dict], *, now: str | None = 
     for m in meetings:
         key, company, domain = _account_identity(m, name_from_subject=True)
         if not key:
+            continue
+        # INTRO-ONLY (Griffen's definition, ratified by Sunny 2026-07-20): a
+        # booked-meeting signal is a NEW introductory meeting — subject carries
+        # "Intro"/"Introduction"/"Introductory". Demos, follow-ups, and internal
+        # syncs are pipeline motion, not a new-meeting signal (the CCA
+        # "Technical Demo" false Hot, 2026-07-20).
+        if "intro" not in (m.get("Subject") or "").lower():
             continue
         acc = _slot(accounts, key, company, domain)
         # A booked meeting can be SCHEDULED in the future; its StartDateTime would then be

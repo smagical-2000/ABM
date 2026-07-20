@@ -58,7 +58,9 @@ def client(tmp_path, monkeypatch):
 
 class TestReads:
     def test_health(self, client):
-        assert client.get("/api/health").json() == {"ok": True}
+        body = client.get("/api/health").json()
+        assert body["ok"] is True
+        assert "build" in body          # ship.sh fleet-parity check reads this
 
     def test_stats(self, client):
         s = client.get("/api/stats").json()

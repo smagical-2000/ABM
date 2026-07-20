@@ -1,0 +1,28 @@
+# Discovery cron image.
+#
+# This is for the SECOND Railway service ("discovery-cron"), NOT the web app.
+# It carries Playwright + Chromium because the layoffs (WarnTracker) connector
+# needs a real browser — the web image (nixpacks.toml) deliberately omits it to
+# stay small. There is no HTTP port: Railway runs the CMD once per cron tick
+# (set the schedule + env on the service), and it exits.
+#
+# Railway setup: create a service from this repo, set "Dockerfile Path" =
+# Dockerfile.cron, set the Cron Schedule (e.g. 0 14 * * * = 10:00 ET), and the
+# env (DATABASE_URL, ANTHROPIC_API_KEY, APIFY_API_KEY, ANTHROPIC_MODEL, plus the
+# optional DISCOVERY_* knobs). See docs/DEPLOY_RAILWAY.md.
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt \
+    && python -m playwright install --with-deps chromium
+
+COPY . .
+
+ENV PYTHONUNBUFFERED=1
+
+# One full 24h pull across every source, no artificial cap. The schedule lives
+# in the Railway service settings, not here.
+CMD ["python", "scripts/run_discovery.py", "--days", "1", "--no-limit"]

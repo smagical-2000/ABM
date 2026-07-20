@@ -1,0 +1,166 @@
+"""Contact enrichment for export — decision-makers + verified work email & mobile.
+
+Two steps, both user-triggered (never auto — this spends credits):
+  1. Apollo finds the decision-makers at the account's domain (reuses
+     scoring/apollo.py, whose ICP titles + credit cap are already tuned). Apollo
+     reveal flags stay OFF, so it returns name + title + LinkedIn only.
+  2. FullEnrich resolves each one's verified work email + mobile phone — an async
+     bulk job (submit -> poll the enrichment_id until FINISHED).
+
+A dedicated phone-number API can slot in front of FullEnrich later (the user's
+phone → Apollo → FullEnrich waterfall); for now Apollo + FullEnrich cover it.
+
+Degrades gracefully: no FullEnrich key, or a timeout/error, returns the Apollo
+decision-makers with email/phone = None rather than failing the request.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+
+import httpx
+
+from auto_search.scoring import apollo
+
+logger = logging.getLogger(__name__)
+
+_FE_BASE = "https://app.fullenrich.com/api/v2"
+# FullEnrich waterfalls multiple providers per contact — a 6-person bulk commonly
+# takes 60-120s. We poll up to ~2.5min (activation is a deliberate, awaited action).
+_POLL_TIMEOUT = 150.0
+_POLL_INTERVAL = 5.0
+_DONE = {"FINISHED", "CANCELED", "CREDITS_INSUFFICIENT", "UNKNOWN"}
+
+
+def _key() -> str | None:
+    return os.getenv("FULLENRICH_API_KEY")
+
+
+async def enrich_account(domain: str | None, *, company: str | None = None,
+                         http: httpx.AsyncClient | None = None) -> list[dict]:
+    """Decision-makers for `domain` with verified work email + mobile, as
+    [{name, title, linkedin, email, phone}]. COSTS CREDITS — call only on a user
+    action. Returns [] if there's no domain / no decision-makers."""
+    dms = await apollo.decision_makers(domain)
+    if not dms:
+        return []
+    key = _key()
+    if not key:
+        return [{**d, "email": None, "phone": None} for d in dms]
+    try:
+        return await _fullenrich(dms, domain, company, key, http)
+    except Exception:  # noqa: BLE001 — enrichment must never break the request
+        logger.exception("FullEnrich enrichment failed for %s", domain)
+        return [{**d, "email": None, "phone": None} for d in dms]
+
+
+async def enrich_contact(*, first_name: str | None, last_name: str | None,
+                         domain: str | None = None, company: str | None = None,
+                         linkedin: str | None = None,
+                         http: httpx.AsyncClient | None = None) -> dict:
+    """Resolve ONE known contact's verified mobile + work email via FullEnrich.
+    Returns {"email": ..., "phone": ...} (None if no key / not found / error). For the
+    TOFU lead flow, where we already have the person and only need the phone Apollo
+    missed. COSTS one credit — call only when needed (no Apollo phone) on a real run."""
+    key = _key()
+    if not key:
+        return {"email": None, "phone": None}
+    name = f"{(first_name or '').strip()} {(last_name or '').strip()}".strip()
+    dm = {"name": name, "linkedin": linkedin or ""}
+    try:
+        merged = await _fullenrich([dm], domain, company, key, http)
+    except Exception:  # noqa: BLE001 — enrichment must never break the lead flow
+        logger.exception("FullEnrich contact enrich failed for %s", name)
+        return {"email": None, "phone": None}
+    r = (merged or [{}])[0]
+    return {"email": r.get("email"), "phone": r.get("phone")}
+
+
+async def _fullenrich(dms: list[dict], domain: str | None, company: str | None,
+                      key: str, http: httpx.AsyncClient | None) -> list[dict]:
+    payload = {
+        "name": f"ABM enrich {domain or ''}".strip(),
+        "data": [{
+            "first_name": _first(d.get("name")), "last_name": _last(d.get("name")),
+            "domain": domain or "", "company_name": company or "",
+            "linkedin_url": d.get("linkedin") or "",
+            "enrich_fields": ["contact.work_emails", "contact.phones"],
+            "custom": {"ref": str(i)},   # correlation key so results map to the right person
+        } for i, d in enumerate(dms)],
+    }
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    own = http is None
+    client = http or httpx.AsyncClient(timeout=30.0)
+    try:
+        r = await client.post(f"{_FE_BASE}/contact/enrich/bulk", json=payload, headers=headers)
+        r.raise_for_status()
+        eid = (r.json() or {}).get("enrichment_id")
+        if not eid:
+            return [{**d, "email": None, "phone": None} for d in dms]
+        data = await _poll(client, eid, headers)
+        merged = _merge(dms, data)
+        logger.info("fullenrich %s: %d/%d contacts resolved", eid,
+                    sum(1 for p in merged if p.get("email") or p.get("phone")), len(merged))
+        return merged
+    finally:
+        if own:
+            await client.aclose()
+
+
+async def _poll(client: httpx.AsyncClient, eid: str, headers: dict) -> list[dict]:
+    waited = 0.0
+    url = f"{_FE_BASE}/contact/enrich/bulk/{eid}"
+    while waited < _POLL_TIMEOUT:
+        r = await client.get(url, headers=headers)
+        if r.status_code == 200:
+            body = r.json() or {}
+            if (body.get("status") or "").upper() in _DONE:
+                return body.get("data") or []
+        await asyncio.sleep(_POLL_INTERVAL)
+        waited += _POLL_INTERVAL
+    # timed out still IN_PROGRESS — return the latest snapshot we can fetch
+    r = await client.get(url, headers=headers)
+    return (r.json() or {}).get("data") or [] if r.status_code == 200 else []
+
+
+def _merge(dms: list[dict], data: list[dict]) -> list[dict]:
+    """Map FullEnrich results back to the right decision-maker. Prefer the `custom.ref`
+    we stamped on submission (robust if FullEnrich reorders/drops rows); fall back to
+    positional. Tolerant of null/partial entries — one bad row never voids the rest."""
+    by_ref = {}
+    for e in data:
+        if isinstance(e, dict):
+            ref = (e.get("custom") or {}).get("ref")
+            if ref is not None:
+                by_ref[str(ref)] = e
+    use_ref = bool(by_ref)   # refs echoed → match strictly; else fall back to position
+    out = []
+    for i, d in enumerate(dms):
+        if use_ref:
+            e = by_ref.get(str(i)) or {}
+        else:
+            e = data[i] if i < len(data) and isinstance(data[i], dict) else {}
+        ci = e.get("contact_info") or {}
+        out.append({**d, "email": _pick(ci, "most_probable_work_email", "work_emails", "email"),
+                    "phone": _pick(ci, "most_probable_phone", "phones", "number")})
+    return out
+
+
+def _pick(ci: dict, best_key: str, list_key: str, field: str) -> str | None:
+    """Most-probable value, else the first from the list — null/shape-safe."""
+    best = (ci.get(best_key) or {}).get(field)
+    if best:
+        return best
+    lst = ci.get(list_key) or []
+    return lst[0].get(field) if lst and isinstance(lst[0], dict) else None
+
+
+def _first(name: str | None) -> str:
+    return (name or "").strip().split(" ", 1)[0] if name else ""
+
+
+def _last(name: str | None) -> str:
+    parts = (name or "").strip().split(" ", 1)
+    return parts[1] if len(parts) > 1 else ""

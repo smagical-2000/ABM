@@ -1,0 +1,189 @@
+# ABM Account Scoring Prompt — Health Systems
+
+Research **{{COMPANY_NAME}}** and score as an ABM target on a **27-point scale** across 6 dimensions. ICP modeled on Beacon Health System. Prioritize $2B and under. Small is good.
+
+Use only publicly available information. If data is missing, infer logically and label as *Likely* or *Unknown*.
+
+---
+
+## 1. Net Patient Revenue (10 pts)
+
+| Range | Pts |
+| --- | --- |
+| $1.0B–$2.0B | 10 |
+| $500M–$999M | 8 |
+| $200M–$499M | 6 |
+| Under $200M | 4 |
+| $2.01B–$2.5B | 4 |
+| $2.51B–$3.5B | 2 |
+| Over $3.5B | 0 → Auto Tier 4 |
+
+## 2. EMR Compatibility (5 pts)
+
+| System | Pts |
+| --- | --- |
+| Any non-Epic (Cerner, MEDITECH, Allscripts, athena, eCW, NextGen, etc.) | 5 |
+| Unknown / mixed | 3 |
+| Epic | 0 |
+
+## 3. Competitor Landscape (4 pts)
+
+| Scenario | Pts |
+| --- | --- |
+| Uses **Notable** or **AssortHealth** (category buyer — upsell/displace) | 4 |
+| Uses **UiPath**, **Automation Anywhere**, or **Blue Prism** (general automation — displacement) | 3 |
+| Uses **Palantir** or other custom AI (budget signal, no direct overlap) | 2 |
+| No automation/AI vendors found | 3 |
+| **ThoughtfulAI** or direct RCM competitor deployed | 0 |
+
+Score on most relevant scenario. Direct competitor takes precedence if multiple vendors present.
+
+## 4. Pain Point Signals (5 pts, +1 each)
+
+- Staffing shortages (press, earnings, heavy RCM hiring)
+- Rising operating costs / negative margins
+- Increase in clinical denials or claim denials
+- Prior auth backlogs or manual workflows
+- Multi-site billing complexity (expansion, M&A, multi-state)
+
+## 5. AI & Tech Readiness (2 pts, +1 each)
+
+- Uses non-competing AI tools OR publishes case studies with Palantir, UiPath, Notable, etc.
+- Has digital transformation initiative, recently hired CDO/VP Innovation, or stated AI strategy
+
+## 6. Leadership Changes (1 pt)
+
+- New CIO, CFO, COO, or CEO in last 12 months = 1 pt
+
+---
+
+## Tiers
+
+| Tier | Score | Action |
+| --- | --- | --- |
+| 1 | 22–27 | Immediate ABM pursuit |
+| 2 | 16–21 | Active targeted outreach |
+| 3 | 10–15 | Monitor for trigger events |
+| 4 | <10 or NPR >$3.5B | Deprioritize |
+
+---
+
+## OUTPUT FORMAT
+
+Produce your response in exactly this markdown structure. Use tables wherever specified. Do not add extra prose sections outside of what is defined below.
+
+**CRITICAL FORMATTING RULE:** Every markdown table cell MUST stay on a single line. Never insert a line break inside `| ... |` boundaries. If you cite a source, keep the citation inline within the same cell on the same line — do not put the cited snippet on its own line. Tables with multi-line cells render as broken rows in Notion.
+
+---
+
+# {{COMPANY_NAME}}
+
+## Fit Scores
+| NPR | EMR | Competitors | Pain Points | AI/Tech | Leadership | **Total** |
+|---|---|---|---|---|---|---|
+| X/10 | X/5 | X/4 | X/5 | X/2 | X/1 | **X/27** |
+
+**Tier [1 / 2 / 3 / 4] — [Immediate ABM Pursuit / Active Targeted Outreach / Monitor / Deprioritize]**
+
+---
+
+## Firmographic Profile
+| | |
+|---|---|
+| **System Type** | [Community hospital / Regional health system / Academic medical center / Critical access] |
+| **Headquarters** | [City, State] |
+| **Founded** | [Year] ([N] years) |
+| **Hospitals / Facilities** | [Number] |
+| **Beds** | [Number] (estimated) |
+| **Employees** | [Range] (estimated) |
+| **Net Patient Revenue** | $[Amount] ([Year]) |
+| **Ownership** | [Non-profit / For-profit / Government / Faith-based] |
+| **States** | [List] |
+| **Market Position** | [One-line description] |
+| **EMR** | [System name or Unknown] |
+
+---
+
+## Technology Profile
+| | |
+|---|---|
+| **EMR System** | [Name, version if known] |
+| **EMR Score** | [X/5 — reason] |
+| **AI/Automation Vendors** | [Names or None identified] |
+| **Competitor Score** | [X/4 — reason] |
+| **Digital Transformation Posture** | [Leading / Active / Early / Unknown] |
+| **AI/Tech Score** | [X/2 — reason] |
+
+---
+
+## Pain Point & Intent Signals
+| Signal | Points |
+|---|---|
+| [Specific signal — staffing, denials, margin pressure, etc.] | +1 |
+| [Specific signal] | +1 |
+| [Specific signal] | +1 |
+| **Pain Points Total** | X/5 |
+
+---
+
+## Decision Makers
+| Role | Contact | Notes |
+|---|---|---|
+| [Primary role ⭐] | [Name or Unknown] | [Context — tenure, background, focus] |
+| [CFO] | [Name or Unknown] | [Context] |
+| [CIO / CMIO] | [Name or Unknown] | [Context] |
+| [VP Revenue Cycle] | [Name or Unknown] | [Context] |
+| [CEO] | [Name or Unknown] | [New in last 12 months? +1 pt if yes] |
+
+---
+
+## Entry Strategy
+
+**TIMING: [HIGH / MODERATE / LOW] – [ONE-LINE RATIONALE IN CAPS]**
+
+**Primary Angles:**
+1. "[Angle 1 — specific to this account]"
+2. "[Angle 2]"
+3. "[Angle 3]"
+4. "[Angle 4]"
+
+**CAUTION:** [Any sensitivities — Epic lock-in, recent acquisition, competitor contract, etc.]
+
+**Deal Size:** $[X]–[X]M annually
+
+---
+
+## RCM Complexity
+| Factor | Complexity |
+|---|---|
+| [e.g. Payer Mix] | [Description] |
+| [e.g. Multi-Site] | [Number of facilities] |
+| [e.g. EMR Integration] | [Description] |
+| [e.g. Prior Auth Volume] | [Description] |
+| [e.g. Denial Rate] | [Known or estimated] |
+
+---
+
+## Recent News & Context
+- **[Topic] ([Year]):** [Specific detail with source]
+- **[Topic] ([Year]):** [Specific detail with source]
+- **[Topic] ([Year]):** [Specific detail with source]
+
+---
+
+## Key Pain Points
+- [Pain point 1 — specific to this system, not generic]
+- [Pain point 2]
+- [Pain point 3]
+- [Pain point 4]
+
+---
+
+## Messaging Angles
+> "[Personalized message 1 — reference a specific signal or pain point from above]"
+
+> "[Personalized message 2]"
+
+> "[Personalized message 3]"
+
+> "[Personalized message 4]"

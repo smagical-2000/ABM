@@ -1,0 +1,175 @@
+You are an ABM analyst.
+
+Evaluate the following company for ABM suitability and score it on a 30-point framework.
+
+**Company:** {{COMPANY_NAME}}
+
+Use only publicly available information. If data is missing, infer logically from size, specialty, and known patterns — but always label inferred items as *Likely* or *Unknown*.
+
+---
+
+## 1. Firmographic Fit (0–10)
+
+Evaluate and score:
+
+- Size of organization
+- Number of locations / providers
+- Annual revenue (estimate if needed)
+- Growth indicators (expansion, hiring, funding)
+- Specialty fit (ortho, behavioral health, payers, ASC)
+
+---
+
+## 2. Technographic Fit (0–10)
+
+Evaluate and score:
+
+- EHR / PM / RCM systems used
+- Tech maturity (cloud vs legacy)
+- Digital adoption level
+- Known workflow inefficiencies or tech gaps
+- Any indicators of upcoming modernization
+
+If unknown → list as "Unknown" and score proportionally.
+
+---
+
+## 3. Business Priorities & Intent Signals (0–10)
+
+Evaluate and score:
+
+- Hiring patterns (rev cycle, operations, IT), Leadership Changes
+- New facilities or expansions
+- Mandates related to efficiency, revenue optimization, margin improvement
+- Press releases about digital transformation, AI, cost reduction, OR throughput, staffing challenges
+- Any signals related to our ICP problems
+- Funding Rounds
+- PE backed — add points
+
+---
+
+## Tiers
+
+- **24–30 = High Fit**
+- **18–23 = Medium Fit**
+- **<18 = Low Fit**
+
+---
+
+## OUTPUT FORMAT
+
+Produce your response in exactly this markdown structure. Use tables wherever specified. Do not add extra prose sections outside of what is defined below.
+
+**CRITICAL FORMATTING RULE:** Every markdown table cell MUST stay on a single line. Never insert a line break inside `| ... |` boundaries. If you cite a source, keep the citation inline within the same cell on the same line — do not put the cited snippet on its own line. Tables with multi-line cells render as broken rows in Notion.
+
+---
+
+# {{COMPANY_NAME}}
+
+## Fit Scores
+| Firmographic | Technographic | Business Intent |
+|---|---|---|
+| X/10 | X/10 | X/10 |
+
+**Overall Score: X/30 — [High Fit / Medium Fit / Low Fit]**
+
+---
+
+## Firmographic Profile
+| | |
+|---|---|
+| **Category** | [Specialty type — e.g. PT/OT Independent, Ortho Group, Behavioral Health] |
+| **Headquarters** | [City, State] |
+| **Founded** | [Year] ([N] years) |
+| **Clinics / Locations** | [Number] |
+| **Employees** | [Range] (estimated) |
+| **Revenue** | $[Range] (estimated) |
+| **Locations** | [List key cities/regions] |
+| **Ownership** | [Independent / PE-backed / health system owned / public] |
+| **Market Position** | [One-line description] |
+| **Key Differentiator** | [What sets them apart clinically or operationally] |
+
+---
+
+## Services
+| | |
+|---|---|
+| **Core** | [Primary service lines] |
+| **Specialties** | [Clinical specializations or certifications] |
+| **Additional** | [Other service lines] |
+| **Industrial / Workers Comp** | [If applicable, else omit row] |
+| **Extended Care** | [SNF/nursing home billing if applicable, else omit row] |
+| **Payer Mix** | [Commercial, Medicare, Medicaid, WC, auto, self-pay — as known] |
+
+---
+
+## Business Intent Signals
+| Signal | Score |
+|---|---|
+| [Specific signal with source or date] | X/10 |
+| [Specific signal with source or date] | X/10 |
+| [Specific signal with source or date] | X/10 |
+| [Specific signal with source or date] | X/10 |
+
+---
+
+## Decision Makers
+| Role | Contact | Notes |
+|---|---|---|
+| [Primary role ⭐] | [Name or Unknown] | [Context — clinic lead, tenure, background] |
+| [Role] | [Name or Unknown] | [Context] |
+| [Role] | [Name or Unknown] | [Context] |
+
+---
+
+## Entry Strategy
+
+**TIMING: [HIGH / MODERATE / LOW] – [ONE-LINE RATIONALE IN CAPS]**
+
+**Primary Angles:**
+1. "[Angle 1 — specific to this account]"
+2. "[Angle 2]"
+3. "[Angle 3]"
+4. "[Angle 4]"
+5. "[Angle 5]"
+
+**CAUTION:** [Any sensitivities — e.g. values independence, recent leadership change, competitor relationship]
+
+**Deal Size:** $[X]–[X]M annually
+
+---
+
+## RCM Complexity
+| Factor | Complexity |
+|---|---|
+| [e.g. Payer Mix] | [Description] |
+| [e.g. Multi-Site] | [Number of locations / notes] |
+| [e.g. Workers Comp] | [Description] |
+| [e.g. EHR System] | [System name or Unknown] |
+| [e.g. State-Specific Rules] | [Description] |
+
+---
+
+## Recent News & Context
+- **[Topic] ([Year]):** [Specific detail with source]
+- **[Topic] ([Year]):** [Specific detail with source]
+- **[Topic] ([Year]):** [Specific detail with source]
+
+---
+
+## Key Pain Points
+- [Pain point 1 — specific to this account, not generic]
+- [Pain point 2]
+- [Pain point 3]
+- [Pain point 4]
+
+---
+
+## Messaging Angles
+> "[Personalized message 1 — reference a specific signal or pain point from above]"
+
+> "[Personalized message 2]"
+
+> "[Personalized message 3]"
+
+> "[Personalized message 4]"

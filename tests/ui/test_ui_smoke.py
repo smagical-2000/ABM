@@ -1,0 +1,698 @@
+"""Browser smoke + interaction tests for the Discovery/Scoring UI (Playwright).
+
+Why this exists: the app compiles JSX in-browser (Babel), so a syntax or wiring
+bug white-screens the page and never shows in pytest. These drive a real headless
+Chromium against a locally-run server (seeded local Postgres, auth disabled) and
+assert the page renders, has no console errors, and the key flows work — the
+discovery signal filter, the scored "Why discovered" panel, Monitored Accounts.
+
+Run explicitly (needs local Postgres + the playwright chromium build):
+    python3 -m pytest tests/ui/test_ui_smoke.py -v
+
+Skipped automatically if Playwright or its browser isn't installed, so it never
+breaks the normal unit run.
+"""
+
+from __future__ import annotations
+
+import os
+import socket
+import subprocess
+import time
+import urllib.request
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("playwright")
+from playwright.sync_api import sync_playwright  # noqa: E402
+
+DB = "postgresql://localhost/abm_discovery"
+
+# Two scored accounts that exercise the "Why discovered" panel: a job-posting
+# lead (Baptist-style) and a social-engagement lead — both with a proof URL.
+_SEED_SQL = """
+INSERT INTO scored_accounts
+  (account_id, source, name, segment, framework, domain, state, max_total, total,
+   tier_band, tier_label, dimensions, recommendation, model, cost_usd,
+   discovery_signals, scored_at, created_at, updated_at)
+VALUES
+ ('ui_demo_job','discovery','UI Demo Health System','health_system','health_system',
+  'uidemo.example','scored',27,23,'high','Tier 1',
+  '[{"key":"npr","label":"Net Patient Revenue","score":10,"max":10,"summary":"$1.5B NPR."}]'::jsonb,
+  'Strong Tier 1 fit.','claude-sonnet-4-5',0.09,
+  '[{"signal_type":"job_posting","summary":"Hiring: Senior Revenue Cycle Supervisor","url":"https://example.com/job/123"}]'::jsonb,
+  now()-interval '3 hours','now','now'),
+ ('ui_demo_social','discovery','UI Demo Clinic','specialty','specialty',
+  'uidemoclinic.example','scored',30,24,'high','High Fit',
+  '[{"key":"intent","label":"Business Intent","score":9,"max":10,"summary":"Engaged."}]'::jsonb,
+  'Prioritize.','claude-sonnet-4-5',0.09,
+  '[{"signal_type":"social_engagement","summary":"Dr. Jane Doe (VP Revenue Cycle) engaged with a Magical post","url":"https://www.linkedin.com/feed/x"}]'::jsonb,
+  now()-interval '1 hours','now','now'),
+ -- Bogus framework key (config skew): opening this MUST NOT white-screen the app.
+ ('ui_demo_badfw','discovery','UI Demo Legacy Co','health_system','legacy_unknown_v9',
+  'uidemolegacy.example','scored',27,20,'medium','Tier 2',
+  '[{"key":"npr","label":"Net Patient Revenue","score":7,"max":10,"summary":"NPR."}]'::jsonb,
+  'Review.','claude-sonnet-4-5',0.09,
+  '[{"signal_type":"leadership_change","summary":"New CFO appointed"}]'::jsonb,
+  now()-interval '2 hours','now','now')
+ON CONFLICT (account_id) DO UPDATE SET
+  discovery_signals=EXCLUDED.discovery_signals, scored_at=EXCLUDED.scored_at,
+  total=EXCLUDED.total, tier_band=EXCLUDED.tier_band, dimensions=EXCLUDED.dimensions;
+
+-- UI Demo Clinic gets a READY warm-intros payload with NO warm paths (all direct),
+-- so the drawer's decluttered "no warm contacts" view is exercised + regressed.
+UPDATE scored_accounts SET warm_intros =
+  '{"state":"ready","source":"apollo","contacts_scraped":true,"warm_count":0,
+    "founders_used":["Harpaul","Rosie","Geoffrey"],
+    "contacts":[
+      {"name":"Jane Roe","title":"VP Revenue Cycle","linkedin_url":"https://www.linkedin.com/in/jane-roe","location":"Cincinnati, Ohio","schools":["Xavier University"],"paths":[]},
+      {"name":"John Doe","title":"Chief Financial Officer","linkedin_url":"https://www.linkedin.com/in/john-doe","location":"Cincinnati, Ohio","schools":[],"paths":[]}
+    ]}'::jsonb
+WHERE account_id='ui_demo_social';
+
+-- UI Demo Health System gets a WARM path (warm_count 1) so the Scored board's
+-- "N warm" badge + the drawer's warm linkage are exercised + regressed.
+UPDATE scored_accounts SET warm_intros =
+  '{"state":"ready","source":"apollo","contacts_scraped":false,"warm_count":1,
+    "founders_used":["Harpaul","Rosie","Geoffrey"],
+    "contacts":[{"name":"Warm Exec","title":"VP Revenue Cycle","linkedin_url":"https://www.linkedin.com/in/warm-exec","location":"Dallas, Texas","schools":[],"paths":[{"kind":"shared_employer","founder":"Harpaul","evidence":"Both at Olive — overlapping 2019-2021","strength":80}],"warmth":80}]}'::jsonb
+WHERE account_id='ui_demo_job';
+
+-- Discovery: a STACKED company (2 open RCM roles) → exercises the
+-- "🔥 N RCM roles open" headline pill on the row + drawer.
+INSERT INTO discovery_companies
+  (normalized_name, display_name, domain, icp_status, segment, confidence,
+   reasoning, hq_state, qualified_at, first_seen_at)
+VALUES
+  ('uistackhealth','UI Stack Health System','uistack.example','qualified',
+   'health_system',0.92,'Stacked revenue-cycle build-out.','TX',
+   now()-interval '2 hours', now()-interval '2 hours')
+ON CONFLICT (normalized_name) DO UPDATE SET
+  icp_status=EXCLUDED.icp_status, qualified_at=EXCLUDED.qualified_at;
+
+INSERT INTO discovery_signals
+  (company_id, source, signal_type, source_external_id, summary,
+   signal_strength, observed_at, payload)
+SELECT dc.id, 'indeed', 'job_posting', s.ext, s.summ, 0.72,
+       now()-interval '1 day', s.pl::jsonb
+FROM discovery_companies dc,
+     (VALUES
+       ('uitest-biller','Hiring: Medical Biller',
+        '{"role":"Biller","tier":"standard","job_title":"Medical Biller","job_url":"https://example.com/b"}'),
+       ('uitest-coder','Hiring: Medical Coder',
+        '{"role":"Coder","tier":"standard","job_title":"Medical Coder","job_url":"https://example.com/c"}')
+     ) AS s(ext, summ, pl)
+WHERE dc.normalized_name='uistackhealth'
+ON CONFLICT (source, source_external_id) DO NOTHING;
+
+-- Stacking watch list: a single open standard role → exercises the WatchStrip.
+INSERT INTO parked_companies
+  (company_key, name, domain, role, roles, postings, state, sample_url,
+   sample_title, last_seen_at)
+VALUES
+  ('uisoloclinic','UI Solo Clinic','uisolo.example','Coder','["Coder"]',1,'OH',
+   'https://example.com/solo','Medical Coder', now())
+ON CONFLICT (company_key) DO UPDATE SET last_seen_at=EXCLUDED.last_seen_at;
+
+-- A HOT discovery lead (new-exec trigger) → 'Hot' intent badge, sorts to the top
+-- above the Watch-tier stacked company. Exercises the buying-intent ranking.
+INSERT INTO discovery_companies
+  (normalized_name, display_name, domain, icp_status, segment, confidence,
+   reasoning, hq_state, qualified_at, first_seen_at)
+VALUES
+  ('uihothealth','UI Hot Health System','uihot.example','qualified','health_system',
+   0.95,'New CFO — fresh buying window.','OH', now()-interval '2 hours', now()-interval '2 hours')
+ON CONFLICT (normalized_name) DO UPDATE SET
+  icp_status=EXCLUDED.icp_status, qualified_at=EXCLUDED.qualified_at;
+
+INSERT INTO discovery_signals
+  (company_id, source, signal_type, source_external_id, summary,
+   signal_strength, observed_at, payload)
+SELECT dc.id, 'signalbase', 'leadership_change', 'uihot-cfo', 'New CFO appointed',
+       0.9, now()-interval '1 day', '{}'::jsonb
+FROM discovery_companies dc WHERE dc.normalized_name='uihothealth'
+ON CONFLICT (source, source_external_id) DO NOTHING;
+
+-- A QUALIFIED lone-standard hire (1 standard role, nothing stronger) → is_watchlist:
+-- HIDDEN from Discovery, shown in the Watch list "Qualified · low intent" section.
+INSERT INTO discovery_companies
+  (normalized_name, display_name, domain, icp_status, segment, confidence,
+   reasoning, hq_state, qualified_at, first_seen_at)
+VALUES
+  ('uiwatchclinic','UI Watch Clinic','uiwatch.example','qualified','specialty',0.80,
+   'Single standard role — low intent.','OH', now()-interval '2 hours', now()-interval '2 hours')
+ON CONFLICT (normalized_name) DO UPDATE SET
+  icp_status=EXCLUDED.icp_status, qualified_at=EXCLUDED.qualified_at;
+
+INSERT INTO discovery_signals
+  (company_id, source, signal_type, source_external_id, summary,
+   signal_strength, observed_at, payload)
+SELECT dc.id, 'indeed', 'job_posting', 'uiwatch-biller', 'Hiring: Medical Biller', 0.66,
+       now()-interval '1 day',
+       '{"role":"Biller","tier":"standard","job_title":"Medical Biller","job_url":"https://example.com/wb"}'::jsonb
+FROM discovery_companies dc WHERE dc.normalized_name='uiwatchclinic'
+ON CONFLICT (source, source_external_id) DO NOTHING;
+
+-- News-to-plays: ranked by get_behind, with a "Get behind" pill + "The play".
+INSERT INTO news_items
+  (url, title, source, published_at, topic, why_it_matters, get_behind, play, relevant, fetched_at)
+VALUES
+ ('https://ex.test/n1','New rule forces payers to decide prior auth in 72 hours','RevCycleIntelligence',
+  (now()-interval '2 hours')::text,'prior_auth','the timeline makes manual prior-auth untenable for every provider',
+  94,'hit health systems hiring prior-auth staff: the 72-hour rule breaks manual auth; Magical handles it end-to-end',true,(now())::text),
+ ('https://ex.test/n2','Survey: claim denials climb to record highs','Becker''s',
+  (now()-interval '1 day')::text,'denials','rising denials are direct revenue leakage — the pain Magical removes',
+  88,'target denials-heavy systems: denials are up double digits; Magical auto-works appeals',true,(now())::text),
+ ('https://ex.test/n3','One state tweaks its Medicaid redetermination timeline','State Health Dept',
+  (now()-interval '4 days')::text,'eligibility','narrow and regional — low urgency, no broad wedge',
+  38,'',true,(now())::text)
+ON CONFLICT (url) DO UPDATE SET
+  get_behind=EXCLUDED.get_behind, play=EXCLUDED.play, why_it_matters=EXCLUDED.why_it_matters;
+
+-- Engagement (Reply.io heat): one account so the Engagement tab renders populated.
+-- account_id ui_demo_job matches the seeded scored account -> name resolves; score
+-- 16 (reply 6 + meeting 10) -> Warm.
+INSERT INTO engagement_contacts
+  (source, external_id, email, email_domain, company, company_key, account_id,
+   match_tier, matched_lists, delivered, opened, replied)
+VALUES
+  ('replyio','uieng1','jane@uidemo.example','uidemo.example','UI Demo Health System',
+   'uidemohealthsystem','ui_demo_job','domain','["scored"]'::jsonb,10,6,1)
+ON CONFLICT (source, external_id) DO NOTHING;
+
+INSERT INTO engagement_events
+  (source, external_id, channel, kind, points, contact_ext, company, account_id, occurred_at)
+VALUES
+  ('replyio','email:reply:uieng1','email','reply',6,'uieng1','UI Demo Health System',
+   'ui_demo_job', now()-interval '1 day'),
+  ('replyio','email:meeting_booked:uieng1','email','meeting_booked',10,'uieng1',
+   'UI Demo Health System','ui_demo_job', now()-interval '2 hours')
+ON CONFLICT (source, external_id) DO NOTHING;
+"""
+
+
+def _free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+@pytest.fixture(scope="module")
+def base_url():
+    # Ensure every table exists (incl. parked_companies) before seeding — the
+    # local DB may predate newer tables; schema.sql is all CREATE IF NOT EXISTS.
+    db_dir = Path(__file__).resolve().parents[2] / "auto_search" / "db"
+    subprocess.run(["psql", DB, "-f", str(db_dir / "schema.sql")], capture_output=True, text=True)
+    subprocess.run(["psql", DB, "-f", str(db_dir / "engagement_schema.sql")],
+                   capture_output=True, text=True)
+    # Seed the local DB (best-effort; skip the whole module if no local Postgres).
+    seed = subprocess.run(["psql", DB, "-c", _SEED_SQL], capture_output=True, text=True)
+    if seed.returncode != 0:
+        pytest.skip(f"no local Postgres to seed: {seed.stderr[:120]}")
+
+    port = _free_port()
+    env = {**os.environ, "DATABASE_URL": DB}
+    env.pop("BASIC_AUTH_USER", None)
+    env.pop("BASIC_AUTH_PASS", None)
+    proc = subprocess.Popen(
+        ["python3", "-m", "uvicorn", "auto_search.api.app:app",
+         "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning"],
+        env=env)
+    url = f"http://127.0.0.1:{port}"
+    try:
+        for _ in range(40):
+            try:
+                if urllib.request.urlopen(f"{url}/api/health", timeout=1).status == 200:
+                    break
+            except Exception:  # noqa: BLE001
+                time.sleep(0.5)
+        else:
+            pytest.fail("server did not start")
+        yield url
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+@pytest.fixture(scope="module")
+def browser():
+    try:
+        pw = sync_playwright().start()
+        b = pw.chromium.launch(headless=True)
+    except Exception as e:  # noqa: BLE001 — browser not installed
+        pytest.skip(f"playwright chromium unavailable: {e}")
+    yield b
+    b.close()
+    pw.stop()
+
+
+@pytest.fixture
+def page(browser, base_url):
+    """A FRESH page per test (no state bleed between interactions)."""
+    errors: list[str] = []
+    pg = browser.new_page()
+    pg.set_default_timeout(15_000)
+    pg.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    pg.goto(base_url, wait_until="networkidle")
+    pg.wait_for_selector("text=Scored", timeout=20_000)  # app mounted
+    pg.console_errors = errors  # type: ignore[attr-defined]
+    yield pg
+    pg.close()
+
+
+def test_app_renders_without_console_errors(page):
+    assert page.locator("text=Magical").count() > 0
+    # Ignore benign CDN/font noise; fail on real JS/React errors.
+    real = [e for e in page.console_errors
+            if not any(x in e.lower() for x in ("favicon", "tailwind", "cdn", "font"))]
+    assert not real, f"console errors: {real[:5]}"
+
+
+def test_warm_intros_no_warm_renders_clean(page):
+    """When no contact has a warm path, the section drops the warm framing: it's
+    titled 'Decision-makers', shows no repeated 'No founder path' line, and the
+    footer reads as a plain decision-maker count (not '0 warm of N')."""
+    page.click("text=Scored")
+    page.wait_for_selector("text=UI Demo Clinic", timeout=10_000)
+    page.click("text=UI Demo Clinic")
+    page.wait_for_selector("text=Decision-makers", timeout=10_000)   # heading adapts to 0-warm
+    assert page.locator("text=Jane Roe").count() > 0                 # the contact still renders
+    assert page.locator("text=No founder path").count() == 0         # per-row clutter gone
+    assert page.locator("text=0 warm of").count() == 0               # footer reframed
+    assert page.get_by_text("no warm paths", exact=False).count() > 0  # but it's mentioned once
+
+
+def test_scored_board_highlights_warm_accounts(page):
+    """An account with warm intro paths gets an 'N warm' badge on its board row;
+    a 0-warm account does not."""
+    page.click("text=Scored")
+    page.wait_for_selector("text=UI Demo Health System", timeout=10_000)
+    assert page.get_by_text("1 warm", exact=False).count() > 0       # warm account badged
+
+
+def test_scored_board_has_find_intros_button(page):
+    """The board-level warm-intros backfill: a 'Find intros' action with a
+    two-click confirm that previews the count + the green/yellow spend. Must
+    render (seeded accounts are high/medium with no intros yet) and not crash."""
+    page.click("text=Scored")
+    page.wait_for_selector("text=UI Demo Health System", timeout=10_000)
+    assert page.locator("text=Find intros").count() > 0          # the batch button
+    page.click("text=Find intros")                               # open the confirm
+    assert page.locator("text=Find intros for").count() > 0      # count + cost preview
+    real = [e for e in page.console_errors
+            if not any(x in e.lower() for x in ("favicon", "tailwind", "cdn", "font"))]
+    assert not real, f"console errors: {real[:5]}"
+
+
+def test_discovery_panel_ranks_by_buying_intent(page):
+    """Every Discovery row shows a Hot/Watch intent badge; a new-exec lead is Hot
+    and sorts above a Watch-tier stacked-jobs lead."""
+    page.click("text=Discovery")
+    page.wait_for_selector("text=UI Hot Health System", timeout=10_000)
+    assert page.get_by_text("Hot", exact=False).count() > 0      # hot tier pill present
+    assert page.get_by_text("Watch", exact=False).count() > 0    # watch tier pill present
+    assert page.get_by_text("Auto-score line", exact=False).count() > 0   # the Hot/Watch divider
+    body = page.inner_text("body")
+    assert body.index("UI Hot Health System") < body.index("UI Stack Health System")
+
+
+def test_intent_scoring_hint_popover(page):
+    """The light 'How intent is scored' hint opens the deterministic rubric + the
+    forward-looking outcomes line."""
+    page.click("text=Discovery")
+    page.wait_for_selector("text=How intent is scored", timeout=10_000)
+    page.click("text=How intent is scored")
+    assert page.get_by_text("Deterministic", exact=False).count() > 0   # the rubric opened
+    assert page.get_by_text("deals won", exact=False).count() > 0       # the "next" provision line
+
+
+def test_news_tab_ranks_plays_by_get_behind(page):
+    """News reads as ranked sales plays: a 'Get behind' pill + 'The play', highest
+    get-behind first."""
+    page.click("text=News")
+    page.wait_for_selector("text=72 hours", timeout=10_000)
+    assert page.get_by_text("Get behind", exact=False).count() > 0   # high-score pill
+    assert page.get_by_text("The play", exact=False).count() > 0     # the action box
+    body = page.inner_text("body")
+    assert body.index("72 hours") < body.index("Medicaid redetermination")  # 94 above 38
+
+
+def test_discovery_signal_filter_has_social_types(page):
+    page.click("text=Discovery")
+    options = page.locator("select").nth(1).locator("option").all_inner_texts()
+    assert "Engaged" in options, options
+    assert "Event" in options, options
+
+
+def test_scored_drawer_shows_why_discovered_with_proof(page):
+    page.click("text=Scored")
+    page.wait_for_selector("text=UI Demo Health System", timeout=10_000)
+    page.click("text=UI Demo Health System")
+    page.wait_for_selector("text=Why discovered", timeout=10_000)
+    assert page.locator("text=Senior Revenue Cycle Supervisor").count() > 0
+    assert page.locator("text=Hiring").count() > 0          # the signal chip
+    assert page.locator("a:has-text('proof')").count() > 0  # the evidence link
+
+
+def test_ae_lookup_resolves_existing_account_no_spend(page):
+    """The AE lookup bar: typing an already-scored account resolves to the
+    'Already on the board' card (server round-trip, no Exa/LLM spend), shows the
+    engagement chip (the seeded account is Warm), and Open account jumps into
+    the drawer. Also proves lookup.jsx Babel-compiles."""
+    page.click("text=Scored")
+    page.wait_for_selector("text=UI Demo Health System", timeout=10_000)
+    page.fill('input[placeholder^="Research an account"]', "UI Demo Health System")
+    page.keyboard.press("Enter")
+    page.wait_for_selector("text=Already on the board", timeout=10_000)
+    assert page.get_by_text("Engaging", exact=False).count() > 0   # heat garnish
+    page.click("text=Open account")
+    page.wait_for_selector("text=Why discovered", timeout=10_000)  # drawer opened
+
+
+def test_unknown_framework_drawer_does_not_white_screen(page):
+    """Regression: a scored account whose framework the UI config doesn't have
+    (version skew) must still open its drawer, not crash the whole app."""
+    page.click("text=Scored")
+    page.wait_for_selector("text=UI Demo Legacy Co", timeout=10_000)
+    page.click("text=UI Demo Legacy Co")
+    page.wait_for_selector("text=Re-score", timeout=10_000)   # drawer opened
+    assert page.locator("text=Magical").count() > 0           # app still mounted
+    assert page.locator("text=Why discovered").count() > 0    # signal still shown
+
+
+def test_stacked_hiring_pill_and_watch_strip(page):
+    """Jobs signal-stacking UI: a company with 2 open RCM roles shows the
+    '🔥 N RCM roles open' headline, and the parked single-role company surfaces
+    in the subtle (expandable) watch strip — all without console errors."""
+    page.click("text=Discovery")
+    page.wait_for_selector("text=UI Stack Health System", timeout=10_000)
+    assert page.locator("text=RCM roles open").count() > 0     # the 🔥 stacked pill
+    # The watch strip: parked single-standard-role companies.
+    page.wait_for_selector("text=Watching", timeout=10_000)
+    page.click("text=Watching")                                # expand the list
+    assert page.locator("text=UI Solo Clinic").count() > 0
+    real = [e for e in page.console_errors
+            if not any(x in e.lower() for x in ("favicon", "tailwind", "cdn", "font"))]
+    assert not real, f"console errors: {real[:5]}"
+
+
+def test_social_listening_panel_opens(page):
+    page.click("text=Discovery")
+    # Social-listening setup now lives inside the unified "Scan signals" control.
+    page.click("text=Scan signals")                                 # open the run popover
+    page.click("text=Manage")                                       # → social-listening setup
+    page.wait_for_selector("text=Event keywords", timeout=10_000)   # the panel's section
+    assert page.locator("text=Monitored accounts").count() > 0       # accounts section header
+    assert page.locator("text=Back-fill").count() > 0                # the reframed scan
+
+
+# ── this session's features: watch list, Discovery filter, cost, auto-score ──
+
+
+def test_every_tab_mounts_without_console_errors(page):
+    """Each nav tab renders cleanly — catches a white-screen on any tab, including
+    the new Watch list (a fresh babel-compiled file). The Outreach stats route is
+    stubbed: the tab would otherwise call the LIVE SmartLead/HeyReach APIs when
+    real keys sit in the local .env (QA, 2026-07-14)."""
+    import json as _json
+    page.route("**/api/outreach/stats*", lambda route: route.fulfill(
+        status=200, content_type="application/json", body=_json.dumps(
+            {"fetched_at": "2026-07-13T12:00:00+00:00", "cached": False,
+             "email": {"configured": False}, "linkedin": {"configured": False}})))
+    for tab in ("Discovery", "Scored", "News", "Watch list", "Engagement", "Outreach"):
+        page.click(f"text={tab}")
+        page.wait_for_timeout(700)
+        real = [e for e in page.console_errors
+                if not any(x in e.lower() for x in ("favicon", "tailwind", "cdn", "font"))]
+        assert not real, f"console errors on {tab}: {real[:5]}"
+
+
+def test_engagement_tab_shows_account(page):
+    """The Engagement tab renders a real engaged account with its heat tier (the
+    new babel-compiled engagement.jsx must not white-screen)."""
+    page.click("text=Engagement")
+    page.wait_for_selector("text=UI Demo Health System", timeout=10_000)
+    assert page.get_by_text("Warm", exact=False).count() > 0
+
+
+# ── Phase 3: campaign automation ──────────────────────────────────────────────
+# The Campaigns tab is HIDDEN as of 2026-07-14 (Sunny): its NAV_TABS entry and
+# the campaigns.jsx script include were removed from app.jsx / index.html while
+# the enrollment console is parked. The code stays in the repo. When the tab
+# returns, restore those two lines and drop these skips.
+
+_CAMPAIGNS_TAB_HIDDEN = pytest.mark.skip(
+    reason="Campaigns tab hidden 2026-07-14 (Sunny) — restore NAV_TABS entry + "
+           "campaigns.jsx include in index.html, then unskip")
+
+
+@_CAMPAIGNS_TAB_HIDDEN
+def test_campaigns_tab_ready_list_with_reasons(page):
+    """The Campaigns tab (fresh babel-compiled campaigns.jsx) renders the
+    ready-to-enroll worklist: the seeded account qualifies (High fit + Warm heat
+    16), shows its reasons, and — with no Reply.io campaign mapped yet — is
+    flagged as blocked on sequence setup rather than enrollable."""
+    page.click("text=Campaigns")
+    page.wait_for_selector("text=Ready to enroll", timeout=10_000)
+    page.wait_for_selector("text=UI Demo Health System", timeout=10_000)
+    assert page.get_by_text("Tier 1", exact=False).count() > 0        # fit chip (seed label)
+    assert page.get_by_text("Warm", exact=False).count() > 0          # heat reason chip
+    assert page.get_by_text("sequence not set up yet", exact=False).count() > 0
+    real = [e for e in page.console_errors
+            if not any(x in e.lower() for x in ("favicon", "tailwind", "cdn", "font"))]
+    assert not real, f"console errors: {real[:5]}"
+
+
+@_CAMPAIGNS_TAB_HIDDEN
+def test_campaigns_sequences_tab_and_preview_run(page):
+    """The Sequences mapping editor renders every catalog group with its state,
+    and a Preview run (dry) round-trips the whole backend path — reporting the
+    eligible account as blocked on sequence setup, sending nothing. The Reply.io
+    campaign list is stubbed (no network in tests)."""
+    page.route("**/api/campaigns/replyio-campaigns",
+               lambda route: route.fulfill(json={"campaigns": [
+                   {"id": 111, "name": "Outbound Health Systems (test)", "status": 0,
+                    "mapped": False, "suggested_key": "health_system"}]}))
+    page.route("**/api/campaigns/heyreach-campaigns",
+               lambda route: route.fulfill(json={"campaigns": [
+                   {"id": 900, "name": "ABM - Ortho - LinkedIn Connect", "status": 0,
+                    "senders": 0, "mapped": False, "suggested_key": "ortho"}],
+                   "senders": []}))
+    page.click("text=Campaigns")
+    page.wait_for_selector("text=Ready to enroll", timeout=10_000)
+    page.click("text=Sequences")
+    page.wait_for_selector("text=Health Systems", timeout=10_000)
+    assert page.get_by_text("Emails live in Reply.io", exact=False).count() > 0
+    # Routing-rules layout: custom rules on top (first match wins), the 7 fixed
+    # group cards with email + LinkedIn pickers, and the dormant-LinkedIn note.
+    assert page.get_by_text("first match wins", exact=False).count() > 0
+    assert page.get_by_text("Add rule", exact=False).count() > 0
+    assert page.get_by_text("Custom rules", exact=False).count() > 0
+    assert page.get_by_text("the fallback route", exact=False).count() > 0
+    assert page.get_by_text("dormant until an account is connected", exact=False).count() > 0
+    # Preview run: dry, inline — the seeded eligible account is blocked on setup.
+    page.click("text=Preview run")
+    page.wait_for_selector("text=blocked on sequence setup", timeout=10_000)
+    assert page.get_by_text("Nothing was sent", exact=False).count() > 0
+
+
+def test_watch_list_tab_shows_qualified_and_parked(page):
+    """The Watch list tab surfaces both kinds: a qualified-but-low-intent lead and a
+    parked (not-yet-qualified) lead."""
+    page.click("text=Watch list")
+    page.wait_for_selector("text=UI Watch Clinic", timeout=10_000)   # qualified low-intent
+    assert page.locator("text=UI Solo Clinic").count() > 0           # parked, not qualified
+
+
+def test_discovery_hides_lone_standard_hire(page):
+    """The Discovery filter: a qualified single-standard-role company is NOT in the
+    live Discovery list (it lives on the Watch list); a stacked company still is.
+
+    Scope to the live panel only — the 'Recent evaluations' audit feed at the
+    bottom intentionally shows EVERY recent decision (incl. watch-listed +
+    disqualified), so the whole-body text would (correctly) contain it there."""
+    page.click("text=Discovery")
+    page.wait_for_selector("text=UI Stack Health System", timeout=10_000)
+    panel = page.inner_text("body").split("Recent evaluations")[0]
+    assert "UI Stack Health System" in panel         # stacked → stays in Discovery
+    assert "UI Watch Clinic" not in panel            # lone standard → on the Watch list
+
+
+def test_unified_spend_meter_renders(page):
+    """One spend area (discovery incl. Apify + scored) against the combined budget."""
+    page.click("text=Discovery")
+    page.wait_for_selector("text=Spend this month", timeout=10_000)
+    assert page.get_by_text("resets monthly", exact=False).count() > 0
+
+
+def test_autoscore_toggle_persists_across_reload(page):
+    """The fix: auto-score on/off survives a reload (localStorage), instead of
+    silently resetting to off."""
+    page.click("text=Discovery")
+    page.wait_for_selector("text=Auto-score off", timeout=10_000)    # starts off
+    page.evaluate("localStorage.setItem('autoScoreEnabled', '1')")
+    page.reload(wait_until="networkidle")
+    page.wait_for_selector("text=Scored", timeout=20_000)            # app remounted
+    assert page.get_by_text("Auto-score off", exact=False).count() == 0  # read back as ON
+
+
+# ── MAR2-11: find-an-account search on all three tabs ─────────────────────────
+
+
+def test_discovery_search_filters_and_clears(page):
+    """Typing narrows the Discovery panel to matching accounts in real time;
+    junk shows 'No results found'; Clear search restores the full list."""
+    page.wait_for_selector("text=UI Hot Health System")
+    box = page.locator('input[aria-label="Search accounts"]')
+    box.fill("uihot.example")                  # SEEDED row; matches by DOMAIN
+    page.wait_for_selector("text=1 company")
+    assert page.get_by_role("heading", name="UI Hot Health System").count() > 0
+    # heading = a panel ROW; the name may still appear in the activity log below
+    assert page.get_by_role("heading", name="UI Stack Health System").count() == 0
+    box.fill("zzznope")
+    page.wait_for_selector("text=No results found")
+    page.click("text=Clear search")
+    page.wait_for_selector("text=UI Hot Health System")   # list restored
+    assert page.get_by_text("No results found").count() == 0
+
+
+def test_scored_search_narrows_and_composes_with_sorting(page):
+    """The Scored tab search narrows by name; it is a FILTER over the existing
+    list, distinct from the AE lookup bar above it (which stays rendered)."""
+    page.click("text=Scored")
+    page.wait_for_selector("text=Scored accounts")
+    page.wait_for_selector("text=UI Demo Clinic")     # SEEDED scored row
+    box = page.locator('input[aria-label="Search accounts"]')
+    box.fill("demo clinic")
+    page.wait_for_selector("text=UI Demo Clinic")
+    assert page.get_by_role("heading", name="UI Demo Health System").count() == 0
+    box.fill("no-such-account-xyz")
+    page.wait_for_selector("text=No results found")
+    page.click("text=Clear search")
+    page.wait_for_selector("text=UI Demo Clinic")
+
+
+def test_engagement_search_filters_accounts(page):
+    """The Engagement console search matches the seeded account by name and
+    shows the query-echoing empty state for junk."""
+    page.click("text=Engagement")
+    page.wait_for_selector("text=UI Demo Health System", timeout=10_000)
+    box = page.locator('input[placeholder="Search name or domain…"]')
+    box.fill("ui demo")
+    page.wait_for_selector("text=UI Demo Health System")
+    box.fill("zzznope")
+    page.wait_for_selector('text=No results found for "zzznope"')
+    box.fill("")
+    page.wait_for_selector("text=UI Demo Health System")
+
+
+def test_import_wizard_generic_list_shows_breakdown_and_leftouts(page):
+    """Generic accounts-list import (2026-07-08): the wizard banner shows the
+    per-segment breakdown instead of a single segment, and the amber box lists
+    the rows the classifier flagged. Preview endpoint is MOCKED — this guards
+    the UI contract; the classification itself is covered in the API tests."""
+    import json as _json
+    payload = {
+        "schema_label": "Accounts list (name + domain)", "segment": "mixed",
+        "segments": {"health_system": 2, "payer": 1}, "rows_total": 5,
+        "mapping": [{"col": "Account Name", "fact": None},
+                    {"col": "Website Domain", "fact": "Domain"}],
+        "unmatched_columns": ["Opportunity Name"], "preview": [],
+        "new_count": 3, "known_count": 0,
+        "flagged": ["Waud Capital Partners", "Guidehouse"],
+        "flagged_count": 2,
+    }
+    page.route("**/api/scoring/import/preview", lambda route: route.fulfill(
+        status=200, content_type="application/json", body=_json.dumps(payload)))
+    page.click("text=Scored")
+    page.get_by_role("button", name="Import accounts").first.click()
+    page.set_input_files("input[type=file]", files=[{
+        "name": "sao_list.csv", "mimeType": "text/csv",
+        "buffer": b"Account Name,Website Domain\nX,x.com\n"}])
+    page.wait_for_selector("text=Accounts list (name + domain)")
+    page.wait_for_selector("text=2 Health System")            # breakdown, not one segment
+    page.wait_for_selector("text=1 Payer")
+    page.wait_for_selector("text=2 imported with a flag")
+    assert page.get_by_text("Waud Capital Partners", exact=False).count() > 0
+    assert not page.console_errors, page.console_errors
+
+
+# ── Outreach dashboard (SmartLead + HeyReach stats) ───────────────────────────
+
+
+def test_outreach_tab_renders_both_channel_cards(page):
+    """The Outreach tab (fresh babel-compiled outreach.jsx) renders headline
+    tiles, per-campaign rows, and the trend chart from a stubbed stats payload —
+    rates arrive server-computed and bind straight into the tiles. Endpoint is
+    MOCKED (no SmartLead/HeyReach network in tests); the aggregator's math is
+    covered in tests/test_outreach_stats.py."""
+    import json as _json
+    payload = {
+        "fetched_at": "2026-07-13T12:00:00+00:00", "cached": False,
+        "email": {
+            "configured": True,
+            "overall": {"leads": 500, "sent": 200, "opens": 120, "clicks": 30,
+                        "replies": 10, "bounces": 4, "unsubscribes": 2,
+                        "interested": 6, "open_rate": 60.0, "click_rate": 15.0,
+                        "reply_rate": 5.0, "bounce_rate": 2.0},
+            "campaigns": [
+                {"id": 1, "name": "Health Systems - Article Sequence",
+                 "status": "ACTIVE", "leads": 500, "sent": 200, "opens": 120,
+                 "clicks": 30, "replies": 10, "bounces": 4, "unsubscribes": 2,
+                 "interested": 6, "open_rate": 60.0, "click_rate": 15.0,
+                 "reply_rate": 5.0, "bounce_rate": 2.0}],
+            "campaigns_errored": 0},
+        "linkedin": {
+            "configured": True,
+            "overall": {"connections_sent": 100, "connections_accepted": 40,
+                        "accept_rate": 40.0, "messages_sent": 40,
+                        "message_replies": 10, "message_reply_rate": 25.0,
+                        "inmails_sent": 0, "inmail_replies": 0,
+                        "inmail_reply_rate": None, "profile_views": 7,
+                        "leads_contacted": 90, "interested": 3},
+            "trend": [{"date": "2026-07-12", "connectionsSent": 8},
+                      {"date": "2026-07-13", "connectionsSent": 12}],
+            "campaigns": [
+                {"id": 505509, "name": "Health Systems - LinkedIn",
+                 "status": "IN_PROGRESS", "connections_sent": 100,
+                 "connections_accepted": 40, "accept_rate": 40.0,
+                 "messages_sent": 40, "message_replies": 10,
+                 "message_reply_rate": 25.0, "inmails_sent": 0,
+                 "inmail_replies": 0, "inmail_reply_rate": None,
+                 "profile_views": 7, "leads_contacted": 90, "interested": 3}],
+            "campaigns_errored": 0},
+    }
+    page.route("**/api/outreach/stats*", lambda route: route.fulfill(
+        status=200, content_type="application/json", body=_json.dumps(payload)))
+    page.click("text=Outreach")
+    page.wait_for_selector("text=Outreach performance", timeout=10_000)
+    page.wait_for_selector("text=Email · SmartLead", timeout=10_000)
+    page.wait_for_selector("text=LinkedIn · HeyReach", timeout=10_000)
+    assert page.get_by_text("60.0%", exact=False).count() > 0    # email open rate tile
+    assert page.get_by_text("40.0%", exact=False).count() > 0    # accept rate tile
+    assert page.get_by_text("Health Systems - Article Sequence", exact=False).count() > 0
+    assert page.get_by_text("Connection requests per day", exact=False).count() > 0
+    real = [e for e in page.console_errors
+            if not any(x in e.lower() for x in ("favicon", "tailwind", "cdn", "font"))]
+    assert not real, f"console errors: {real[:5]}"
+
+
+def test_outreach_tab_unconfigured_channels_show_setup_notes(page):
+    """With neither executor configured the tab degrades to setup guidance —
+    never a white screen, never fake zeros."""
+    import json as _json
+    payload = {"fetched_at": "2026-07-13T12:00:00+00:00", "cached": False,
+               "email": {"configured": False}, "linkedin": {"configured": False}}
+    page.route("**/api/outreach/stats*", lambda route: route.fulfill(
+        status=200, content_type="application/json", body=_json.dumps(payload)))
+    page.click("text=Outreach")
+    page.wait_for_selector("text=SMARTLEAD_API_KEY", timeout=10_000)
+    page.wait_for_selector("text=HEYREACH_API_KEY", timeout=10_000)
+    assert page.get_by_text("Not connected", exact=False).count() >= 2

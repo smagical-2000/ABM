@@ -1,0 +1,391 @@
+{
+ "_about": "Regression registry. Every notable bug we have shipped and fixed, with the test that now guards it. The guide's rule: a bug is not 'done' until a test makes it impossible to reintroduce silently. The actual gate is `pytest` in CI (.github/workflows/ci.yml); this file is the human- and agent-readable index of bug -> guard so a cold-start agent learns the gotchas and never re-opens a closed bug. Add an entry whenever you fix a bug. Prune an entry only after its guard has held for 6+ months and the area was rewritten.",
+ "_schema": {
+  "id": "kebab-case slug",
+  "date": "YYYY-MM-DD the fix landed",
+  "area": "module / surface",
+  "symptom": "what the user/operator saw",
+  "root_cause": "the actual reason, not the symptom",
+  "guard": "test file::test_name that now fails if this regresses",
+  "lesson": "the generalizable rule to carry forward"
+ },
+ "bugs": [
+  {
+   "id": "cron-skips-jobs-park-gate",
+   "date": "2026-06-13",
+   "area": "auto_search/job_stacking.py + the discovery pipeline",
+   "symptom": "Lone single 'standard'-tier hires (noise) kept appearing in Discovery even though the on-demand panel parked them. The daily cron re-admitted the noise the panel would have hidden.",
+   "root_cause": "The park decision lived only on the on-demand panel-annotation path. The cron ingestion path never called it, so the two paths disagreed.",
+   "guard": "tests/test_job_stacking.py",
+   "lesson": "A gate must run on EVERY ingestion path (cron AND panel). When you add a filter, test cron/panel parity, not just the path you are looking at."
+  },
+  {
+   "id": "tier-not-persisted-falls-open-to-core",
+   "date": "2026-06-13",
+   "area": "auto_search/priority.py, rcm_titles.py",
+   "symptom": "~692 historical job signals mis-ranked intent: a 'standard'-tier role scored as 'core' on re-evaluation.",
+   "root_cause": "The RCM tier was denormalized onto the signal but not persisted on older records; when missing, the points logic defaulted to 'core' (too high).",
+   "guard": "tests/test_priority.py",
+   "lesson": "When a denormalized field may be absent on old rows, derive it from the durable field (here role -> rcm_titles.tier_for_role) and fail to the SAFE default, not the generous one."
+  },
+  {
+   "id": "needs-review-reject-clock-used-signal-age",
+   "date": "2026-06-13",
+   "area": "auto_search/lifecycle.py",
+   "symptom": "Accounts freshly demoted to needs_review could be auto-rejected almost immediately.",
+   "root_cause": "The auto-reject TTL measured the age of the underlying signal, not how long the account had been in the review state.",
+   "guard": "tests/test_lifecycle.py",
+   "lesson": "A state TTL must be measured from the state-entry timestamp (entered_review_at), never from the data's age. Promote-on-reheat applies only to decayed accounts."
+  },
+  {
+   "id": "csv-import-creates-discovery-twins",
+   "date": "2026-06-13",
+   "area": "auto_search/api/app.py _classify_import_row, identity/dedup",
+   "symptom": "Importing a CSV that already contained accounts present in Discovery created duplicate 'twin' rows.",
+   "root_cause": "Two id schemes (acc_<key> for promoted, csv_<slug> for imports) were not reconciled at import time, so the same company existed under two ids.",
+   "guard": "tests/test_import_dedup.py",
+   "lesson": "Dedupe on identity ACROSS id schemes at the import boundary. Moving a Discovery record into Scored (carrying its signals) beats creating a new one."
+  },
+  {
+   "id": "autoscore-toggle-resets-on-reload",
+   "date": "2026-06-13",
+   "area": "web/discovery/app.jsx",
+   "symptom": "The auto-score toggle silently flipped back to OFF after any browser reload.",
+   "root_cause": "The toggle state lived only in React memory; nothing persisted it across reloads.",
+   "guard": "tests/ui/test_ui_smoke.py::test_autoscore_toggle_persists_across_reload",
+   "lesson": "Any operator toggle that must survive a reload needs persistence (localStorage) AND a UI regression test that reloads and re-asserts."
+  },
+  {
+   "id": "jsx-syntax-or-missing-icon-white-screens-app",
+   "date": "2026-06-13",
+   "area": "web/discovery/ (in-browser Babel, no build step)",
+   "symptom": "A bad JSX edit or a reference to a non-existent Icons.* white-screened the WHOLE app at runtime, and pytest stayed green.",
+   "root_cause": "There is no compile step. Babel transpiles in the browser, so a syntax error or undefined component is a runtime failure invisible to backend tests.",
+   "guard": "tests/ui/test_ui_smoke.py::test_every_tab_mounts_without_console_errors",
+   "lesson": "In-browser JSX has no compile gate, so the Playwright UI smoke IS the compile gate. Transpile-check JSX and run the UI smoke before every deploy. Only use Icons.* that exist in ui.jsx."
+  },
+  {
+   "id": "single-competitor-like-is-noise",
+   "date": "2026-06-13",
+   "area": "auto_search/social/engagement_gate.py",
+   "symptom": "A single stray like on a competitor's post created a low-value 'signal', cluttering Discovery.",
+   "root_cause": "Social engagement qualified on any single interaction, with no per-person threshold and no competitor-vs-own distinction.",
+   "guard": "tests/test_social_engagement_gate.py",
+   "lesson": "Engagement qualifies only on intent-bearing volume (a comment, or 2+ likes) and ONLY for competitor accounts, not our own (getMagical). Collect multiple touches per person, then decide."
+  },
+  {
+   "id": "replyio-reporting-500-on-offset-datetime",
+   "date": "2026-06-14",
+   "area": "auto_search/engagement/replyio_client.py (Reply.io v3 POST /reporting/emails)",
+   "symptom": "Engagement sync 500'd. POST /v3/reporting/emails with a from/to that carried a timezone offset ('2026-05-15T00:00:00+00:00') returned 500 Internal Server Error; date-only ('2026-05-15') and Z-suffixed datetimes returned 200.",
+   "root_cause": "datetime.isoformat() emits a '+00:00' offset, which Reply.io's report endpoint cannot parse. The reporting window is day-granular, so a bare date is the right shape.",
+   "guard": "tests/test_engagement_replyio_client.py::test_reporting_window_is_date_only_not_offset_datetime",
+   "lesson": "Send the reporting from/to as a bare 'YYYY-MM-DD' date. Verify connectors against the LIVE API, not just mocks \u2014 a mock happily accepts the bad format; only the real endpoint reveals the 500."
+  },
+  {
+   "id": "retier-missed-nested-tier-object",
+   "date": "2026-06-24",
+   "area": "auto_search/api/app.py _retier",
+   "symptom": "After bumping the Health System rubric to 30 pts, the Scored board re-resolved the flat tier keys + denominator but the tier BADGE the UI renders (the nested `tier` object) stayed stale: the ring showed X/30 while the badge still said the old Tier 1.",
+   "root_cause": "_retier rewrote tier_band/tier_label/max_total but not the nested tier:{band,label} object the UI actually reads via `a.tier || tierFor(...)`.",
+   "guard": "tests/test_api.py::test_scored_list_retiers_to_current_rubric",
+   "lesson": "When you re-resolve a denormalized value, rewrite EVERY representation the readers use (flat keys AND the nested object). Grep the UI for the field it actually reads; a test that only checks the JSON flat key passes while the screen is wrong."
+  },
+  {
+   "id": "engagement-fit-tier-stale-after-rubric-change",
+   "date": "2026-06-24",
+   "area": "auto_search/api/app.py _classify (engagement read path)",
+   "symptom": "The Slack AE card + Activity view showed the stale stored fit tier after the rubric change, disagreeing with the Scored board.",
+   "root_cause": "_classify trusted the stored tier_label; the re-tier fix was applied only to the scored-list endpoint, not the engagement read path (a half-fix).",
+   "guard": "tests/test_engagement_api.py::test_engagement_fit_tier_reresolved_to_current_rubric",
+   "lesson": "A re-resolution must cover ALL read surfaces. Centralize it in one shared helper (_resolve_scored_band) and call it at every seam, not just the one you first noticed."
+  },
+  {
+   "id": "ae-routing-framework-label-vs-key",
+   "date": "2026-06-24",
+   "area": "auto_search/api/app.py _classify + auto_search/engagement/notify.py resolve_ae",
+   "symptom": "The Hot-account AE Slack lead line never fired; resolve_ae returned None for every account, so the whole AE-tag feature was dead on the real path.",
+   "root_cause": "_classify emitted the human framework LABEL ('Health System') but resolve_ae / SPECIALTY_AE are keyed by the raw key ('health_system'); the specialty lookup always missed. Unit tests passed the raw key directly, masking it.",
+   "guard": "tests/test_engagement_notify.py::test_resolve_ae_uses_raw_framework_key_not_label",
+   "lesson": "Never route/look-up on a display label. Carry the raw key (framework_key) for lookups and reserve the label for rendering; test the integration path, not just the pure function with ideal inputs."
+  },
+  {
+   "id": "consolidated-sync-fires-real-io-in-tests",
+   "date": "2026-06-24",
+   "area": "auto_search/api/app.py _sync_all_sources (the one Sync button)",
+   "symptom": "Folding every source (Reply.io, SFDC, podcast, LinkedIn TOFU) into POST /api/engagement/sync meant the background job could fire real SFDC/Apify/Reply.io calls during tests, since the sync handler schedules the coro on the live lifespan loop \u2014 only run_sync was stubbed.",
+   "root_cause": "The shared client fixture stubbed run_sync but not run_sfdc_sync / run_podcast_url_sync / linkedin_ads_runner.run, and the new orchestrator calls all of them in the background.",
+   "guard": "tests/test_engagement_api.py::test_sync_runs_all_sources_best_effort",
+   "lesson": "When a background job grows new legs, stub EVERY leg in the fixture (no leg makes real network I/O in tests) and assert best-effort: a leg raising must not skip the rest."
+  },
+  {
+   "id": "retired-sao-still-scored-and-shown",
+   "date": "2026-06-24",
+   "area": "engagement heat view + repos + UI/Slack labels (sales_accepted_opportunity)",
+   "symptom": "SAO was 'dropped' in the 2026-06 review (sync stopped pulling it), but 18 of the top 40 accounts still showed 'Sales accepted opp' (+10) in heat, drawer, momentum, and Slack \u2014 because historical SAO events stayed in storage with points baked in, and the heat SQL view + label maps still counted them.",
+   "root_cause": "Dropping a signal at the INGEST layer (sync) doesn't remove already-stored events. Heat is summed in the engaged_accounts SQL view from stored points, so retired-but-stored kinds keep counting until excluded at the READ layer.",
+   "guard": "tests/test_engagement_repository.py::test_deprecated_sao_excluded_from_heat_and_drawer",
+   "lesson": "Retiring a signal needs a READ-layer exclusion (DEPRECATED_KINDS), not just stopping ingest. Apply it everywhere heat/events are read \u2014 the SQL view (re-applied via ensure_schema on deploy), both repos' events/series/recent, plus the UI/Slack label maps \u2014 so stored history stays for audit but never counts or shows."
+  },
+  {
+   "id": "activation-dedup-client-side-only",
+   "date": "2026-06-24",
+   "area": "engagement activation (POST /api/engagement/{id}/activate)",
+   "symptom": "Before a multi-AE/SDR rollout: the 'already activated' dedup lived only in the browser (localStorage), so two reps (or the auto-route loop across browsers/reloads) could activate the SAME Hot account \u2192 it posted to Slack twice and double-spent enrichment. Same root cause as the FullEnrich credit incident.",
+   "root_cause": "Per-browser dedup is per-user, not global, and the in-process run-locks don't cover per-account activation. No server-side record of what was already activated.",
+   "guard": "tests/test_engagement_api.py::test_activate_dedups_across_users",
+   "lesson": "Dedup that guards spend/external posts must be SERVER-SIDE and race-safe: claim the resource atomically (INSERT \u2026 ON CONFLICT DO NOTHING) BEFORE any paid/visible work, short-circuit the loser, and release the claim if the work fails so it can retry. Client-side dedup is a convenience, never the authority."
+  },
+  {
+   "id": "airtable-upsert-422-on-duplicate-rows",
+   "date": "2026-06-24",
+   "area": "auto_search/engagement/airtable_client.py upsert (LinkedIn TOFU \u2192 Airtable)",
+   "symptom": "Live LinkedIn TOFU runs reported airtable_failed and leads never landed in Airtable \u2014 every write 422'd. Not auth (key worked) and not bad columns (all field names matched). The table already had 2 rows per Email (a Clay workflow also writes it).",
+   "root_cause": "upsert used Airtable's native performUpsert with fieldsToMergeOn=[Email], which returns HTTP 422 when MORE THAN ONE existing row matches the merge key. A second writer (Clay) had created duplicate Email rows, so the merge could not resolve to one record.",
+   "guard": "tests/test_engagement_airtable_client.py::test_upsert_tolerates_duplicate_rows",
+   "lesson": "Don't rely on a vendor's merge-on-key upsert when another system also writes the table \u2014 it assumes \u22641 match. Do an explicit find-then-update-first-or-create (dup-tolerant), which never 422s and never adds another duplicate. When a 4xx says 'unprocessable', capture the response BODY \u2014 422 means data/semantics rejected, distinct from 401/403 auth."
+  },
+  {
+   "id": "activation-claim-leak-on-pre-post-exception",
+   "date": "2026-06-24",
+   "area": "auto_search/api/app.py engagement_activate (server-side dedup)",
+   "symptom": "An account could get stuck permanently 'already_activated' with no Slack post: claim_activation() inserted the ledger row, but if _engaged_one()/enrichment/resolve threw BEFORE the Slack post, the claim was never released (release only ran on the Slack-failed path). Every future click then returned already_activated with no spend and no post; only force=true could recover it.",
+   "root_cause": "The atomic claim was taken before a block of work that wasn't all under a try/except that releases on failure \u2014 only the explicit Slack-post-failed branch released. Any earlier exception leaked the claim.",
+   "guard": "tests/test_engagement_api.py::test_activate_releases_claim_on_slack_failure",
+   "lesson": "When you CLAIM a resource before doing work, the ENTIRE work block (not just the last step) must run under a guard that releases the claim on ANY failure. A claim-before-work pattern needs claim \u2192 try/except-release \u2192 succeed."
+  },
+  {
+   "id": "airtable-formula-apostrophe-escaping",
+   "date": "2026-06-24",
+   "area": "auto_search/engagement/airtable_client.py _find_id (filterByFormula)",
+   "symptom": "A merge value containing an apostrophe (e.g. o'brien@x.com) built a malformed Airtable formula \u2014 the dup-tolerant upsert's lookup would miss the existing row and CREATE a duplicate, defeating the dedup it exists to provide.",
+   "root_cause": "The formula wrapped the value in single quotes and SQL-style-escaped embedded quotes (\\'), which Airtable's formula grammar does not honor.",
+   "guard": "tests/test_engagement_airtable_client.py::test_upsert_escapes_apostrophe_in_merge_value",
+   "lesson": "Each query language has its own string-literal escaping \u2014 don't assume SQL rules. Airtable formulas: wrap the literal in DOUBLE quotes and escape only \\ and \"; an apostrophe is then literal. Match the target grammar, not a familiar one."
+  },
+  {
+   "id": "ci-red-test-depends-on-local-dotenv",
+   "date": "2026-06-25",
+   "area": "tests/test_engagement_api.py client fixture (consolidated sync tests)",
+   "symptom": "CI lint-and-test went red on every push: test_sync_runs_all_sources_best_effort failed with 'AIRTABLE_BASE_ID / AIRTABLE_LINKEDIN_TABLE not set' \u2014 the LinkedIn sync leg crashed constructing AirtableClient before reaching the mocked runner, so 'linkedin' was never recorded. It PASSED locally and only failed in CI.",
+   "root_cause": "The fixture stubbed linkedin_ads_runner.run but NOT the AirtableClient/ReplyioClient that _linkedin_tofu constructs BEFORE calling the runner. Those constructors need AIRTABLE_*/REPLYIO env, which exists locally via .env (load_dotenv) but not in CI \u2014 a hidden env dependency that 'works on my machine' masked.",
+   "guard": "tests/test_engagement_api.py::test_sync_runs_all_sources_best_effort (fixture now stubs AirtableClient + ReplyioClient)",
+   "lesson": "Tests must be env-independent: stub EVERY external client a code path constructs, not just the one that does I/O. 'Passes locally' is worthless when local .env supplies vars CI lacks \u2014 reproduce CI by moving .env aside. And verify the way CI does (ruff check . over the whole repo + bare pytest), not a narrower scoped command."
+  },
+  {
+   "id": "engagement-route-collision-single-segment",
+   "date": "2026-06-25",
+   "area": "auto_search/api/app.py engagement routes",
+   "symptom": "A new GET /api/engagement/live-routing returned {'detail':'account not found'} \u2014 it was matched by the earlier GET /api/engagement/{id} account route (id='live-routing'), not the new handler.",
+   "root_cause": "FastAPI matches routes in registration order; a single-segment path under /api/engagement/ collides with the /api/engagement/{id} catch-all unless registered BEFORE it (like inbox/sync are). The new route was defined after {id}.",
+   "guard": "tests/test_engagement_api.py::test_live_routing_toggle_get_and_set",
+   "lesson": "Don't add a single-segment route after a sibling /{id} catch-all. Either register it earlier, or use a 2-segment namespaced path (e.g. /api/engagement/settings/live-routing, like /api/engagement/activations/reset) so {id} can't swallow it."
+  },
+  {
+   "id": "future-dated-sfdc-meeting",
+   "date": "2026-06-25",
+   "area": "auto_search/engagement/sfdc.py parse() meeting occurred_at + db/engagement_repository.py _event_row",
+   "symptom": "A Salesforce meeting SCHEDULED in the future (StartDateTime 2026-07-09 while today was 2026-06-25) was stored with that future occurred_at. It showed a future timeline entry ('Meeting booked Jul 9'), inflated current heat, and trivially passed the June-25 send cutoff (future >= cutoff) \u2014 so under permanent-live it would have pushed the account to AEs/SDRs off a meeting that had not happened.",
+   "root_cause": "parse() used StartDateTime (the meeting time, which can be in the future for a scheduled meeting) as the engagement signal date. The signal (a meeting was booked) actually occurs at CreatedDate.",
+   "guard": "tests/test_engagement_sfdc.py::test_meeting_scheduled_in_future_dates_to_booking_not_meeting_time; tests/test_engagement_repository.py::test_future_occurred_at_is_clamped_to_now",
+   "lesson": "An engagement signal's date is when the SIGNAL happened, not a scheduled future time. Use CreatedDate (booking) when StartDateTime is in the future, AND clamp occurred_at to now at the storage layer so no source can ever persist a future date. Future dates silently corrupt every date-gated rule downstream (send cutoff, momentum windows, recency)."
+  },
+  {
+   "id": "lower-tier-activation-posts-ownerless-card",
+   "date": "2026-06-25",
+   "area": "auto_search/api/app.py activate endpoint",
+   "symptom": "Found in pre-go-live QA: activating a Lower-tier account computed notify=False (no AE/SDR owner, dm_limit=0) but STILL called activate_account, so a direct API activation of a Lower account would drop an ownerless card into a real channel when live. The UI hides Activate for Lower and auto-route skips it, so it was only reachable by a direct/scripted call.",
+   "root_cause": "The notify flag gated enrichment + owner but not the post itself; the spec is 'Lower -> no handoff', i.e. no post at all.",
+   "guard": "tests/test_engagement_api.py::test_activation_lower_tier_never_posts",
+   "lesson": "When a tier/branch means 'do nothing', short-circuit the SIDE EFFECT (the post), not just its inputs. Don't rely on the UI to keep an unsafe endpoint path unreachable; guard it server-side. Release any dedup claim taken before the early return so the account isn't left stuck 'activated'."
+  },
+  {
+   "id": "lookup-engagement-garnish-raw-view-shape",
+   "date": "2026-07-04",
+   "area": "auto_search/api/app.py (_lookup_engagement_context)",
+   "symptom": "The AE lookup card never showed the 'Engaging' chip even for accounts with real heat (e.g. the seeded Warm/16 account).",
+   "root_cause": "The helper matched name/domain/tier keys against the RAW engaged_accounts SQL view, which carries only account_id + counters. Those fields exist only on the SHAPED board rows (_engaged_view()), so nothing ever matched.",
+   "fix": "The endpoint passes _engaged_view() rows (names/tiers resolved) into the pure helper; the helper documents that contract.",
+   "guard": "tests/ui/test_ui_smoke.py::test_ae_lookup_resolves_existing_account_no_spend (chip asserted in a real browser) + tests/test_lookup_api.py::test_engagement_context_matches_by_name_and_domain"
+  },
+  {
+   "id": "fit-score-blind-to-first-party-engagement",
+   "date": "2026-07-04",
+   "area": "auto_search/scoring (engine inputs) + engagement store",
+   "symptom": "A fit score could claim 'no public intent signals found' about an account that BOOKED A MEETING with us. Live: Synergy Orthopedic (engagement Hot, heat 22, meeting booked 2026-06-25) scored intent 4/10 'no signals'; Humana (heat 84, 3 booked meetings) scored intent 3/10. Audit found 3 such blindspots + 4 engaged accounts with unverified QA.",
+   "root_cause": "The scorer's inputs were public web research + carried DISCOVERY signals only; the ENGAGEMENT store (meetings, BOFU forms, ad engagement) was never fed in. The AE-lookup card showed the heat chip, but the score never saw the events \u2014 card and score contradicted each other.",
+   "fix": "engagement/intent_feed.to_intent_signals (events -> scorer signal dicts) + ScoringService(own_signals=...) merges them at SCORE time on every path (ae/promote/rescore/batch; no silent board-wide shifts \u2014 scores change only when a score runs). app.py provider matches by normalized-name key then domain via the shaped board (names drift, domains don't \u2014 the Riverview csv/AKA case). ae-lookup commits persist the signals for drawer provenance.",
+   "guard": "tests/test_intent_feed.py (mapping/collapse/orders + service merge dedupes + provider failure never blocks) ; live before/after: Synergy 16->22 (intent 4->9), Humana intent 3->8 citing '3 meetings booked'."
+  },
+  {
+   "id": "anesthesia-regex-us-spelling",
+   "date": "2026-07-05",
+   "area": "campaigns / catalog (ICP -> sequence routing + Reply.io auto-detect)",
+   "symptom": "\"Engagement Anesthesiology\" got no suggested sequence in the Campaigns tab; American-spelled anesthesia accounts would route to specialty_other instead of the anesthesia sequence.",
+   "root_cause": "The vertical regex was an[ae]esthes \u2014 a character CLASS demands one letter between \"an\" and \"esthes\", which matches British \"anaesthes\" but never American \"anesthes\". Wanted an optional letter (ana?esthes), wrote a mandatory one.",
+   "guard": "tests/test_campaigns.py::test_suggest_sequence_key_from_campaign_names (both spellings) + test_catalog_routes_by_segment_then_subvertical (US sub_segment)",
+   "lesson": "A char class [xy] is one-of, not maybe-one: optional letters are x? / a?. Verify keyword routing against REAL source data (the live Reply.io names caught this), not only invented fixtures."
+  },
+  {
+   "id": "ae-lookup-splits-engagement-identity",
+   "date": "2026-07-07",
+   "area": "engagement crossing x AE-lookup scored accounts",
+   "symptom": "After an AE lookup created acc_synergyorthopedicspecialists, the daily SFDC/podcast re-sync re-crossed Synergy's events to the scored id, splitting one Hot(22) account into acc_(Warm 20)+abm_(Lower 2) board rows and firing a phantom 'new account rose to Warm' SDR card (Galyna caught it).",
+   "root_cause": "Engagement crossing prefers a scored account id when one exists; events previously keyed to abm_<key> get re-assigned on re-sync, leaving the abm_ row orphaned. Ledger knows nothing about the new id, so it looks like a brand-new rising account.",
+   "fix": "One-time repair: ledger pre-marked (both ids -> Hot + latest touch, so nothing fires) then events/contacts moved to the scored id; board shows ONE Synergy at Hot 22. PERMANENT fix still needed: crossing should canonicalize abm_<key>/acc_<key> as one identity (migrate abm events on first scored-cross, and seed the ledger entry for the new id from the old).",
+   "guard": "tests/test_identity_heal.py (heal merges twins, conflict-guarded) + tests/test_engagement_audit.py (I1 trips on any unhealed split) + heal now runs after every cross_and_persist and bulk import"
+  },
+  {
+   "id": "zero-point-opens-advance-last-touch",
+   "date": "2026-07-07",
+   "area": "engaged_accounts rollup (SQL view + JSON repo) x Hot-reactivation rule",
+   "symptom": "A mere email OPEN (0 points) advanced last_touch, so every Hot account would phantom re-alert its AE whenever anyone opened an old email. Caught by the deep review while all sends were staged to the test channel; never reached the team.",
+   "root_cause": "MAX(occurred_at) in the rollup had no points>0 filter; the reactivation rule compares last_touch to the notify ledger touch.",
+   "fix": "SQL view: MAX(occurred_at) FILTER (WHERE COALESCE(points,0)>0); JSON repo: gate the last_touch update on points>0.",
+   "guard": "tests/test_notify_staging.py::test_zero_point_touches_never_advance_last_touch"
+  },
+  {
+   "id": "social-poll-dict-location-crash",
+   "date": "2026-07-07",
+   "area": "social event poll x Apify profile enrichment",
+   "symptom": "Daily cron flagged Crashed (social leg rc=1): TypeError in is_us \u2014 the linkedin-profile-scraper actor returned city/country as OBJECTS ({'name': ...}) instead of strings; the event-keyword poll aborted mid-run and the rest of that day's engagers were never processed.",
+   "root_cause": "normalize_enrichment passed raw actor location fields straight through, and is_us assumed str|None then regex-searched a dict. Upstream actor schema drift \u2014 no contract on field types at the external-API boundary.",
+   "fix": "apify._loc_str normalizes location objects to strings (name/text/default/value keys) at both mapping sites; is_us treats any non-string as unknown and can never raise.",
+   "guard": "test_is_us_never_crashes_on_non_string_hints + test_normalize_enrichment_location_objects_become_strings"
+  },
+  {
+   "id": "csv-import-ragged-row-500",
+   "date": "2026-07-08",
+   "area": "scoring/imports",
+   "summary": "A ragged CSV row (extra comma, e.g. unquoted comma in a hand-edited name) put a LIST under DictReader's None restkey; (v or '').strip() raised AttributeError and 500'd the whole import, for BOTH Definitive and generic schemas. Found by the independent QA agent before ship.",
+   "fix": "Row dicts drop the None restkey (`if k is not None`) in both parse loops; generic lists additionally capped at GENERIC_MAX_ROWS=500 so per-row classification can't time out the wizard.",
+   "test": "tests/test_import_generic.py::test_ragged_rows_do_not_crash_either_schema"
+  },
+  {
+   "id": "twin-identity-split-hides-hot",
+   "date": "2026-07-13",
+   "area": "engagement board + notifier (cross.py identity, _engaged_view, accounts_to_notify)",
+   "symptom": "Companies split across abm_*/csv_* twin tiles under-read heat; 21 tiers understated; company-level HOT accounts (Summa 31, CORA 28, Kaiser 22...) never fired an AE activation because tier is computed per tile. Surfaced when BILH showed 6 pts instead of the merged 8.",
+   "root_cause": "cross.py's abm_<key> synthetic id 'self-heals to the scored id' only for NEW events; history ingested before the company was scored stayed on the abm id. Bulk imports mint the scored twin, splitting one company across identities. Every prior QA hunted false positives (wrong sends); a false negative leaves no artifact to catch.",
+   "guard": "identity.heal_identity_splits() re-keys history to the canonical id after EVERY cross_and_persist and bulk import (capability-gated, domain-conflict + multi-canonical groups go to manual review, never guessed). audit.run_invariants() re-proves the board from raw events (I1 twins, I2 points drift, I3 tile recompute, I4 tile/company due divergence) and the notify endpoint HOLDS whenever it is red \u2014 cards only send from a board that just proved itself. Pinned in tests/test_identity_heal.py + tests/test_engagement_audit.py.",
+   "lesson": "QA-by-incident only pins failures somebody SAW. False negatives (alerts that silently never fire) leave no artifact \u2014 the only defense is a standing invariant audit that recomputes ground truth from raw data and BLOCKS the send path when the system can't prove itself consistent. Also: when a module documents a self-heal ('abm id self-heals to the scored id'), verify it covers HISTORY, not just new writes \u2014 a promise kept only going forward is a migration nobody ran."
+  },
+  {
+   "id": "twin-split-hides-company-hot",
+   "date": "2026-07-13",
+   "area": "engagement board tiers x notify (MAR2-32)",
+   "symptom": "Companies split across abm_/csv_ twin tiles under-read heat per tile; 21 tiers understated; 5 company-level HOT (Summa 31, CORA 28, Kaiser 22...) had no tile crossing Hot so the AE activation could NEVER fire - a silent false negative. Surface: BILH tile showed 6 not merged 8.",
+   "root_cause": "Board + tier computed per account_id; bulk imports minted csv_ twins for companies with history on abm_ ids and nothing merged them (the deferred MAR2-31 follow-up).",
+   "guard": "tests/test_identity_heal.py + tests/test_engagement_audit.py::I1/I4 + tests/test_stress_guards.py (3-way/unicode/nameless twins); prod retro re-key applied 2026-07-13 with *_bak_20260713 rollback tables",
+   "lesson": "Incident QA pins false positives; false negatives leave no artifact. Every aggregate the system SHOWS or SENDS needs a standing invariant that recomputes it from raw data."
+  },
+  {
+   "id": "stale-env-ceiling-silent-hold-all",
+   "date": "2026-07-14",
+   "area": "notify circuit breaker x Railway env lifecycle",
+   "symptom": "Ops alert '1 accounts due (sane max 0)' with bulk-import 'abnormal volume' copy; every send silently held. Ceiling 0 came from an ENGAGEMENT_NOTIFY_SANE_MAX=0 emergency env baked into the long-lived 7/10 container - the var was later removed from config but env edits only apply on redeploy.",
+   "root_cause": "Emergency override lived in mutable env with no self-description; alert copy assumed one failure mode (volume burst).",
+   "guard": "tests/test_stress_guards.py::test_ceiling_zero_declares_hold_all_and_names_accounts + ::test_ceiling_env_zero_reports_env_source + ::test_small_hold_names_accounts_not_volume_language (holds now name accounts + ceiling source + release instructions)",
+   "lesson": "Any emergency override must declare itself in every artifact it produces; alert copy must describe the actual state, not the historically-usual cause."
+  },
+  {
+   "id": "ghost-account-events-without-tile",
+   "date": "2026-07-14",
+   "area": "engagement audit (served board vs raw events)",
+   "symptom": "Class caught by design review during the destroy-pass, not observed live: an account with scored events but no tile on the served board would be invisible to the board, notify, and every human - the purest silent false negative.",
+   "root_cause": "No invariant compared the set of accounts WITH scored events to the set of tiles served.",
+   "guard": "tests/test_stress_guards.py::test_ghost_account_trips_I3 (audit violation I3-ghost); notify interlock holds sends while any violation stands",
+   "lesson": "Auditing values on visible rows is not enough - also audit that every row that SHOULD be visible exists."
+  },
+  {
+   "id": "linkedin-tofu-stale-points-after-matrix-change",
+   "date": "2026-07-13",
+   "area": "engagement events (stored points) x scoring matrix",
+   "symptom": "2 linkedin_tofu events stored at 2 pts vs canonical 6 (pre-matrix-fix stragglers: Synergy acc_, St. Luke's) - accounts under-credited by 4 pts each; view sums STORED points so matrix fixes never reach old rows.",
+   "root_cause": "Points are stamped at ingest; the 2026-06 matrix correction migrated forward behavior but left two historical rows.",
+   "guard": "tests/test_engagement_audit.py (I2 stored-points-vs-matrix drift) runs inside the notify interlock; prod rows corrected 2026-07-13",
+   "lesson": "When a derived value is denormalized at write time, every change to the derivation needs a data migration plus a standing drift check."
+  },
+  {
+   "id": "stale-cron-container-bypasses-self-heal",
+   "date": "2026-07-14",
+   "area": "multi-service deploys x engagement identity (discovery-cron + engagement-preview, shared Postgres)",
+   "symptom": "The 14:30 daily sync re-minted 15 identity twins one day after the retro cleanup: it ran on the discovery-cron container deployed 7/10 - five days before the self-heal existed. Audit went red (I1), interlock held all sends; nothing healed until a manual endpoint heal.",
+   "root_cause": "Two services write the same Postgres; guards shipped to one. Env/code changes only apply per-service on redeploy, so a stale writer silently bypasses every new safeguard.",
+   "guard": "audit I5-stale-heal (tests/test_engagement_audit.py::test_ingest_without_heal_trips_I5) - ANY ingest without a follow-up heal marker turns the board red; both services now deploy from the same commit",
+   "lesson": "A safeguard on a shared store must either live IN the store's write path or be watchdogged by an invariant that any writer trips - never assume all writers run your newest code."
+  },
+  {
+   "id": "abm-domain-match-reminted-scored-twin",
+   "date": "2026-07-14",
+   "area": "auto_search/engagement/cross.py (CrossIndex)",
+   "symptom": "Leads with company 'Summa Health' + @summahealth.org emails crossed to abm_summahealthsystem even though csv_summa_health_system is scored: the scored row stores no domain, so the ABM target's domain won the match and re-minted the twin on every re-sync.",
+   "root_cause": "Scored-first matching only compared like-for-like (scored domain vs abm domain, scored key vs abm key); an abm hit whose company IS scored under a different key/domain had no bridge to the scored sibling.",
+   "guard": "tests/test_cross_sibling.py (alias + domain sibling rebind; abm-only unchanged); live-verified: match('Summa Health', @summahealth.org) -> csv_summa_health_system",
+   "lesson": "When two indexes describe one entity space, every hit on the weaker index must check for a sibling in the authoritative one before minting an id."
+  },
+  {
+   "id": "replyio-sync-failed-with-empty-error",
+   "date": "2026-07-14",
+   "area": "auto_search/engagement/sync.py + replyio_client.py",
+   "symptom": "Reply.io sync stuck status=failed with error='' since ~06-26 window; email signals ~3 weeks stale and nobody knew why - str(ReadTimeout) is empty.",
+   "root_cause": "error=str(exc) loses exception identity for timeout classes; 60s client timeout too small for 9k-contact roster pagination.",
+   "guard": "error falls back to type(exc).__name__ (sync.py, all three sources); client timeout 180s",
+   "lesson": "Never persist str(exc) alone - always include the exception type."
+  },
+  {
+   "id": "click-scanner-inflation",
+   "date": "2026-07-20",
+   "area": "engagement heat aggregation (scoring.py, engaged_accounts view, scores_before, audit recompute, drawer, UI journey strip)",
+   "symptom": "Email-security scanners auto-click every link (216 clicks in 4 days, 80+ in a 7-minute burst); uncapped 1-pt clicks pushed ~30 accounts over tier lines (BHG/TeleMed2U Lower->Hot) and the circuit breaker held 37 due.",
+   "root_cause": "Raw click volume is bot-dominated, but heat summed every stored click point with no per-account ceiling, so a scanner storm read as real engagement everywhere heat was aggregated.",
+   "guard": "tests/test_ship_batch.py::test_capped_score_math + ::test_json_repo_board_and_baseline_apply_cap + ::test_audit_recompute_matches_capped_board + ::test_drawer_account_score_applies_click_cap",
+   "lesson": "CLICK_CAP=3 (scoring.capped_score) must be applied at EVERY read path that aggregates heat \u2014 SQL view, JSON rollup, scores_before baseline, audit recompute, the drawer's _engaged_one, the UI journey strip. A cap applied at N-1 of N surfaces just moves the lie to the last one."
+  },
+  {
+   "id": "compound-bofu-invisible",
+   "date": "2026-07-20",
+   "area": "auto_search/engagement/sfdc_client.py (high-intent lead SOQL)",
+   "symptom": "High-intent inbound leads whose LeadSource was a compound label ('CS Headspace | BOFU' \u2014 Trevor/FCS, Wendy/Optum) never reached the engagement store for weeks; Griffen's dashboard counted them, our board didn't.",
+   "root_cause": "The high-intent filter matched LeadSource 'BOFU' exactly; SFDC's labels drifted to '<campaign> | BOFU' compounds and the equality arm silently excluded them.",
+   "guard": "tests/test_ship_batch.py::test_high_intent_catches_compound_bofu",
+   "lesson": "Align label filters to the org's own dashboard definition (add the LIKE '%| BOFU' arm) and treat every SFDC label as drift-prone \u2014 the daily reconcile leg exists because labels and filters move independently."
+  },
+  {
+   "id": "tofu-echo-label-drift",
+   "date": "2026-07-20",
+   "area": "sfdc_client low-intent SOQL + auto_search/engagement/sfdc.py filter_tofu_echoes",
+   "symptom": "The Airtable automation stamps LeadSource 'TOFU Engagement Campaign' (not '| TOFU'), so every echoed LinkedIn capture was invisible to the SFDC sync \u2014 and naively adding the label would have double-counted already-captured people (Crystal) and duped one person's multiple leads (Pamela x2).",
+   "root_cause": "Our own capture pipeline writes leads back into SFDC under a label the sync didn't know; ingesting that echo raw re-scores people who already earned linkedin_tofu heat at capture time, and re-created leads (second email from enrichment) mint duplicate signals for one human.",
+   "guard": "tests/test_ship_batch.py::test_low_intent_includes_tofu_echo_label + ::test_tofu_echo_suppressed_and_dupes_collapse + ::test_tofu_echo_person_key_collapses_multi_email_dupes",
+   "lesson": "When a source echoes YOUR OWN writes back at you, ingest it only through an echo filter: capture suppression + per-PERSON collapse (name+company key, not just email \u2014 one human can arrive under two addresses). A new label gets added with its feedback loop mapped, not just its SOQL arm."
+  },
+  {
+   "id": "non-intro-meeting-heat",
+   "date": "2026-07-20",
+   "area": "auto_search/engagement/sfdc.py parse() meetings loop",
+   "symptom": "Every SFDC Type=Meeting scored 10 \u2014 a 'Technical Demo' made Commonwealth a false Hot rise.",
+   "root_cause": "The booked-meeting heat signal is defined as a NEW introductory meeting (Griffen's definition, ratified by Sunny 2026-07-20), but the parser counted demos, follow-ups and internal syncs \u2014 pipeline motion, not a new-meeting signal.",
+   "guard": "tests/test_ship_batch.py::test_meetings_intro_only",
+   "lesson": "Encode the business definition of a signal (subject carries 'Intro'), not the CRM's record type \u2014 Type=Meeting is a container, not an intent signal."
+  },
+  {
+   "id": "stale-container-fleet-drift",
+   "date": "2026-07-20",
+   "area": "multi-service Railway fleet (linkedin-tofu-cron) x shared Postgres deploys",
+   "symptom": "linkedin-tofu-cron ran a July-10 build for 10 days while web services were redeployed repeatedly: it minted abm_ twins, dropped a heat event, and re-redded the audit every 15 minutes.",
+   "root_cause": "Deploys were per-service with no build-parity check, so one cron silently kept writing the shared store with 10-day-old code that predated the safeguards it was bypassing.",
+   "guard": "tests/test_ship_batch.py::test_stale_writer_after_api_beat_is_flagged (heartbeat.stale_writers, the logic audit I6 runs) + scripts/ship.sh single-path fleet deploy with stamp verification",
+   "lesson": "Every writer heartbeats its BUILD_STAMP on run start and the audit anchors on the API's own boot beat \u2014 a writer that beats AFTER the new API on a different build is stale by definition (no wall-clock window to false-red a routine deploy) \u2014 and there is exactly ONE way to deploy the fleet."
+  },
+  {
+   "id": "hand-built-send-list-drift",
+   "date": "2026-07-20",
+   "area": "engagement notify (chat-side send lists vs the notify-changes evaluator)",
+   "symptom": "Hand-built send lists keyed by name strings missed ledger entries twice: Centene/Summa/CAO were proposed for activation although already baselined Hot (ledger key variants).",
+   "root_cause": "The due-for-activation computation lived only inside POST /notify-changes; humans (and chat agents) re-derived it by eyeballing the board with their own keys, which drift from company_key/_ledger_lookup.",
+   "guard": "tests/test_ship_batch.py::test_due_endpoint_matches_notify_changes_dry_run",
+   "lesson": "Productize the evaluator: GET /api/engagement/due IS notify-changes?dry_run=true, every consumer (digest, chat review, human) reads that one endpoint, and docs/RULES.md bans hand-built lists."
+  }
+ ]
+}

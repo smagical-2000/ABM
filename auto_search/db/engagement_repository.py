@@ -1,0 +1,892 @@
+"""Storage for the engagement phase — interface + Postgres and JSON impls.
+
+Engagement (Reply.io today; more sources later) is its own module. It lives in the
+same database as the discovery store (repository.py) and the scoring store
+(scoring_repository.py) but shares NO tables and holds NO foreign keys into them:
+`account_id` is a SOFT reference (text) to a scored/ABM account, re-stamped on each
+sync from durable keys (email domain / normalized company name), so it self-heals
+if ids change and can never lock the live ABM/scoring tables.
+
+`get_engagement_repository()` returns Postgres when DATABASE_URL is set, else a
+JSON-file repo for local/dev + tests — mirroring get_repository() /
+get_scoring_repository().
+
+Two normalized tables + a derived rollup (see engagement_schema.sql):
+  • engagement_contacts — one row per source contact: identity, the cross-match,
+    and per-window send-stat COUNTS (for open/reply rates).
+  • engagement_events   — one row per contact × MEANINGFUL touch (click / reply /
+    meeting_booked). external_id is "<channel>:<kind>:<contactId>" (source is its own
+    column, not repeated); the PK (source, external_id) makes re-sync idempotent and
+    enforces "a contact counts each kind at most once", so a long contact list can't
+    inflate an account's score.
+  • engaged_accounts (view) — read-time rollup; the heat TIER is assigned by the
+    pure Python scorer (engagement/scoring.py), never in SQL.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any, Protocol
+
+from auto_search.engagement.scoring import (
+    CLICK_CAP,
+    CLICK_KINDS,
+    DEPRECATED_KINDS,
+    capped_score,
+)
+
+logger = logging.getLogger(__name__)
+
+# Default source for this phase. Kept as a constant so a future connector can pass
+# its own ('sfdc', 'sheet', ...) without any other code changing.
+SOURCE_REPLYIO = "replyio"
+
+
+# ── interface ─────────────────────────────────────────────────────────
+
+
+class EngagementRepository(Protocol):
+    """Storage contract for engagement. Implementations must be idempotent:
+    upserting the same contact/event twice leaves the store as if done once."""
+
+    def ensure_schema(self) -> None: ...
+
+    def land_raw(self, kind: str, payload: dict, *, source: str = SOURCE_REPLYIO,
+                 window_from: str | None = None, window_to: str | None = None) -> None:
+        """Append a verbatim source payload to the raw landing table (ELT)."""
+        ...
+
+    def upsert_contact(self, contact: dict) -> None:
+        """Insert/update one contact by (source, external_id). Carries identity,
+        send-stat counts, and the cross-match (account_id/match_tier/matched_lists)."""
+        ...
+
+    def add_event(self, event: dict) -> bool:
+        """Upsert one event by (source, external_id). Returns True if it was newly
+        inserted, False if it updated an existing row — so callers can assert
+        idempotency (re-sync must not create duplicates)."""
+        ...
+
+    def rekey_account(self, old_id: str, new_id: str) -> dict:
+        """Move every event/contact/activation from old_id to new_id (identity
+        self-heal, MAR2-32). If the new id already holds an activation, the old
+        one is dropped (earliest claim wins). Returns moved counts
+        {"events": n, "contacts": n, "activations": n}."""
+        ...
+
+    def engaged_accounts(self) -> list[dict]:
+        """The rollup: one row per matched account (score + counts + rates inputs),
+        ranked by score then recency. Tier is applied by the caller (pure scorer)."""
+        ...
+
+    def events_for_account(self, account_id: str) -> list[dict]:
+        """An account's meaningful touches, newest first (the drawer timeline)."""
+        ...
+
+    def scores_before(self, cutoff: str) -> dict[str, int]:
+        """Per-account heat SUM from events dated strictly BEFORE `cutoff` (YYYY-MM-DD) —
+        the tier an account had as of the cutoff, so the notifier can baseline the
+        pre-cutoff state and fire only on tier changes that happened on/after it."""
+        ...
+
+    def contacts(self, *, account_id: str | None = None,
+                 unresolved_only: bool = False) -> list[dict]:
+        """Contacts, optionally filtered to one account or to the unresolved queue
+        (account_id IS NULL — never dropped, surfaced for review)."""
+        ...
+
+    def recent_events(self, *, limit: int = 200) -> list[dict]:
+        """Most recent meaningful touches across all accounts (the Inbox feed)."""
+        ...
+
+    def contact_emails_for_source(self, source: str) -> set[str]:
+        """Every non-empty contact email stored under `source` — the capture
+        ledger the SFDC echo filter checks (narrow read; never a full-row scan)."""
+        ...
+
+    def external_ids_for_source(self, source: str) -> set[str]:
+        """Every event external_id stored under `source` — the existing-ids set
+        the reconcile tripwire diffs against (narrow read; never a full-row scan)."""
+        ...
+
+    def claim_activation(self, account_id: str, *, at: str | None = None) -> bool:
+        """Atomically claim an account for activation. Returns True if THIS call
+        claimed it (first activation), False if it was already activated — so two
+        reps (or the auto-route loop) clicking Activate fire it exactly once.
+        Idempotent + race-safe (single INSERT … ON CONFLICT DO NOTHING)."""
+        ...
+
+    def is_activated(self, account_id: str) -> bool:
+        """True if the account has already been activated."""
+        ...
+
+    def release_activation(self, account_id: str) -> None:
+        """Undo a claim (e.g. the Slack post failed after claiming) so it can retry."""
+        ...
+
+    def activated_account_ids(self) -> set[str]:
+        """Every account_id that has been activated — so the board can badge them."""
+        ...
+
+    def reset_activations(self) -> int:
+        """Clear the whole activation ledger (testing/replay). Returns rows removed."""
+        ...
+
+    def get_setting(self, key: str) -> str | None:
+        """A persisted runtime setting (e.g. the live-routing toggle), or None."""
+        ...
+
+    def set_setting(self, key: str, value: str) -> None:
+        """Upsert a persisted runtime setting. Identical in both impls."""
+        ...
+
+    def get_sync_state(self, source: str = SOURCE_REPLYIO) -> dict | None: ...
+
+    def set_sync_state(self, source: str = SOURCE_REPLYIO, *, status: str | None = None,
+                       stats: dict | None = None, error: str | None = None,
+                       window_from: str | None = None, window_to: str | None = None,
+                       last_synced_at: Any = None) -> None:
+        """Upsert the per-source sync cursor. Provided fields overwrite; omitted
+        ones (None) keep their prior value; `error` is always set (success clears
+        it); `last_synced_at` defaults to now. Identical in both impls."""
+        ...
+
+    def delete_all(self) -> int:
+        """Wipe every engagement row (clean slate for a full re-sync / tests)."""
+        ...
+
+
+# ── shared shaping ────────────────────────────────────────────────────
+
+
+def _iso(value: Any) -> Any:
+    return value.isoformat() if isinstance(value, datetime) else value
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _no_future(iso: Any) -> Any:
+    """Never store a future occurred_at. A meeting scheduled ahead (its StartDateTime is
+    in the future) would otherwise inflate today's heat, show a future timeline date, and
+    trip the send cutoff. Clamp to now; date-prefix compare is format/timezone agnostic."""
+    now = _now()
+    s = _iso(iso)
+    return now if isinstance(s, str) and s[:10] > now[:10] else s
+
+
+def _norm(row: dict) -> dict:
+    """ISO-stringify datetime values so Postgres reads match the JSON repo's shape
+    — the dual-repo parity rule (the sibling repos normalize the same way)."""
+    return {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in row.items()}
+
+
+_COUNT_FIELDS = ("sent", "delivered", "opened", "clicked", "replied", "bounced")
+
+
+def contact_person_key(c: dict) -> str:
+    """Dedup key so one human tracked under multiple sources counts once — e.g. the
+    same person as an SFDC lead AND a Reply.io sequence contact (same email, different
+    external_id). Email (lowercased) when present, else the source-scoped external_id.
+    Mirror of the SQL in engaged_accounts (COALESCE(NULLIF(LOWER(email),''), ext_id))."""
+    e = (c.get("email") or "").strip().lower()
+    return e or f"id:{c.get('external_id')}"
+
+
+def dedupe_contacts(contacts: list[dict]) -> list[dict]:
+    """Collapse contacts to one row per person (contact_person_key), merging send-stats
+    (summed), matched_lists (union), meeting flag (any), and sources. So a person in two
+    systems shows once with their combined activity — pure, order-preserving."""
+    merged: dict[str, dict] = {}
+    for c in contacts:
+        k = contact_person_key(c)
+        m = merged.get(k)
+        if m is None:
+            m = dict(c)
+            m["sources"] = (list(c["sources"]) if c.get("sources")     # idempotent re-dedupe
+                            else [c["source"]] if c.get("source") else [])
+            merged[k] = m
+            continue
+        for f in _COUNT_FIELDS:
+            m[f] = int(m.get(f) or 0) + int(c.get(f) or 0)
+        m["meeting_booked"] = bool(m.get("meeting_booked")) or bool(c.get("meeting_booked"))
+        m["matched_lists"] = sorted(set(m.get("matched_lists") or [])
+                                    | set(c.get("matched_lists") or []))
+        if not m.get("title") and c.get("title"):
+            m["title"] = c["title"]
+        if c.get("source") and c["source"] not in m["sources"]:
+            m["sources"].append(c["source"])
+    return list(merged.values())
+
+
+def _contact_engaged(c: dict, scored_exts: set) -> bool:
+    """A row that actually ENGAGED, vs a mere recipient. True when it opened, clicked
+    or replied an email, has a booked-meeting flag, or is the subject of a scored event
+    (`scored_exts` = that account's event contact_exts). Opens count (0 heat, still
+    engagement); delivered-but-never-opened does not. Account-level meeting/opp rows (no
+    email) still count — a booked meeting is an engagement even without a named person."""
+    return (int(c.get("opened") or 0) > 0 or int(c.get("clicked") or 0) > 0
+            or int(c.get("replied") or 0) > 0 or bool(c.get("meeting_booked"))
+            or c.get("external_id") in scored_exts)
+
+
+def engaging_contacts(contacts: list[dict], events: list[dict]) -> list[dict]:
+    """Deduped ENGAGEMENTS for an account — the people (or account-level signals) that
+    actually engaged, one row per person. Drops delivered-but-silent recipients, then
+    dedupes across sources. Backs the "contacts engaging" count + the drawer avatars."""
+    scored_exts = {e.get("contact_ext") for e in events if (e.get("points") or 0) > 0}
+    return dedupe_contacts([c for c in contacts if _contact_engaged(c, scored_exts)])
+
+
+def _contact_row(c: dict) -> dict:
+    """Normalize an inbound contact dict to the stored shape (defaults + types)."""
+    return {
+        "source": c.get("source") or SOURCE_REPLYIO,
+        "external_id": str(c["external_id"]),
+        "email": c.get("email"),
+        "email_domain": c.get("email_domain"),
+        "company": c.get("company"),
+        "company_key": c.get("company_key"),
+        "title": c.get("title"),
+        "meeting_booked": bool(c.get("meeting_booked")),
+        "opted_out": bool(c.get("opted_out")),
+        **{f: int(c.get(f) or 0) for f in _COUNT_FIELDS},
+        "account_id": c.get("account_id"),
+        "match_tier": c.get("match_tier"),
+        "matched_lists": list(c.get("matched_lists") or []),
+        "updated_at": _now(),
+    }
+
+
+def _event_row(e: dict) -> dict:
+    """Normalize an inbound event dict to the stored shape (defaults + types)."""
+    return {
+        "source": e.get("source") or SOURCE_REPLYIO,
+        "external_id": str(e["external_id"]),
+        "channel": e.get("channel") or "email",
+        "kind": e["kind"],
+        "points": int(e.get("points") or 0),
+        "contact_ext": e.get("contact_ext"),
+        "company": e.get("company"),
+        "account_id": e.get("account_id"),
+        "campaign": e.get("campaign"),
+        "occurred_at": _no_future(e["occurred_at"]),
+        "raw": e.get("raw") or {},
+    }
+
+
+def _bucket_weekly(rows: list[tuple], *, weeks: int, now: datetime | None = None
+                   ) -> dict[str, list[int]]:
+    """Bucket (account_id, occurred_at, points) into a per-account list of `weeks`
+    weekly point-sums, oldest first (index -1 = current week). The momentum series
+    the console sparkline draws. `occurred_at` may be a datetime or ISO string."""
+    now = now or datetime.now(UTC)
+    out: dict[str, list[int]] = {}
+    for account_id, occurred, points in rows:
+        if not account_id or not occurred:
+            continue
+        ts = occurred if isinstance(occurred, datetime) else _parse_iso(occurred)
+        if ts is None:
+            continue
+        weeks_ago = int((now - ts).days // 7)
+        idx = weeks - 1 - weeks_ago
+        if 0 <= idx < weeks:
+            series = out.setdefault(account_id, [0] * weeks)
+            series[idx] += int(points or 0)
+    return out
+
+
+def _parse_iso(value: str) -> datetime | None:
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+    except (ValueError, TypeError):
+        return None
+
+
+def _engaged_row(account_id: str, ev: dict, c: dict) -> dict:
+    """Shape one engaged-account rollup row (matches the SQL view's columns)."""
+    return {
+        "account_id": account_id,
+        "score": int(ev.get("score", 0)),
+        "clicks": int(ev.get("clicks", 0)),
+        "replies": int(ev.get("replies", 0)),
+        "meetings": int(ev.get("meetings", 0)),
+        "contacts": int(c.get("contacts", 0)),
+        "delivered": c.get("delivered"),
+        "opened": c.get("opened"),
+        "replied_sends": c.get("replied_sends"),
+        "last_touch": ev.get("last_touch"),
+    }
+
+
+# ── JSON file (local / dev / tests) ───────────────────────────────────
+
+
+class EngagementJsonRepository:
+    """Reference implementation backed by a single JSON file. Mirrors the on-disk
+    shape of the SQL tables so the JSON→Postgres mapping stays 1:1. Not for
+    production concurrency (rewrites the whole file per write)."""
+
+    def __init__(self, path: str | Path = "./data/engagement_store.json") -> None:
+        self._path = Path(path)
+        self._store = self._load()
+
+    def ensure_schema(self) -> None:
+        return None
+
+    def land_raw(self, kind, payload, *, source=SOURCE_REPLYIO,
+                 window_from=None, window_to=None) -> None:
+        self._store["raw"].append({
+            "source": source, "kind": kind, "fetched_at": _now(),
+            "window_from": window_from, "window_to": window_to, "payload": payload,
+        })
+        self._flush()
+
+    def upsert_contact(self, contact) -> None:
+        row = _contact_row(contact)
+        self._store["contacts"][f"{row['source']}:{row['external_id']}"] = row
+        self._flush()
+
+    def add_event(self, event) -> bool:
+        row = _event_row(event)
+        key = f"{row['source']}:{row['external_id']}"
+        is_new = key not in self._store["events"]
+        existing = self._store["events"].get(key, {})
+        row["ingested_at"] = existing.get("ingested_at") or _now()
+        self._store["events"][key] = row
+        self._flush()
+        return is_new
+
+    def rekey_account(self, old_id, new_id) -> dict:
+        moved = {"events": 0, "contacts": 0, "activations": 0}
+        for e in self._store["events"].values():
+            if e.get("account_id") == old_id:
+                e["account_id"] = new_id
+                moved["events"] += 1
+        for c in self._store["contacts"].values():
+            if c.get("account_id") == old_id:
+                c["account_id"] = new_id
+                moved["contacts"] += 1
+        acts = self._store.setdefault("activations", {})
+        if old_id in acts:
+            acts.setdefault(new_id, acts[old_id])
+            del acts[old_id]
+            moved["activations"] = 1
+        if any(moved.values()):
+            self._flush()
+        return moved
+
+    def engaged_accounts(self) -> list[dict]:
+        ev: dict[str, dict] = {}
+        scored_exts: dict[str, set] = {}   # account -> contact_exts with a scored event
+        for e in self._store["events"].values():
+            aid = e.get("account_id")
+            if not aid or e.get("kind") in DEPRECATED_KINDS:   # retired kinds never count
+                continue
+            if (e.get("points") or 0) > 0:
+                scored_exts.setdefault(aid, set()).add(e.get("contact_ext"))
+            slot = ev.setdefault(aid, {"score": 0, "click_pts": 0, "clicks": 0,
+                                       "replies": 0, "meetings": 0, "last_touch": None})
+            slot["score"] += int(e.get("points") or 0)
+            kind = e.get("kind")
+            if kind in CLICK_KINDS:
+                slot["click_pts"] += int(e.get("points") or 0)
+            if kind in ("click", "outbound_click"):
+                slot["clicks"] += 1
+            elif kind in ("reply", "outbound_reply"):
+                slot["replies"] += 1
+            elif kind in ("meeting_booked", "outbound_meeting_booked"):
+                slot["meetings"] += 1
+            ot = e.get("occurred_at")
+            # last_touch = latest SCORED touch only (zero-point delivered/open/
+            # bounce rows must not advance it — phantom Hot re-alerts otherwise).
+            # Keep in sync with the engaged_accounts view in engagement_schema.sql.
+            if (e.get("points") or 0) > 0 and ot and (
+                    slot["last_touch"] is None or ot > slot["last_touch"]):
+                slot["last_touch"] = ot
+        cc: dict[str, dict] = {}
+        seen_people: dict[str, set] = {}   # account_id -> person keys (dedup the count)
+        for c in self._store["contacts"].values():
+            aid = c.get("account_id")
+            if not aid:
+                continue
+            slot = cc.setdefault(aid, {"contacts": 0, "delivered": 0,
+                                       "opened": 0, "replied_sends": 0})
+            slot["delivered"] += int(c.get("delivered") or 0)   # rates over ALL recipients
+            slot["opened"] += int(c.get("opened") or 0)
+            slot["replied_sends"] += int(c.get("replied") or 0)
+            # "contacts" = distinct ENGAGED people only (opened/clicked/replied, a booked
+            # meeting, or a scored event) — a delivered-but-silent recipient doesn't count.
+            if _contact_engaged(c, scored_exts.get(aid, set())):
+                key = contact_person_key(c)      # same human across sources counts once
+                ks = seen_people.setdefault(aid, set())
+                if key not in ks:
+                    ks.add(key)
+                    slot["contacts"] += 1
+        for slot in ev.values():   # click cap (AGT-1453) — lockstep w/ the SQL view
+            slot["score"] = capped_score(slot["score"], slot.pop("click_pts", 0))
+        rows = [_engaged_row(aid, ev.get(aid, {}), cc.get(aid, {}))
+                for aid in (set(ev) | set(cc))]
+        rows.sort(key=lambda r: (r["score"], r.get("last_touch") or ""), reverse=True)
+        return rows
+
+    def events_for_account(self, account_id) -> list[dict]:
+        rows = [e for e in self._store["events"].values()
+                if e.get("account_id") == account_id
+                and e.get("kind") not in DEPRECATED_KINDS]   # hide retired kinds
+        rows.sort(key=lambda e: e.get("occurred_at") or "", reverse=True)
+        return rows
+
+    def scores_before(self, cutoff: str) -> dict[str, int]:
+        out: dict[str, int] = {}
+        clicks: dict[str, int] = {}
+        for e in self._store["events"].values():
+            aid = e.get("account_id")
+            oc = e.get("occurred_at") or ""
+            if aid and oc and oc[:10] < cutoff[:10] and e.get("kind") not in DEPRECATED_KINDS:
+                pts = int(e.get("points") or 0)
+                out[aid] = out.get(aid, 0) + pts
+                if e.get("kind") in CLICK_KINDS:
+                    clicks[aid] = clicks.get(aid, 0) + pts
+        # Click cap (AGT-1453) — the baseline must use the same math as the board.
+        return {aid: capped_score(s, clicks.get(aid, 0)) for aid, s in out.items()}
+
+    def account_weekly_series(self, *, weeks: int = 8) -> dict[str, list[int]]:
+        rows = [(e.get("account_id"), e.get("occurred_at"), e.get("points"))
+                for e in self._store["events"].values()
+                if e.get("account_id") and e.get("kind") not in DEPRECATED_KINDS]
+        return _bucket_weekly(rows, weeks=weeks)
+
+    def contacts(self, *, account_id=None, unresolved_only=False) -> list[dict]:
+        rows = list(self._store["contacts"].values())
+        if unresolved_only:
+            rows = [c for c in rows if not c.get("account_id")]
+        elif account_id is not None:
+            rows = [c for c in rows if c.get("account_id") == account_id]
+        rows.sort(key=lambda c: c.get("updated_at") or "", reverse=True)
+        return rows
+
+    def recent_events(self, *, limit=200) -> list[dict]:
+        rows = sorted((e for e in self._store["events"].values()
+                       if e.get("kind") not in DEPRECATED_KINDS),
+                      key=lambda e: e.get("occurred_at") or "", reverse=True)
+        return rows[:limit]
+
+    def contact_emails_for_source(self, source) -> set:
+        return {c["email"] for c in self._store["contacts"].values()
+                if c.get("source") == source and c.get("email")}
+
+    def external_ids_for_source(self, source) -> set:
+        return {e["external_id"] for e in self._store["events"].values()
+                if e.get("source") == source and e.get("external_id")}
+
+    def claim_activation(self, account_id, *, at=None) -> bool:
+        acts = self._store.setdefault("activations", {})
+        if account_id in acts:
+            return False                       # already activated — this call loses the race
+        acts[account_id] = at or _now()
+        self._flush()
+        return True
+
+    def is_activated(self, account_id) -> bool:
+        return account_id in self._store.get("activations", {})
+
+    def release_activation(self, account_id) -> None:
+        if self._store.get("activations", {}).pop(account_id, None) is not None:
+            self._flush()
+
+    def activated_account_ids(self) -> set:
+        return set(self._store.get("activations", {}))
+
+    def reset_activations(self) -> int:
+        n = len(self._store.get("activations", {}))
+        self._store["activations"] = {}
+        self._flush()
+        return n
+
+    def get_setting(self, key) -> str | None:
+        return self._store.get("settings", {}).get(key)
+
+    def set_setting(self, key, value) -> None:
+        self._store.setdefault("settings", {})[key] = value
+        self._flush()
+
+    def get_sync_state(self, source=SOURCE_REPLYIO) -> dict | None:
+        return self._store["sync"].get(source)
+
+    def set_sync_state(self, source=SOURCE_REPLYIO, *, status=None, stats=None, error=None,
+                       window_from=None, window_to=None, last_synced_at=None) -> None:
+        row = self._store["sync"].get(source) or {"source": source}
+        if status is not None:
+            row["status"] = status
+        if stats is not None:
+            row["stats"] = stats
+        if window_from is not None:
+            row["window_from"] = window_from
+        if window_to is not None:
+            row["window_to"] = window_to
+        row["error"] = error                       # always set: a success clears it
+        if last_synced_at is not None:
+            row["last_synced_at"] = _iso(last_synced_at)
+        elif status in ("success", "failed"):      # stamp on completion, not on 'running'
+            row["last_synced_at"] = _now()
+        self._store["sync"][source] = row
+        self._flush()
+
+    def delete_all(self) -> int:
+        n = len(self._store["events"]) + len(self._store["contacts"])
+        self._store = _empty_store()
+        self._flush()
+        return n
+
+    # -- internals --
+
+    def _load(self) -> dict:
+        if not self._path.exists():
+            return _empty_store()
+        try:
+            data = json.loads(self._path.read_text())
+        except json.JSONDecodeError:
+            backup = self._path.with_suffix(self._path.suffix + ".corrupt")
+            try:
+                self._path.replace(backup)
+                logger.error("corrupt engagement store at %s — moved to %s, starting empty",
+                             self._path, backup)
+            except OSError:
+                logger.error("corrupt engagement store at %s — starting empty", self._path)
+            return _empty_store()
+        # tolerate older/partial files
+        for k, v in _empty_store().items():
+            data.setdefault(k, v)
+        return data
+
+    def _flush(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+        tmp.write_text(json.dumps(self._store, indent=2, default=str))
+        tmp.replace(self._path)
+
+
+def _empty_store() -> dict:
+    return {"raw": [], "contacts": {}, "events": {}, "sync": {}, "activations": {},
+            "settings": {}}
+
+
+# ── Postgres ──────────────────────────────────────────────────────────
+
+
+class EngagementPostgresRepository:
+    """Production storage backed by Postgres (psycopg3, pooled, sync) — same
+    protocol as the JSON impl. Runs engagement_schema.sql on ensure_schema()."""
+
+    def __init__(self, dsn: str | None = None) -> None:
+        from psycopg.rows import dict_row
+        from psycopg_pool import ConnectionPool
+
+        dsn = dsn or os.getenv("DATABASE_URL")
+        if not dsn:
+            raise RuntimeError("DATABASE_URL not set")
+        self._pool = ConnectionPool(dsn, min_size=1, max_size=4, open=True,
+                                    kwargs={"row_factory": dict_row})
+
+    def close(self) -> None:
+        self._pool.close()
+
+    def ensure_schema(self) -> None:
+        sql = (Path(__file__).resolve().parent / "engagement_schema.sql").read_text()
+        with self._pool.connection() as conn:
+            conn.execute(sql)
+        logger.info("engagement schema ensured")
+
+    def land_raw(self, kind, payload, *, source=SOURCE_REPLYIO,
+                 window_from=None, window_to=None) -> None:
+        from psycopg.types.json import Json
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO engagement_raw (source, kind, window_from, window_to, payload) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (source, kind, window_from, window_to, Json(payload)),
+            )
+
+    def upsert_contact(self, contact) -> None:
+        from psycopg.types.json import Json
+        r = _contact_row(contact)
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO engagement_contacts (
+                    source, external_id, email, email_domain, company, company_key,
+                    title, meeting_booked, opted_out, sent, delivered, opened,
+                    clicked, replied, bounced, account_id, match_tier, matched_lists,
+                    updated_at
+                ) VALUES (
+                    %(source)s, %(external_id)s, %(email)s, %(email_domain)s, %(company)s,
+                    %(company_key)s, %(title)s, %(meeting_booked)s, %(opted_out)s, %(sent)s,
+                    %(delivered)s, %(opened)s, %(clicked)s, %(replied)s, %(bounced)s,
+                    %(account_id)s, %(match_tier)s, %(matched_lists)s, now()
+                )
+                ON CONFLICT (source, external_id) DO UPDATE SET
+                    email = EXCLUDED.email, email_domain = EXCLUDED.email_domain,
+                    company = EXCLUDED.company, company_key = EXCLUDED.company_key,
+                    title = EXCLUDED.title, meeting_booked = EXCLUDED.meeting_booked,
+                    opted_out = EXCLUDED.opted_out, sent = EXCLUDED.sent,
+                    delivered = EXCLUDED.delivered, opened = EXCLUDED.opened,
+                    clicked = EXCLUDED.clicked, replied = EXCLUDED.replied,
+                    bounced = EXCLUDED.bounced, account_id = EXCLUDED.account_id,
+                    match_tier = EXCLUDED.match_tier, matched_lists = EXCLUDED.matched_lists,
+                    updated_at = now()
+                """,
+                {**r, "matched_lists": Json(r["matched_lists"])},
+            )
+
+    def add_event(self, event) -> bool:
+        from psycopg.types.json import Json
+        r = _event_row(event)
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO engagement_events (
+                    source, external_id, channel, kind, points, contact_ext,
+                    company, account_id, campaign, occurred_at, raw
+                ) VALUES (
+                    %(source)s, %(external_id)s, %(channel)s, %(kind)s, %(points)s,
+                    %(contact_ext)s, %(company)s, %(account_id)s, %(campaign)s,
+                    %(occurred_at)s, %(raw)s
+                )
+                ON CONFLICT (source, external_id) DO UPDATE SET
+                    points = EXCLUDED.points, contact_ext = EXCLUDED.contact_ext,
+                    company = EXCLUDED.company, account_id = EXCLUDED.account_id,
+                    campaign = EXCLUDED.campaign, occurred_at = EXCLUDED.occurred_at,
+                    raw = EXCLUDED.raw
+                RETURNING (xmax = 0) AS inserted
+                """,
+                {**r, "raw": Json(r["raw"])},
+            ).fetchone()
+        return bool(row["inserted"])
+
+    def rekey_account(self, old_id, new_id) -> dict:
+        # One connection context = one transaction: a crash mid-move can never
+        # leave a company half re-keyed.
+        with self._pool.connection() as conn:
+            ev = conn.execute(
+                "UPDATE engagement_events SET account_id = %s WHERE account_id = %s",
+                (new_id, old_id)).rowcount
+            ct = conn.execute(
+                "UPDATE engagement_contacts SET account_id = %s WHERE account_id = %s",
+                (new_id, old_id)).rowcount
+            conn.execute(
+                "INSERT INTO engagement_activations (account_id, activated_at) "
+                "SELECT %s, activated_at FROM engagement_activations "
+                "WHERE account_id = %s ON CONFLICT (account_id) DO NOTHING",
+                (new_id, old_id))
+            ac = conn.execute(
+                "DELETE FROM engagement_activations WHERE account_id = %s",
+                (old_id,)).rowcount
+        return {"events": ev, "contacts": ct, "activations": ac}
+
+    def engaged_accounts(self) -> list[dict]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM engaged_accounts "
+                "ORDER BY score DESC, last_touch DESC NULLS LAST"
+            ).fetchall()
+        return [_norm(dict(r)) for r in rows]
+
+    def events_for_account(self, account_id) -> list[dict]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM engagement_events "
+                "WHERE account_id = %s AND kind <> 'sales_accepted_opportunity' "
+                "ORDER BY occurred_at DESC",
+                (account_id,),
+            ).fetchall()
+        return [_norm(dict(r)) for r in rows]
+
+    def scores_before(self, cutoff: str) -> dict[str, int]:
+        # Click cap (AGT-1453): the IN-list + cap come from the canonical
+        # scoring constants, so a scoring.py change can never silently diverge
+        # from this SQL twin. Safe interpolation: internal frozenset + int only.
+        click_in = ",".join(f"'{k}'" for k in sorted(CLICK_KINDS))
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT account_id, SUM(points) "
+                "  - GREATEST(COALESCE(SUM(points) FILTER (WHERE kind IN "
+                f"    ({click_in})), 0) - {CLICK_CAP}, 0) AS s "
+                "FROM engagement_events "
+                "WHERE account_id IS NOT NULL AND kind <> 'sales_accepted_opportunity' "
+                "AND occurred_at::date < %s::date GROUP BY account_id", (cutoff[:10],)
+            ).fetchall()
+        return {r["account_id"]: int(r["s"] or 0) for r in rows}
+
+    def account_weekly_series(self, *, weeks: int = 8) -> dict[str, list[int]]:
+        cutoff = datetime.now(UTC) - timedelta(weeks=weeks)
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT account_id, occurred_at, points FROM engagement_events "
+                "WHERE account_id IS NOT NULL AND occurred_at >= %s "
+                "AND kind <> 'sales_accepted_opportunity'", (cutoff,)
+            ).fetchall()
+        return _bucket_weekly(
+            [(r["account_id"], r["occurred_at"], r["points"]) for r in rows], weeks=weeks)
+
+    def contacts(self, *, account_id=None, unresolved_only=False) -> list[dict]:
+        with self._pool.connection() as conn:
+            if unresolved_only:
+                rows = conn.execute(
+                    "SELECT * FROM engagement_contacts WHERE account_id IS NULL "
+                    "ORDER BY updated_at DESC"
+                ).fetchall()
+            elif account_id is not None:
+                rows = conn.execute(
+                    "SELECT * FROM engagement_contacts WHERE account_id = %s "
+                    "ORDER BY updated_at DESC",
+                    (account_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM engagement_contacts ORDER BY updated_at DESC"
+                ).fetchall()
+        return [_norm(dict(r)) for r in rows]
+
+    def recent_events(self, *, limit=200) -> list[dict]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM engagement_events "
+                "WHERE kind <> 'sales_accepted_opportunity' "
+                "ORDER BY occurred_at DESC LIMIT %s",
+                (limit,),
+            ).fetchall()
+        return [_norm(dict(r)) for r in rows]
+
+    def contact_emails_for_source(self, source) -> set:
+        # Narrow read (uses the (source, external_id) PK prefix) — the echo
+        # filter needs only the email column, never the full contact rows.
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT email FROM engagement_contacts "
+                "WHERE source = %s AND email IS NOT NULL AND email <> ''",
+                (source,),
+            ).fetchall()
+        return {r["email"] for r in rows}
+
+    def external_ids_for_source(self, source) -> set:
+        # Same narrow shape over events — the reconcile diff needs only ids,
+        # not a 250k-row recent_events scan.
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT external_id FROM engagement_events WHERE source = %s",
+                (source,),
+            ).fetchall()
+        return {r["external_id"] for r in rows}
+
+    def claim_activation(self, account_id, *, at=None) -> bool:
+        # Atomic claim: INSERT … ON CONFLICT DO NOTHING returns the row only when it
+        # was newly inserted, so concurrent activates resolve to exactly one winner.
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "INSERT INTO engagement_activations (account_id, activated_at) "
+                "VALUES (%s, COALESCE(%s::timestamptz, now())) "
+                "ON CONFLICT (account_id) DO NOTHING RETURNING account_id",
+                (account_id, at),
+            ).fetchone()
+        return row is not None
+
+    def is_activated(self, account_id) -> bool:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM engagement_activations WHERE account_id = %s",
+                (account_id,),
+            ).fetchone()
+        return row is not None
+
+    def release_activation(self, account_id) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM engagement_activations WHERE account_id = %s", (account_id,))
+
+    def activated_account_ids(self) -> set:
+        with self._pool.connection() as conn:
+            rows = conn.execute("SELECT account_id FROM engagement_activations").fetchall()
+        return {r["account_id"] for r in rows}
+
+    def reset_activations(self) -> int:
+        with self._pool.connection() as conn:
+            return conn.execute("DELETE FROM engagement_activations").rowcount
+
+    def get_setting(self, key) -> str | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT value FROM engagement_settings WHERE key = %s", (key,)
+            ).fetchone()
+        return row["value"] if row else None
+
+    def set_setting(self, key, value) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                """INSERT INTO engagement_settings (key, value) VALUES (%s, %s)
+                   ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""",
+                (key, value),
+            )
+
+    def get_sync_state(self, source=SOURCE_REPLYIO) -> dict | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM engagement_sync_state WHERE source = %s", (source,)
+            ).fetchone()
+        return _norm(dict(row)) if row else None
+
+    def set_sync_state(self, source=SOURCE_REPLYIO, *, status=None, stats=None, error=None,
+                       window_from=None, window_to=None, last_synced_at=None) -> None:
+        from psycopg.types.json import Json
+        # stamp last_synced_at on completion (success/failed), not on 'running'
+        last = last_synced_at or (datetime.now(UTC) if status in ("success", "failed") else None)
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO engagement_sync_state
+                    (source, last_synced_at, window_from, window_to, status, stats, error)
+                VALUES (%(source)s, %(last)s, %(window_from)s, %(window_to)s,
+                        %(status)s, %(stats)s, %(error)s)
+                ON CONFLICT (source) DO UPDATE SET
+                    last_synced_at = COALESCE(EXCLUDED.last_synced_at, engagement_sync_state.last_synced_at),
+                    window_from = COALESCE(EXCLUDED.window_from, engagement_sync_state.window_from),
+                    window_to = COALESCE(EXCLUDED.window_to, engagement_sync_state.window_to),
+                    status = COALESCE(EXCLUDED.status, engagement_sync_state.status),
+                    stats = COALESCE(EXCLUDED.stats, engagement_sync_state.stats),
+                    error = EXCLUDED.error
+                """,
+                {"source": source, "last": last, "window_from": window_from,
+                 "window_to": window_to, "status": status,
+                 "stats": Json(stats) if stats is not None else None, "error": error},
+            )
+
+    def delete_all(self) -> int:
+        with self._pool.connection() as conn:
+            n = conn.execute("DELETE FROM engagement_events").rowcount or 0
+            n += conn.execute("DELETE FROM engagement_contacts").rowcount or 0
+            conn.execute("DELETE FROM engagement_raw")
+            conn.execute("DELETE FROM engagement_sync_state")
+        return n
+
+
+# ── factory ───────────────────────────────────────────────────────────
+
+
+def get_engagement_repository() -> EngagementRepository:
+    """Postgres when DATABASE_URL is set; otherwise the JSON-file repo. Fails
+    closed in production so real engagement data never lands silently in a file."""
+    if os.getenv("DATABASE_URL"):
+        return EngagementPostgresRepository()
+    from auto_search.runtime import is_production
+    if is_production():
+        raise RuntimeError(
+            "DATABASE_URL is required in production — refusing to run the engagement "
+            "store on a JSON file."
+        )
+    return EngagementJsonRepository()

@@ -41,3 +41,14 @@ data/*.corrupt
 .repowise/
 .build-stamp
 .mcp.json
+.claude/CLAUDE.md
+
+# Generated doc artifacts (renders of the tracked .md sources, built by
+# scripts/md_to_pdf.py + scripts/docshots.py). Large binaries stay local.
+docs/*.pdf
+docs/*.html
+docs/images/*
+!docs/images/linkedin_flow_diagram.png
+
+# Meeting-prep scratch, not a product doc
+docs/review_prep.md

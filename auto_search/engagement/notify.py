@@ -174,6 +174,10 @@ def build_lead_card(lead: dict, *, test: bool = False) -> dict:
         fields.append({"type": "mrkdwn", "text": f"*📞 Phone*\n{phone}"})
 
     person = f"*{name}*" + (f"\n_{title}_" if title else "")
+    # Non-ABM engagers post here too (the leads-ads channel is the raw ad-engagement
+    # feed) but are flagged, so an engagement heads-up is never read as an activation.
+    if lead.get("abm") is False:
+        person += "\n:warning: *Not an ABM target* — engagement heads-up, not an activation"
     blocks: list[dict] = [
         {"type": "header",
          "text": {"type": "plain_text", "text": "🎯 New TOFU Lead", "emoji": True}},
@@ -518,8 +522,14 @@ def _touch_dt(ts):
 
 
 def accounts_to_notify(accounts: list[dict], notified: dict,
-                       cutoff: str | None = None) -> list[dict]:
+                       cutoff: str | None = None, *, abm_only: bool = False) -> list[dict]:
     """Accounts that should fire an AE/SDR handoff right now. PURE.
+
+    `abm_only` (Sunny 2026-07-22): the ACTIVATION channel is ABM-only — an account
+    with no `abm` in its lists (scored-only, e.g. Guidehouse) engages and scores but
+    never hands off to sales. The endpoint passes True; the leads-ads engagement feed
+    is a SEPARATE, un-gated channel (see linkedin_ads_runner). Off by default so the
+    pure function stays testable without list plumbing.
     `notified` maps ledger keys — company keys (see `company_key`) and/or
     legacy account_ids — to {"tier","touch"} (or a legacy bare tier string);
     `_ledger_lookup` resolves an account across every form its company may be
@@ -561,6 +571,8 @@ def accounts_to_notify(accounts: list[dict], notified: dict,
         role = tier_role(tier)
         if not role:                                   # Lower / unknown → no handoff
             continue
+        if abm_only and "abm" not in (a.get("lists") or []):
+            continue                                   # non-ABM never activates (Sunny)
         touch = a.get("last_touch")
         if cutoff and (not touch or str(touch)[:10] < cutoff):
             continue                                   # stale history — never alert

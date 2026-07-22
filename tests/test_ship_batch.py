@@ -176,6 +176,10 @@ def _seed_clicky_account(eng, account_id="abm_acme"):
                    "kind": "reply", "points": 6, "contact_ext": "p9",
                    "company": "Acme", "account_id": account_id,
                    "occurred_at": "2026-07-16T00:00:00+00:00", "raw": {}})
+    # ABM membership (matched_lists) is what the board reads for its `lists` field;
+    # without it abm_acme reads non-ABM and the ABM-only activation gate drops it.
+    eng.upsert_contact({"source": "replyio", "external_id": "p9", "company": "Acme",
+                        "account_id": account_id, "matched_lists": ["abm"]})
 
 
 def test_drawer_account_score_applies_click_cap(client):
@@ -237,3 +241,39 @@ def test_tofu_echo_person_key_collapses_multi_email_dupes():
                                          person_key_by_lid={"L1": pk, "L2": pk})
     assert {c["external_id"] for c in cs} == {"L1"}          # oldest lead is canonical
     assert {e["contact_ext"] for e in es} == {"L1"}
+
+
+# ── 2026-07-22: leads-ads feed is un-gated; activation channel is ABM-only ──────
+
+
+def test_leads_ads_card_fires_for_non_abm_with_tag():
+    """Every captured reactor posts to the leads-ads channel, ABM or not; a
+    non-ABM card carries the 'Not an ABM target' flag (Joe Galinanes/IntelePeer)."""
+    card = notify.build_lead_card({"name": "Joe Galinanes", "company": "IntelePeer",
+                                   "title": "VP", "abm": False})
+    blob = str(card)
+    assert "Joe Galinanes" in blob
+    assert "Not an ABM target" in blob   # tagged, not suppressed
+
+
+def test_leads_ads_card_abm_has_no_tag():
+    card = notify.build_lead_card({"name": "Jane Doe", "company": "Kaiser", "abm": True})
+    assert "Not an ABM target" not in str(card)
+
+
+def test_activation_abm_only_drops_non_abm():
+    """accounts_to_notify(abm_only=True) drops a scored-only account (Guidehouse
+    fired an activation card 2026-07-21) but keeps an ABM one at the same tier."""
+    board = [
+        {"account_id": "csv_guidehouse", "tier": "Some", "score": 10,
+         "last_touch": "2026-07-21", "lists": ["scored"], "name": "Guidehouse"},
+        {"account_id": "abm_caresource", "tier": "Hot", "score": 22,
+         "last_touch": "2026-07-18", "lists": ["abm"], "name": "CareSource"},
+    ]
+    due = notify.accounts_to_notify(board, {}, cutoff="2026-06-25", abm_only=True)
+    names = {d["account"]["account_id"] for d in due}
+    assert "abm_caresource" in names
+    assert "csv_guidehouse" not in names
+    # default (abm_only=False) keeps both — the pure function stays list-agnostic
+    both = notify.accounts_to_notify(board, {}, cutoff="2026-06-25")
+    assert len({d["account"]["account_id"] for d in both}) == 2

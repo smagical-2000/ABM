@@ -252,12 +252,16 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
             continue
 
         # Slack heads-up BEFORE the lead is written to Airtable (Airtable then creates
-        # the Salesforce lead via its own automation). ABM leads only — non-ABM
-        # captures would flood the channel; they're filterable in Airtable instead.
+        # the Salesforce lead via its own automation). EVERY captured reactor posts to
+        # the LinkedIn-ads-engagement channel (Sunny 2026-07-22): that channel is the
+        # raw "who engaged with our ads" feed, ABM or not. The ABM rule governs the
+        # ACTIVATION channel, not this one — a non-ABM engager (IntelePeer/Joe
+        # Galinanes, 2026-07-22) still belongs here, tagged so nobody mistakes an
+        # engagement heads-up for a sales handoff.
         # Best-effort + off-loop (the poster is sync) so a Slack hiccup never blocks.
-        if abm_match and await asyncio.to_thread(notify.notify_lead, {
+        if await asyncio.to_thread(notify.notify_lead, {
                 "name": display, "title": title, "company": company, "email": email,
-                "phone": phone, "linkedin": enriched_url,
+                "phone": phone, "linkedin": enriched_url, "abm": abm_match,
                 "segment": la.segment_for(r["category"])}):
             stats["slack_notified"] += 1
 

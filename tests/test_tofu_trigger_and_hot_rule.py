@@ -195,6 +195,9 @@ def test_seed_baselines_to_now_then_nothing_fires(client):
     _ev("e:meet:c1", "meeting_booked", 10, "2026-07-04T10:00:00+00:00")
     _ev("e:bofu:c1", "high_intent_lead", 10, "2026-07-04T10:00:00+00:00")
     _ev("e:reply:c1", "reply", 6, "2026-07-04T10:00:00+00:00")
+    # ABM membership so the ABM-only activation gate (2026-07-22) keeps it
+    repo.upsert_contact({"source": "replyio", "external_id": "c1", "company": "Hot Co",
+                         "account_id": "abm_hot", "matched_lists": ["abm"]})
     # ingest pipeline always heals after persisting (I5, MAR2-32 v2)
     import json as _json
     from datetime import UTC as _UTC

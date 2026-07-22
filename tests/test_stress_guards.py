@@ -60,6 +60,10 @@ def _seed_hot(repo, aid="abm_dueco", company="Due Co", when="2026-07-07T10:00:00
                         "kind": kind, "points": pts, "contact_ext": f"c:{aid}",
                         "company": company, "account_id": aid,
                         "occurred_at": when, "raw": {}})
+    # Activation is ABM-only (2026-07-22): the board reads ABM membership off a
+    # contact's matched_lists, so a due account needs one to pass the gate.
+    repo.upsert_contact({"source": "replyio", "external_id": f"c:{aid}",
+                         "company": company, "account_id": aid, "matched_lists": ["abm"]})
     _mark_healed(repo)
 
 

@@ -1382,7 +1382,12 @@ def create_app() -> FastAPI:
                        if staged else {})
         effective = (engagement_notify.merge_ledgers(ledger, test_ledger)
                      if staged else ledger)
-        due = engagement_notify.accounts_to_notify(board, effective, cutoff=cutoff)
+        # ABM-only activation (Sunny 2026-07-22): the activation channel hands off ONLY
+        # ABM accounts; non-ABM engagers (Guidehouse, scored-only) score + show on the
+        # board but never fire a card here. The leads-ads engagement feed is separate
+        # and un-gated (linkedin_ads_runner posts every reactor).
+        due = engagement_notify.accounts_to_notify(board, effective, cutoff=cutoff,
+                                                   abm_only=True)
         # CIRCUIT BREAKER (MAR2-31, after the 2026-07-09 139-due burst): an
         # abnormal due volume means something upstream shifted (bulk import,
         # identity churn, a sync bug) — sending ANY of it risks flooding real

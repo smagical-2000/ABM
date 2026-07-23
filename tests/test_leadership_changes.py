@@ -166,7 +166,9 @@ class TestSincePreset:
     def test_maps_windows(self):
         now = datetime.now(UTC)
         from datetime import timedelta
-        assert _since_to_preset(now - timedelta(days=1)) == "today"
+        # Floor is last_7d — "today" only covered 00:00→cron-time UTC (~37% of
+        # the week at the 12:31Z cron; 2026-07-23 audit). See test_source_fixes.
+        assert _since_to_preset(now - timedelta(days=1)) == "last_7d"
         assert _since_to_preset(now - timedelta(days=20)) == "last_30d"
         assert _since_to_preset(now - timedelta(days=80)) == "last_90d"
 
@@ -190,6 +192,8 @@ async def test_connector_filters_and_stops_at_cutoff():
     assert {s.company_name_raw for s in out} == {"Acme Health System", "Beacon Behavioral"}
     # Record 'f' is after the cutoff record 'e' and must not be yielded.
     assert "f" not in {s.source_external_id for s in out}
-    # Server filters were forwarded — positions is the primary narrowing.
+    # Server filters were forwarded — seniorities is the live narrowing since
+    # 2026-07-23 (the `positions` free-text feed collapsed ~Jul 1: 0 rows).
     assert fake.kwargs["countries"] == "US"
-    assert "chief financial officer" in fake.kwargs["positions"]
+    assert fake.kwargs["seniorities"] == "c_level,vp,director"
+    assert "positions" not in fake.kwargs

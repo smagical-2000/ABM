@@ -87,6 +87,17 @@ CONNECTORS = {
     "jobs": lambda limit: JobPostingsConnector(max_rows=_jobs_rows(limit)),
 }
 
+# RARE sources emit a handful of events per week, so the cron's --days 1 window
+# is a coverage bug for them: combined with the "today" server preset it gave
+# ~37% weekly coverage at the 12:31Z cron (missed TytoCare/Solaris/BioTrace/
+# VitalRads purely by timestamp — 2026-07-23 audit). Every daily run now pulls
+# a 14-day window for these three; re-seen records are FREE because the dedup
+# ledger absorbs them (uq_discovery_signal on signalId + the company row's
+# first_seen/already_qualified skip — no repeat Claude cost, no twin rows).
+# Jobs/layoffs/social stay on --days: they're high-volume and daily-fresh.
+RARE_SOURCE_LOOKBACK_DAYS = int(os.getenv("DISCOVERY_RARE_LOOKBACK_DAYS", "14"))
+RARE_SOURCES = frozenset({"leadership", "acquisitions", "funding"})
+
 
 def configure_logging(debug: bool) -> None:
     logging.basicConfig(
@@ -249,6 +260,11 @@ async def main(args: argparse.Namespace) -> int:
         return 0
 
     since = datetime.now(UTC) - timedelta(days=args.days)
+    # Rare-source floor: never NARROWER than --days (min() of datetimes = the
+    # earlier cutoff = the wider window), so a manual --days 30 sweep still
+    # sweeps 30d while the daily --days 1 cron gets its 14d rare window.
+    rare_since = min(since,
+                     datetime.now(UTC) - timedelta(days=RARE_SOURCE_LOOKBACK_DAYS))
     # --no-limit (or --limit 0) removes the artificial per-source cap: the daily
     # cron pulls the full window and pages deeply (env-tunable).
     limit = None if (args.no_limit or args.limit == 0) else args.limit
@@ -266,6 +282,10 @@ async def main(args: argparse.Namespace) -> int:
     print(f"\n{BOLD}Discovery run{RESET}  since {since.date()} ({args.days}d), "
           f"limit {'no cap' if limit is None else f'{limit}/source'}, sources={selected}, "
           f"{'QUALIFY' if not args.no_qualify else 'dry run (no Claude)'}")
+    if rare_since < since and any(s in RARE_SOURCES for s in selected):
+        print(f"  {DIM}rare-source window: {sorted(RARE_SOURCES & set(selected))} "
+              f"since {rare_since.date()} ({RARE_SOURCE_LOOKBACK_DAYS}d floor — "
+              f"dedup ledger absorbs repeats){RESET}")
     if not args.no_qualify:
         print(f"  {YELLOW}Cost: SignalBase per record + ~$0.10–0.15 Claude "
               f"per new company{RESET}")
@@ -307,7 +327,8 @@ async def main(args: argparse.Namespace) -> int:
                 def prefilter(sigs, _s=_on_prefilter_spend):
                     return job_qualifier.filter_job_signals(sigs, on_spend=_s)
             counts = await run_connector(
-                name, connector, since, repo,
+                name, connector,
+                rare_since if name in RARE_SOURCES else since, repo,
                 limit=limit, qualify=not args.no_qualify,
                 prefilter=prefilter, spend_op=spend_op,
             )

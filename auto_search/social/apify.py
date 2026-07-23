@@ -246,9 +246,28 @@ async def enrich(linkedin_url: str, *, client: httpx.AsyncClient | None = None) 
     """Enrich one LinkedIn profile URL → resolved public profile + current company, or
     None. Uses harvestapi's profile scraper, which accepts LinkedIn's obfuscated
     `ACoAAA…` member URLs — the freshdata actor returns nothing for those, which is why
-    the TOFU runner was dropping every reactor at 'no company'."""
+    the TOFU runner was dropping every reactor at 'no company'.
+
+    KNOWN GAP: harvestapi returns country=None (normalize_profile above), so callers
+    that hard-gate on country (poll_events' is_us) must NOT use this — see
+    enrich_freshdata below (2026-07-23 audit)."""
     items = await _run_actor(_ACTOR_PROFILE, {"queries": [linkedin_url]}, client=client)
     return normalize_profile(items)
+
+
+async def enrich_freshdata(linkedin_url: str, *,
+                           client: httpx.AsyncClient | None = None) -> dict | None:
+    """Enrich one PUBLIC /in/<slug> profile URL via freshdata → company + COUNTRY.
+
+    Why this exists next to enrich() (2026-07-23 audit): the Jun 30 swap to
+    harvestapi (ec25c9f — needed because freshdata can't resolve `ACoAAA…`
+    reactor URNs) returns country=None, so poll.py's is_us() gate silently
+    dropped EVERY event attendee for 3+ weeks. Event-post AUTHORS come from the
+    post-search actor with public /in/ slugs — the URN limitation never applied
+    to them — so the event path uses freshdata (which returns country/city);
+    reactor/target paths keep harvestapi. This is the pre-ec25c9f enrich body."""
+    items = await _run_actor(_ACTOR_ENRICH, {"linkedin_url": linkedin_url}, client=client)
+    return normalize_enrichment(items)
 
 
 # Reactions (likes) on a specific post — the LinkedIn TOFU ad-engagement flow. A

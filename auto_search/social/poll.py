@@ -20,8 +20,9 @@ from __future__ import annotations
 import logging
 import os
 import re
+from datetime import UTC, datetime, timedelta
 
-from auto_search.normalize import normalize_company_name
+from auto_search.normalize import normalize_company_name, parse_iso_datetime
 from auto_search.scoring import spend_guard
 from auto_search.social import apify, engagement_gate
 from auto_search.social.filters import is_attending, is_us
@@ -50,6 +51,20 @@ def company_from_headline(position: str | None) -> str | None:
     company = _HEADLINE_CUT_RE.split(m.group(1).strip(), maxsplit=1)[0].strip()
     return company or None
 
+
+def _own_limit_date(posted_limit_date: str | None) -> str | None:
+    """The scrape window for OWN-account posts: the caller's window, floored at
+    OWN_POST_TRAILING_DAYS back. None (= no window) and an explicitly WIDER
+    manual window pass through untouched — this only ever widens the daily 24h
+    default, never narrows a deliberate deep sweep."""
+    if not posted_limit_date:
+        return None
+    floor = datetime.now(UTC) - timedelta(days=OWN_POST_TRAILING_DAYS)
+    given = parse_iso_datetime(posted_limit_date)
+    if given is not None and given < floor:
+        return posted_limit_date
+    return floor.isoformat()
+
 # Conservative recorded costs (freshdata ≈ $8/1k profiles; harvestapi ≈ $2/1k items).
 ENRICH_COST_USD = 0.008
 SCRAPE_COST_PER_ITEM_USD = 0.002
@@ -62,6 +77,16 @@ MAX_REACTIONS_PER_POST = max(1, int(os.getenv("SOCIAL_MAX_REACTIONS", "5")))
 MAX_COMMENTS_PER_POST = max(1, int(os.getenv("SOCIAL_MAX_COMMENTS", "5")))
 MAX_POSTS_PER_TARGET = max(1, int(os.getenv("SOCIAL_MAX_POSTS", "5")))
 MAX_TARGETS_PER_RUN = 25
+
+# OWN-account (Magical post) trailing window (2026-07-23 audit): a LinkedIn
+# post gathers engagers for DAYS, but the daily 24h posted_limit_date meant a
+# post only ever had its FIRST day's engagers harvested — everyone who liked on
+# day 2-7 was structurally invisible. Own posts keep a 7-day window so each
+# post is re-scraped all week; repeats are free (the per-signal external_id —
+# person + engagement type + post URL — dedups on ingest). Competitor channel
+# intentionally stays on the caller's window: wider there just buys more scrape
+# spend on noise the competitor gate drops anyway.
+OWN_POST_TRAILING_DAYS = max(1, int(os.getenv("SOCIAL_OWN_POST_TRAILING_DAYS", "7")))
 
 # Cheap pre-enrichment Magical check on the headline ("President @ Magical").
 # CONSERVATIVE: only fires when Magical is the whole employer (followed by end /
@@ -155,11 +180,16 @@ async def poll_targets(
     for kind, urls in by_kind.items():
         source = source_for_kind(kind)
         summary["scraped"] += len(urls)
+        # Kind-scoped window: own posts keep harvesting trailing engagers all
+        # week (see OWN_POST_TRAILING_DAYS — 2026-07-23 audit); competitor
+        # posts stay on the caller's (daily 24h) window.
+        limit_date = _own_limit_date(posted_limit_date) if kind == "own" \
+            else posted_limit_date
         try:
             engagers = await fetch_fn(urls, max_posts=max_posts,
                                       max_reactions=MAX_REACTIONS_PER_POST,
                                       max_comments=MAX_COMMENTS_PER_POST,
-                                      posted_limit_date=posted_limit_date)
+                                      posted_limit_date=limit_date)
         except apify.ApifyError:
             logger.exception("apify post scrape failed for %s targets", kind)
             continue
@@ -296,7 +326,13 @@ async def poll_events(
     max_posts: int = 25,
     max_enrich: int = 50,
     search_fn=apify.search_event_posts,
-    enrich_fn=apify.enrich,
+    # EVENT PATH ONLY uses freshdata (2026-07-23 audit): the Jun 30 harvestapi
+    # swap (ec25c9f) returns country=None, so the is_us() gate below dropped
+    # every attendee — 0 event companies since. Event authors carry public
+    # /in/ slugs (the ACoAAA-URN limitation behind the swap doesn't apply), so
+    # freshdata resolves them AND returns country. poll_targets keeps
+    # apify.enrich (harvestapi) for reactors.
+    enrich_fn=apify.enrich_freshdata,
     qualify_fn=None,
 ) -> dict:
     """Find event ATTENDEES from a keyword post search and run them through ICP.

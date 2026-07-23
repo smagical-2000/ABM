@@ -209,7 +209,13 @@ def test_seed_baselines_to_now_then_nothing_fires(client):
     assert seeded["seeded"] == 1 and seeded["format"] == "company-key tier+touch"
     # nothing fires right after seed (the "not like right now" guarantee)
     assert c.post("/api/engagement/notify-changes", params={"dry_run": "true"}).json()["due"] == 0
-    # NEW activity on the already-Hot account (a fresh scored touch) re-fires
+    # A fresh CLICK must NOT re-fire (MAR2-44 #1, 2026-07-23): scanner clicks
+    # re-armed the Hot-reactivation clock three mornings running. Clicks move
+    # the display touch, never the trigger clock.
     _ev("e:click:c1", "click", 1, "2026-07-05T15:00:00+00:00")
+    assert c.post("/api/engagement/notify-changes",
+                  params={"dry_run": "true"}).json()["due"] == 0
+    # A fresh REAL touch (reply) on the already-Hot account DOES re-fire.
+    _ev("e:reply2:c1", "reply", 6, "2026-07-06T09:00:00+00:00")
     due = c.post("/api/engagement/notify-changes", params={"dry_run": "true"}).json()
     assert due["due"] == 1 and due["detail"][0]["reason"] == "hot_activity"

@@ -1199,10 +1199,29 @@ def create_app() -> FastAPI:
         # is NOT marked activated and can still send later if it genuinely re-engages.
         cutoff = (repo.get_setting("activation_cutoff") or "").strip()[:10]
         if cutoff and not is_test and not force:
-            last_touch = max((e.get("occurred_at") or "" for e in events), default="")
+            # TRIGGER clock (MAR2-44 #1, 2026-07-23): the manual gate reads REAL
+            # touches only — zero-point delivered/open rows and (scanner) clicks
+            # never arm it, in lockstep with notify.trigger_touch / the view's
+            # last_real_touch (the auto path). A click-only account has no clock.
+            last_touch = max((e.get("occurred_at") or "" for e in events
+                              if (e.get("points") or 0) > 0
+                              and e.get("kind") not in engagement_scoring.CLICK_KINDS),
+                             default="")
             if last_touch[:10] < cutoff:
                 return {"posted": False, "suppressed": True, "reason": "before_cutoff",
                         "cutoff": cutoff, "last_touch": last_touch or None,
+                        "account_id": account_id}
+        # ABM-only activation (Sunny 2026-07-22): the activation channel hands off
+        # ONLY ABM accounts — a scored-only engager (the Guidehouse class) scores
+        # and shows on the board but never posts to sales; the leads-ads feed is
+        # the un-gated channel for non-ABM engagers. Same lists derivation as
+        # _engaged_one (the contacts' matched_lists union). test=True stays exempt
+        # (wiring checks) and force is a deliberate override; checked BEFORE the
+        # claim, like the cutoff, so a suppressed account is never left "activated".
+        if not is_test and not force:
+            lists = {x for c in contacts for x in (c.get("matched_lists") or [])}
+            if "abm" not in lists:
+                return {"posted": False, "suppressed": True, "reason": "non_abm",
                         "account_id": account_id}
         # Server-side dedup: claim before any paid/visible work. The winner proceeds;
         # everyone else short-circuits. `force` re-activates on purpose; `test` is exempt.
@@ -1362,9 +1381,13 @@ def create_app() -> FastAPI:
             # merge-strongest (QA panel 2026-07-09, blocker): twin board rows
             # share a company key; a plain overwrite let the WEAKER twin
             # downgrade the baseline and re-fire the stronger one next run.
+            # Baseline the TRIGGER clock (MAR2-44 #1, 2026-07-23): the gates
+            # compare trigger_touch against this record — seeding the display
+            # clock would bake a click-armed (newer) baseline into the ledger.
             for a in board:
                 engagement_notify.record_notified(
-                    ledger, a, a.get("tier") or "Lower", a.get("last_touch"))
+                    ledger, a, a.get("tier") or "Lower",
+                    engagement_notify.trigger_touch(a))
             repo.set_setting("notified_tiers", json.dumps(ledger))
             return {"seeded": len(board), "format": "company-key tier+touch"}
         # Stale-history gate (MAR2-31): the activation cutoff now applies to the

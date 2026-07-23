@@ -277,3 +277,105 @@ def test_activation_abm_only_drops_non_abm():
     # default (abm_only=False) keeps both — the pure function stays list-agnostic
     both = notify.accounts_to_notify(board, {}, cutoff="2026-06-25")
     assert len({d["account"]["account_id"] for d in both}) == 2
+
+
+# ── 2026-07-23: the trigger clock reads REAL touches only (MAR2-44 #1) ─────────
+# Replays the three ghost mornings (07-21..23): scanner clicks advanced
+# last_touch and re-armed the cutoff + Hot-reactivation gates every night.
+
+
+def _row(aid, tier, score, *, lt, lrt=..., lists=("abm",)):
+    r = {"account_id": aid, "name": aid, "tier": tier, "score": score,
+         "last_touch": lt, "lists": list(lists)}
+    if lrt is not ...:
+        r["last_real_touch"] = lrt
+    return r
+
+
+def test_click_never_rearms_hot_reactivation():
+    """Newport shape: Hot, ledgered 05-26, one scanner click today. Must NOT fire.
+    The same account with a REAL touch today must fire."""
+    led = {"newport": {"tier": "Hot", "touch": "2026-05-26T12:00:00+00:00"}}
+    clicky = _row("newport", "Hot", 75, lt="2026-07-23", lrt="2026-05-26")
+    assert notify.accounts_to_notify([clicky], led, cutoff="2026-06-25") == []
+    real = _row("newport", "Hot", 75, lt="2026-07-23", lrt="2026-07-23")
+    due = notify.accounts_to_notify([real], led, cutoff="2026-06-25")
+    assert [d["reason"] for d in due] == ["hot_activity"]
+
+
+def test_cutoff_reads_real_clock():
+    """Tenet shape: stale real history (03-23), fresh clicks only — never fires,
+    not even as a rise."""
+    row = _row("tenetfl", "Hot", 23, lt="2026-07-23", lrt="2026-03-23")
+    assert notify.accounts_to_notify([row], {}, cutoff="2026-06-25") == []
+    # no real touch at all (clicks only, ever) -> never fires
+    none = _row("clicksonly", "Warm", 12, lt="2026-07-23", lrt=None)
+    assert notify.accounts_to_notify([none], {}, cutoff="2026-06-25") == []
+
+
+def test_legacy_rows_without_key_keep_old_clock():
+    row = _row("legacy", "Warm", 12, lt="2026-07-22")   # no last_real_touch key
+    due = notify.accounts_to_notify([row], {}, cutoff="2026-06-25")
+    assert [d["account"]["account_id"] for d in due] == ["legacy"]
+
+
+def test_json_rollup_exposes_last_real_touch(client):
+    """The JSON rollup mirrors the SQL view: clicks advance last_touch (display)
+    but not last_real_touch (trigger)."""
+    _seed_clicky_account(client._eng, account_id="abm_clockco")
+    # add a click NEWER than the reply so the two clocks diverge
+    client._eng.add_event({"source": "replyio", "external_id": "cx", "channel": "email",
+                           "kind": "click", "points": 1, "contact_ext": "p1",
+                           "company": "Acme", "account_id": "abm_clockco",
+                           "occurred_at": "2026-07-23T00:00:00+00:00", "raw": {}})
+    row = next(r for r in client._eng.engaged_accounts()
+               if r["account_id"] == "abm_clockco")
+    assert str(row["last_touch"])[:10] == "2026-07-23"       # display clock: the click
+    assert str(row["last_real_touch"])[:10] == "2026-07-16"  # trigger clock: the reply
+
+
+def test_schema_click_literals_lockstep():
+    """The SQL view hardcodes the click-kind list twice — the cap filter and the
+    last_real_touch NOT IN filter; either drifting from scoring.CLICK_KINDS
+    silently forks the Postgres board from the Python rollup. (The 2-kind
+    `clicks` display counter is a DIFFERENT, deliberate literal — it mirrors the
+    rollup's ('click', 'outbound_click') count, so it's not pinned here.)"""
+    import re
+    from pathlib import Path
+    sql = (Path(__file__).resolve().parents[1]
+           / "auto_search" / "db" / "engagement_schema.sql").read_text()
+    cap = re.search(r"SUM\(points\) FILTER \(\s*WHERE kind IN \(([^)]*)\)", sql)
+    trigger = re.search(r"kind NOT IN \(([^)]*)\)", sql)
+    assert cap and trigger                     # both click IN-lists still exist
+    for blob in (cap.group(1), trigger.group(1)):
+        assert set(re.findall(r"'([^']+)'", blob)) == set(scoring.CLICK_KINDS)
+
+
+def test_twin_dedup_uses_trigger_clock():
+    """Twin shadowing (MAR2 twin class): the per-company dedup must rank twins
+    on the TRIGGER clock — ranked on display last_touch, clicky twin A (real
+    clock stale at 05-26) would win and shadow twin B's genuinely-new 07-22
+    real touch, silently swallowing the Hot reactivation."""
+    a = _row("abm_kaiser", "Hot", 30, lt="2026-07-23", lrt="2026-05-26")
+    b = _row("csv_kaiser", "Hot", 26, lt="2026-07-22", lrt="2026-07-22")
+    a["name"] = b["name"] = "Kaiser Permanente"
+    led = {notify.company_key("Kaiser Permanente"):
+           {"tier": "Hot", "touch": "2026-07-15T00:00:00+00:00"}}
+    due = notify.accounts_to_notify([a, b], led, cutoff="2026-06-25")
+    assert [(d["account"]["account_id"], d["reason"]) for d in due] == [
+        ("csv_kaiser", "hot_activity")]        # B's clock wins the dedup + fires
+
+
+def test_abm_gate_is_company_level():
+    """MAR2 twin class: ABM membership is a property of the COMPANY, not of
+    whichever twin wins the dedup — a scored-only twin with the newest touch
+    must not mask its ABM sibling and suppress the company's card."""
+    scored = _row("csv_summa", "Hot", 24, lt="2026-07-23", lrt="2026-07-23",
+                  lists=("scored",))
+    abm = _row("abm_summa", "Hot", 22, lt="2026-07-20", lrt="2026-07-20",
+               lists=("abm",))
+    scored["name"] = abm["name"] = "Summa Health"
+    due = notify.accounts_to_notify([scored, abm], {}, cutoff="2026-06-25",
+                                    abm_only=True)
+    # the company fires (via whichever twin won the dedup) — not suppressed
+    assert [d["account"]["account_id"] for d in due] == ["csv_summa"]

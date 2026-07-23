@@ -168,7 +168,15 @@ WITH e AS (
            -- open/bounce) must never advance it: the Hot-reactivation rule
            -- compares it against the notify ledger, so a mere email OPEN moving
            -- it forward would phantom re-alert Hot accounts. Sync w/ JSON repo.
-           MAX(occurred_at) FILTER (WHERE COALESCE(points, 0) > 0) AS last_touch
+           MAX(occurred_at) FILTER (WHERE COALESCE(points, 0) > 0) AS last_touch,
+           -- TRIGGER clock (MAR2-44 #1, 2026-07-23): the newest REAL scored touch,
+           -- clicks excluded. Scanner clicks advance last_touch (display) but must
+           -- never re-arm the cutoff or Hot-reactivation triggers — three mornings
+           -- of ghost "Hot again" cards (07-21..23) came from exactly that. Keep the
+           -- kinds in lockstep with CLICK_KINDS in engagement/scoring.py.
+           MAX(occurred_at) FILTER (WHERE COALESCE(points, 0) > 0
+               AND kind NOT IN ('click', 'outbound_click', 'email_click'))
+                                                         AS last_real_touch
     FROM engagement_events
     -- Exclude retired signal kinds (SAO, replaced by meeting_booked in 2026-06):
     -- historical rows stay for audit but never count toward heat. Keep this literal
@@ -204,6 +212,7 @@ SELECT COALESCE(e.account_id, c.account_id)      AS account_id,
        c.delivered,
        c.opened,
        c.replied_sends,
-       e.last_touch
+       e.last_touch,
+       e.last_real_touch
 FROM e
 FULL OUTER JOIN c USING (account_id);

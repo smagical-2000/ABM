@@ -521,6 +521,20 @@ def _touch_dt(ts):
         return None
 
 
+def trigger_touch(a: dict):
+    """The clock activation TRIGGERS read for an account row: the newest REAL
+    scored touch (`last_real_touch` — clicks excluded), never the display clock.
+    MAR2-44 #1 (2026-07-23): the click CAP fixed the score dimension of the
+    scanner rule, but `last_touch` still advanced on 1-pt scanner clicks and
+    re-armed the cutoff + Hot-reactivation gates three mornings straight
+    (Newport: one click → a ghost "Hot again" card nightly). Legacy rows WITHOUT
+    the key (old fixtures/exports) keep the display clock — the live view and
+    the JSON rollup always provide it. This is the ONE selection helper every
+    touch-reader (gates, twin dedup, seed baseline, /activate cutoff, audit
+    rebuild) must share, so no surface can quietly diverge again."""
+    return a.get("last_real_touch") if "last_real_touch" in a else a.get("last_touch")
+
+
 def accounts_to_notify(accounts: list[dict], notified: dict,
                        cutoff: str | None = None, *, abm_only: bool = False) -> list[dict]:
     """Accounts that should fire an AE/SDR handoff right now. PURE.
@@ -529,7 +543,9 @@ def accounts_to_notify(accounts: list[dict], notified: dict,
     with no `abm` in its lists (scored-only, e.g. Guidehouse) engages and scores but
     never hands off to sales. The endpoint passes True; the leads-ads engagement feed
     is a SEPARATE, un-gated channel (see linkedin_ads_runner). Off by default so the
-    pure function stays testable without list plumbing.
+    pure function stays testable without list plumbing. Membership is COMPANY-level:
+    accumulated across every twin row of a ledger key during the dedup, so a
+    scored-only twin winning the dedup can never mask its ABM company (MAR2 twins).
     `notified` maps ledger keys — company keys (see `company_key`) and/or
     legacy account_ids — to {"tier","touch"} (or a legacy bare tier string);
     `_ledger_lookup` resolves an account across every form its company may be
@@ -553,27 +569,39 @@ def accounts_to_notify(accounts: list[dict], notified: dict,
     # Per-company dedup FIRST (QA panel 2026-07-09, blocker): id twins of one
     # company must be gated as ONE company — otherwise both twins fire in the
     # same pass (an AE card AND an SDR card for one account). Keep the
-    # strongest row per ledger key (highest tier, then newest touch).
+    # strongest row per ledger key: highest tier, then newest TRIGGER touch
+    # (MAR2-44 #1 — ranking on the display clock let a clicky twin with a stale
+    # real clock win and shadow its sibling's genuinely-new touch, so the picked
+    # twin must maximize the clock the gates read). ABM membership is
+    # accumulated COMPANY-level while deduping (MAR2 twin class): a scored-only
+    # twin winning the dedup must not mask its ABM company — the abm_only gate
+    # below reads the company bit, never the winner row's own lists.
     best: dict[str, dict] = {}
+    abm_by_key: dict[str, bool] = {}
     for a in accounts:
         key = ledger_key(a)
+        abm_by_key[key] = bool(abm_by_key.get(key)) or ("abm" in (a.get("lists") or []))
         cur = best.get(key)
         if cur is None:
             best[key] = a
             continue
         pick = stronger_state(
-            {"tier": cur.get("tier"), "touch": cur.get("last_touch"), "_row": cur},
-            {"tier": a.get("tier"), "touch": a.get("last_touch"), "_row": a})
+            {"tier": cur.get("tier"), "touch": trigger_touch(cur), "_row": cur},
+            {"tier": a.get("tier"), "touch": trigger_touch(a), "_row": a})
         best[key] = pick["_row"]
     out: list[dict] = []
-    for a in best.values():
+    for key, a in best.items():
         tier = a.get("tier") or "Lower"
         role = tier_role(tier)
         if not role:                                   # Lower / unknown → no handoff
             continue
-        if abm_only and "abm" not in (a.get("lists") or []):
-            continue                                   # non-ABM never activates (Sunny)
-        touch = a.get("last_touch")
+        if abm_only and not abm_by_key.get(key):
+            continue                       # non-ABM COMPANY never activates (Sunny)
+        # TRIGGER clock (MAR2-44 #1, 2026-07-23): every gate below reads the
+        # REAL-touch clock via trigger_touch — clicks excluded (score was
+        # capped, the clock was not); legacy rows without the key keep the
+        # display clock (see the helper).
+        touch = trigger_touch(a)
         if cutoff and (not touch or str(touch)[:10] < cutoff):
             continue                                   # stale history — never alert
         prev_tier, prev_touch = _ledger_lookup(notified, a)

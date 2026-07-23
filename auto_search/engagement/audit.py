@@ -110,10 +110,19 @@ def run_invariants(engagement_repo, scoring_repo, discovery_repo, *,
 
     board = rows
     if board is None:
-        # Bare engaged_accounts rows carry no display name; enrich exactly like
-        # the board does, or I4's company grouping would degrade to per-id keys.
+        # Bare engaged_accounts rows carry no display name and no lists; enrich
+        # exactly like the board does (names from display_maps, lists from the
+        # contacts' matched_lists union) — or I4's company grouping would
+        # degrade to per-id keys and the ABM-only gate it now models (2026-07-23)
+        # would silently drop every company on this path.
         names, _doms = identity.display_maps(scoring_repo, discovery_repo)
-        board = [{**r, "name": names.get(r.get("account_id"), r.get("account_id"))}
+        lists_by: dict[str, set] = {}
+        for c in engagement_repo.contacts():
+            cid = c.get("account_id")
+            if cid:
+                lists_by.setdefault(cid, set()).update(c.get("matched_lists") or [])
+        board = [{**r, "name": names.get(r.get("account_id"), r.get("account_id")),
+                  "lists": sorted(lists_by.get(r.get("account_id"), set()))}
                  for r in engagement_repo.engaged_accounts()]
     if not truncated:
         bad = []
@@ -143,24 +152,35 @@ def run_invariants(engagement_repo, scoring_repo, discovery_repo, *,
     ledger = json.loads(engagement_repo.get_setting("notified_tiers") or "{}")
     cutoff = ((engagement_repo.get_setting("activation_cutoff") or "")
               .strip()[:10] or None)
+    # Carry the TRIGGER clock + lists through the rebuild, and gate abm_only=True
+    # on BOTH sides (MAR2-44 #1, 2026-07-23): the interlock must model the
+    # production sender exactly — stripping last_real_touch would audit the
+    # display clock the sender no longer reads, and leaving the ABM gate off
+    # would flag companies the sender deliberately suppresses as "missing".
     tiles = [{"account_id": r.get("account_id"),
               "name": r.get("name") or r.get("account_id"),
               "tier": r.get("tier") or scoring.tier_for(int(r.get("score") or 0)),
-              "last_touch": r.get("last_touch")} for r in board]
+              "last_touch": r.get("last_touch"),
+              "last_real_touch": r.get("last_real_touch"),
+              "lists": r.get("lists") or []} for r in board]
     score_of = {r.get("account_id"): int(r.get("score") or 0) for r in board}
     groups: dict[str, list[dict]] = {}
     for t in tiles:
         key = notify.company_key(t["name"]) or t["account_id"]
         groups.setdefault(key, []).append(t)
     due_tiles = {notify.company_key(d["account"].get("name") or "")
-                 for d in notify.accounts_to_notify(tiles, ledger, cutoff=cutoff)}
+                 for d in notify.accounts_to_notify(tiles, ledger, cutoff=cutoff,
+                                                    abm_only=True)}
     missing = []
     for key, g in groups.items():
         total = sum(score_of.get(t["account_id"], 0) for t in g)
         pseudo = {"account_id": g[0]["account_id"], "name": g[0]["name"],
                   "tier": scoring.tier_for(total),
-                  "last_touch": max(t.get("last_touch") or "" for t in g) or None}
-        if (notify.accounts_to_notify([pseudo], ledger, cutoff=cutoff)
+                  "last_touch": max(t.get("last_touch") or "" for t in g) or None,
+                  "last_real_touch": max(t.get("last_real_touch") or ""
+                                         for t in g) or None,
+                  "lists": sorted({x for t in g for x in (t.get("lists") or [])})}
+        if (notify.accounts_to_notify([pseudo], ledger, cutoff=cutoff, abm_only=True)
                 and key not in due_tiles):
             missing.append(g[0]["name"])
     if missing:

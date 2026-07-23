@@ -179,12 +179,16 @@ def _since_to_preset(since: datetime) -> str:
 
     Coarse server hint; the connector's occurredAt >= since check is the
     authority. M&A is rarer than job changes, so windows skew wider.
+
+    FLOOR = last_7d, never "today" (2026-07-23 audit): the server's "today"
+    window is 00:00 UTC → request time, so the 12:31Z cron only ever saw
+    00:00-12:31 of each weekday — ~37% of the week (5 × 12.5h / 168h). Missed
+    TytoCare/Solaris/BioTrace/VitalRads purely by timestamp. Over-covering is
+    free here: the since check above drops the extras client-side.
     """
     from datetime import UTC
 
     days = max(0, (datetime.now(UTC) - since).days)
-    if days <= 1:
-        return "today"
     if days <= 7:
         return "last_7d"
     if days <= 14:

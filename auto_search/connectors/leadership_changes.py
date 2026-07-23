@@ -7,9 +7,13 @@ guess. No news scraping, no LLM in the detection path.
 
 Filtering strategy
 ------------------
-Server-side (SignalBase, confirmed working): country = US, seniority in
-{c_level, vp, director}, recent date. We also send `industry` — it's ignored
-by the run-sync path today but harmless, and helps if/when called via standby.
+Server-side (SignalBase): country = US, `seniorities` in {c_level, vp,
+director}, recent date. We used to narrow via the free-text `positions`
+filter instead (partial-match on the new role) — that feed collapsed ~Jul 1
+2026 (0 rows returned since; 2026-07-23 audit) and `categories` is a no-op on
+this actor, so seniority is the only live server-side narrowing now. It's
+broader than `positions` was, but the client-side gates below stay the
+authority, so the widening only costs a few extra record-credits per pull.
 
 Client-side (the authority here):
   • healthcare PROVIDER/payer industry (excludes pharma/biotech/device, which
@@ -39,25 +43,14 @@ from auto_search.normalize import clean_domain, parse_iso_datetime
 
 logger = logging.getLogger(__name__)
 
-# Galyna's target roles, sent to SignalBase's free-text `positions` filter.
-# This is our strongest server-side narrowing: `positions` partial-matches the
-# new role, so most returned rows are already a role we care about (verified:
-# this cuts ~1M changes to a few hundred). We still confirm the title and
-# healthcare industry client-side.
-_TARGET_POSITIONS = ",".join((
-    "chief executive officer",
-    "chief financial officer",
-    "chief operating officer",
-    "chief medical officer",
-    "chief nursing officer",
-    "chief information officer",
-    "chief digital officer",
-    "chief innovation officer",
-    "chief strategy officer",
-    "revenue cycle",
-    "population health",
-    "vp finance",
-))
+# Server-side seniority filter — the ONE narrowing that still works on this
+# actor. The old free-text `positions` filter (Galyna's 12 target roles) was
+# our strongest narrowing until its feed collapsed ~Jul 1 2026: it silently
+# started returning 0 rows, so the daily leg produced nothing for 3+ weeks
+# (2026-07-23 audit). Seniority-level filtering is confirmed live on
+# SignalBaseClient.iter_job_changes; the title phrases below do the precise
+# role targeting client-side.
+_TARGET_SENIORITIES = "c_level,vp,director"
 
 # Multi-word title phrases matching Galyna's target roles (substring match
 # on the lowercased newRole). These are specific enough not to misfire.
@@ -77,9 +70,11 @@ _TITLE_PHRASES = (
 # and "COO/Founder" match but "COOrdinator" and "COOk" do not.
 _CSUITE_ABBR_RE = re.compile(r"\b(ceo|cfo|coo|cmo|cno|cio|cdo)\b", re.IGNORECASE)
 
-# Non-leadership markers. The free-text `positions` filter matches "revenue
-# cycle" against analysts/reps/leads too, so we drop these — UNLESS the title
-# is C-suite (e.g. "Assistant Chief Nursing Officer" is still a CNO-track role).
+# Non-leadership markers. The server-side narrowing (seniorities since
+# 2026-07-23; free-text `positions` before) still lets analysts/reps/leads
+# through — e.g. LinkedIn tags "Revenue Cycle Team Lead" director-level — so we
+# drop these — UNLESS the title is C-suite (e.g. "Assistant Chief Nursing
+# Officer" is still a CNO-track role).
 _NON_LEADER_MARKERS = (
     "analyst", "representative", "coordinator", "specialist", "technician",
     "clerk", "intern", "junior", "entry level", "team lead", "associate",
@@ -114,10 +109,16 @@ class LeadershipChangesConnector:
         yielded = 0
         crossed_cutoff = False
 
+        # 2026-07-23: `positions` free-text narrowing REMOVED — its feed
+        # collapsed ~Jul 1 (0 rows since), and `categories` is a no-op on this
+        # actor, so `seniorities` is the only server-side filter that bites.
+        # `categories` still sent: harmless today, useful if the actor fixes it.
+        # The title (_is_target_title) + healthcare gates in _record_to_signal
+        # remain the authority on what actually yields.
         records = self._client.iter_job_changes(
-            positions=_TARGET_POSITIONS,        # primary server-side narrowing
+            seniorities=_TARGET_SENIORITIES,    # c_level,vp,director — live narrowing
             countries="US",
-            categories=CATEGORIES_FILTER,       # healthcare industries, server-side
+            categories=CATEGORIES_FILTER,       # no-op on this actor (kept, harmless)
             date_preset=_since_to_preset(since),
             per_page=self._per_page,
             max_pages=self._max_pages,
@@ -237,10 +238,13 @@ def _since_to_preset(since: datetime) -> str:
 
     Coarse server hint only — the connector's occurredAt >= since check is the
     real authority, so over-covering here just means a few extra client drops.
+
+    FLOOR = last_7d, never "today" (2026-07-23 audit): "today" server-side is
+    00:00 UTC → request time, so the 12:31Z cron covered only ~37% of the week
+    (5 weekday runs × 12.5h / 168h) — an exec start announced at 15:00 UTC was
+    structurally invisible to every run. Over-covering is free client-side.
     """
     days = max(0, (datetime.now(UTC) - since).days)
-    if days <= 1:
-        return "today"
     if days <= 7:
         return "last_7d"
     if days <= 14:

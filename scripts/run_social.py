@@ -57,6 +57,11 @@ async def _main(args) -> int:
         logger.warning("monthly discovery budget reached — skipping social poll")
         return 0
 
+    # This window applies to the COMPETITOR channel; poll_targets floors the
+    # own-account (Magical post) window at 7 days internally so a post keeps
+    # harvesting trailing engagers all week (2026-07-23 audit — the 24h window
+    # only ever saw a post's first-day engagers; URL-level dedup absorbs the
+    # repeat scrapes). See social/poll.py OWN_POST_TRAILING_DAYS.
     since = (datetime.now(UTC) - timedelta(hours=args.since_hours)).isoformat()
     # Never enrich more than we can qualify (enrich is paid; qualifying is capped).
     max_enrich = min(args.max_enrich, cap)

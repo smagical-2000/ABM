@@ -200,10 +200,14 @@ def _fallback_id(rec: FundingRecord, observed_at: datetime) -> str:
 def _since_to_preset(since: datetime) -> str:
     """Map a cutoff to the smallest SignalBase date_preset that covers it.
     Coarse server hint; the occurredAt >= since check is the authority.
+
+    FLOOR = last_7d, never "today" (2026-07-23 audit): "today" server-side is
+    00:00 UTC → request time, so the 12:31Z cron covered only ~37% of the week
+    (5 weekday runs × 12.5h / 168h) — funding rounds announced after the cron
+    hour were structurally invisible. Over-covering is free: the since check
+    drops the extras client-side.
     """
     days = max(0, (datetime.now(UTC) - since).days)
-    if days <= 1:
-        return "today"
     if days <= 7:
         return "last_7d"
     if days <= 14:

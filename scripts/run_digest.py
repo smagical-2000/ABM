@@ -108,13 +108,25 @@ def _sec_fleet(erepo) -> str:
     return f"• builds — this run: `{own}` · fleet: {fleet}"
 
 
+def _sec_sources() -> str:
+    """6) discovery-source freshness — days since each source last produced a
+    NEW company (the 2026-07-23 audit metric, MAR2-45). The consolidated
+    breach ALERT is posted separately in main(); this line is the daily
+    at-a-glance view so a building streak is visible before it pages."""
+    from auto_search.db import get_repository
+    from auto_search.ops import source_streaks
+    return source_streaks.format_digest_line(
+        source_streaks.compute_streaks(get_repository()))
+
+
 def build_digest() -> str:
     erepo = get_engagement_repository()
     sections = (("sync", lambda: _sec_sync(erepo)),
                 ("ingested", lambda: _sec_ingested(erepo)),
                 ("due", _sec_due),
                 ("unresolved", lambda: _sec_unresolved(erepo)),
-                ("fleet", lambda: _sec_fleet(erepo)))
+                ("fleet", lambda: _sec_fleet(erepo)),
+                ("sources", _sec_sources))
     lines: list[str] = []
     for name, build in sections:
         # One bad section must never kill the digest — the digest going missing
@@ -137,16 +149,33 @@ def main() -> int:
     print("[digest]\n" + body, flush=True)
     if not os.getenv("SLACK_ENGAGEMENT_WEBHOOK"):
         print("[digest] SLACK_ENGAGEMENT_WEBHOOK unset — printed only", flush=True)
-        return 0
-    card = {"text": "Daily ABM digest",
-            "blocks": [
-                {"type": "header", "text": {"type": "plain_text",
-                 "text": f"[DIGEST] ABM daily — {datetime.now(UTC).strftime('%b %d')}"}},
-                {"type": "section", "text": {"type": "mrkdwn", "text": body[:2900]}}]}
-    # post_card logs the webhook's status on failure — a dead webhook must not
-    # look like a delivered digest.
-    ok = notify.post_card(card)
-    print(f"[digest] slack post {'ok' if ok else 'FAILED (see log)'}", flush=True)
+    else:
+        card = {"text": "Daily ABM digest",
+                "blocks": [
+                    {"type": "header", "text": {"type": "plain_text",
+                     "text": f"[DIGEST] ABM daily — {datetime.now(UTC).strftime('%b %d')}"}},
+                    {"type": "section", "text": {"type": "mrkdwn", "text": body[:2900]}}]}
+        # post_card logs the webhook's status on failure — a dead webhook must
+        # not look like a delivered digest.
+        ok = notify.post_card(card)
+        print(f"[digest] slack post {'ok' if ok else 'FAILED (see log)'}", flush=True)
+
+    # Zero-streak tripwire (2026-07-23 audit, MAR2-45) — AFTER the card, so a
+    # broken streak query can never cost the digest, and best-effort, so a
+    # broken digest DB can never suppress the card. Piggybacks this daily cron
+    # (no new schedule); posts ONE consolidated source-silence alert, throttled
+    # to 24h inside check_streaks.
+    try:
+        from auto_search.db import get_repository
+        from auto_search.ops import source_streaks
+        streaks = source_streaks.check_streaks(
+            get_repository(), alert=True, state_repo=get_engagement_repository())
+        breached = [s["source"] for s in streaks if s["breached"]]
+        print(f"[digest] source streaks: "
+              f"{'breaches: ' + ', '.join(breached) if breached else 'all fresh'}",
+              flush=True)
+    except Exception:  # noqa: BLE001 — reporting must never fail the daily run
+        logger.exception("source streak check failed (digest already handled)")
     return 0
 
 

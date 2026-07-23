@@ -40,7 +40,7 @@ import logging
 import os
 from collections import Counter
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +52,13 @@ logger = logging.getLogger(__name__)
 _WARN_API_PATH = "/api/sample_warn_listings"
 _WARN_BASE_URL = "https://www.warntracker.com"
 _PAGE_TIMEOUT_MS = 20_000
+
+# Freshness tripwire (2026-07-23 audit): the sample_warn_listings endpoint
+# served a FROZEN April snapshot through Jun–Jul 2026 — every daily run
+# "succeeded" on a corpse (rows fetched, all dropped as before_window) and
+# nobody noticed for weeks. WARN filings arrive continuously nationwide, so a
+# newest notice older than this many days means the FEED is dead, not quiet.
+_STALE_FEED_DAYS = 30
 
 # Field-name aliases — the site occasionally renames columns, so we look up
 # each logical field through a list of candidates rather than one hard key.
@@ -92,6 +99,16 @@ class WarnTrackerConnector:
         """
         rows = await self._fetch_rows()
         logger.info("warntracker returned %d total rows", len(rows))
+
+        # Fail LOUDLY on a frozen feed instead of succeeding on a corpse — the
+        # daily leg's failure alerting takes it from here (a raised error =
+        # connector marked failed = ops alert; a quiet 0-yield run = nothing).
+        newest = _newest_notice_date(rows)
+        if rows and newest is not None and \
+                newest < datetime.now(UTC) - timedelta(days=_STALE_FEED_DAYS):
+            raise RuntimeError(
+                f"warntracker feed stale: newest notice {newest.date().isoformat()} "
+                "— endpoint serving frozen sample")
 
         drops: Counter[str] = Counter()
         yielded = 0
@@ -255,6 +272,23 @@ def _first(row: dict[str, Any], keys: tuple[str, ...]) -> Any:
         if k in row and row[k] is not None:
             return row[k]
     return None
+
+
+def _newest_notice_date(rows: list[dict[str, Any]]) -> datetime | None:
+    """Newest notice date across the payload — the feed-freshness measure.
+
+    Notice date first (it's the filing timestamp, i.e. when the FEED learned
+    of the event); the layoff date only as a per-row fallback. Unparseable
+    rows are skipped — None means "no parseable dates at all", which the
+    caller treats as not-provably-stale (the drop counters surface that case).
+    """
+    newest: datetime | None = None
+    for row in rows:
+        raw = _first(row, _F_NOTICE_DATE) or _first(row, _F_LAYOFF_DATE)
+        d = _parse_date(str(raw)) if raw is not None else None
+        if d is not None and (newest is None or d > newest):
+            newest = d
+    return newest
 
 
 def _external_id(

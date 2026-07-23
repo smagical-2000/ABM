@@ -55,23 +55,31 @@ def is_healthcare_provider(
 ) -> bool:
     """True if the company is a healthcare provider/payer in Magical's ICP.
 
-    Decision order (most authoritative first):
+    Decision order (exclusions first — they are ICP DISQUALIFIERS, so either
+    field disqualifying must win over the other field including):
       1. Excluded subcategory (biotech/science) → False, no matter the label.
-      2. Included subcategory (healthcare/insurance) → True.
-      3. Excluded industry substring (pharma/device/hospitality/…) → False.
+      2. Excluded industry substring (pharma/device/hospitality/vet/…) → False.
+      3. Included subcategory (healthcare/insurance) → True.
       4. Included provider/payer industry substring → True.
       5. Otherwise → False.
+
+    2026-07-23 audit (VitalRads): the industry-exclude check used to run AFTER
+    the subcategory-include, so industry="Veterinary Services" + subcategory=
+    "healthcare" passed — SignalBase's broad "healthcare" enum covers vet/animal
+    care, which the industry label correctly disqualifies. Exclude-before-
+    include on BOTH fields fixes that class; a genuinely-provider row (included
+    industry + "healthcare" subcategory) still passes at step 3.
     """
     sub = (subcategory or "").strip().lower()
     if sub in _SUBCATEGORY_EXCLUDE:
         return False
-    if sub in _SUBCATEGORY_INCLUDE:
-        return True
 
     ind = (industry or "").lower()
-    if not ind:
-        return False
     if any(x in ind for x in _INDUSTRY_EXCLUDE):
+        return False
+    if sub in _SUBCATEGORY_INCLUDE:
+        return True
+    if not ind:
         return False
     return any(x in ind for x in _PROVIDER_INDUSTRY_INCLUDE)
 

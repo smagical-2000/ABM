@@ -395,6 +395,16 @@
    "root_cause": "The ABM gate was on the wrong channel. The leads-ads card was gated on abm_match (non-ABM engagers silently dropped) while the activation notifier had NO ABM gate (scored-only accounts could activate). The rule is the opposite: leads-ads = every reactor; activation = ABM only.",
    "guard": "tests/test_ship_batch.py::test_leads_ads_card_fires_for_non_abm_with_tag, ::test_leads_ads_card_abm_has_no_tag, ::test_activation_abm_only_drops_non_abm",
    "lesson": "A gate on the wrong side of a fork fails silently in BOTH directions: too strict on one channel, too loose on the other. When a rule ('ABM only') is stated, pin down WHICH surface it governs and test both surfaces."
+  },
+  {
+   "id": "click-trigger-clock-2026-07-23",
+   "date": "2026-07-23",
+   "area": "engagement trigger clocks (notify gates/dedup/seed, /activate cutoff, engaged_accounts view + JSON rollup, audit I4)",
+   "symptom": "Three consecutive mornings of ghost 'Hot again' cards (07-21..23): Newport re-armed for Hot reactivation every night off a single scanner click, even though the click CAP had already fixed its score.",
+   "root_cause": "The click cap fixed only the SCORE dimension of the scanner rule; last_touch (the display clock, advanced by ANY scored touch including 1-pt clicks) still armed the activation cutoff and the Hot-reactivation comparison, so a scanner click read as fresh activity to every gate.",
+   "fix": "last_real_touch column (newest scored NON-click touch) in the SQL view + JSON rollup, and ONE shared notify.trigger_touch helper read by the gates, the twin-dedup ranking, the seed baseline, the /activate cutoff clock, and the audit I4 rebuild.",
+   "guard": "tests/test_ship_batch.py::test_click_never_rearms_hot_reactivation + ::test_cutoff_reads_real_clock + ::test_legacy_rows_without_key_keep_old_clock + ::test_json_rollup_exposes_last_real_touch (the 4 replays) + ::test_twin_dedup_uses_trigger_clock + ::test_abm_gate_is_company_level (twin shadowing) + ::test_schema_click_literals_lockstep + tests/test_tofu_trigger_and_hot_rule.py::test_seed_baselines_to_now_then_nothing_fires",
+   "lesson": "A rule has dimensions — points AND clocks. Capping the score fixed one surface while the clock kept lying on the others; fix + test each surface, and make every touch-reader share ONE selection helper so the next surface cannot quietly diverge."
   }
  ]
 }

@@ -332,3 +332,50 @@ def test_json_rollup_exposes_last_real_touch(client):
                if r["account_id"] == "abm_clockco")
     assert str(row["last_touch"])[:10] == "2026-07-23"       # display clock: the click
     assert str(row["last_real_touch"])[:10] == "2026-07-16"  # trigger clock: the reply
+
+
+def test_schema_click_literals_lockstep():
+    """The SQL view hardcodes the click-kind list twice — the cap filter and the
+    last_real_touch NOT IN filter; either drifting from scoring.CLICK_KINDS
+    silently forks the Postgres board from the Python rollup. (The 2-kind
+    `clicks` display counter is a DIFFERENT, deliberate literal — it mirrors the
+    rollup's ('click', 'outbound_click') count, so it's not pinned here.)"""
+    import re
+    from pathlib import Path
+    sql = (Path(__file__).resolve().parents[1]
+           / "auto_search" / "db" / "engagement_schema.sql").read_text()
+    cap = re.search(r"SUM\(points\) FILTER \(\s*WHERE kind IN \(([^)]*)\)", sql)
+    trigger = re.search(r"kind NOT IN \(([^)]*)\)", sql)
+    assert cap and trigger                     # both click IN-lists still exist
+    for blob in (cap.group(1), trigger.group(1)):
+        assert set(re.findall(r"'([^']+)'", blob)) == set(scoring.CLICK_KINDS)
+
+
+def test_twin_dedup_uses_trigger_clock():
+    """Twin shadowing (MAR2 twin class): the per-company dedup must rank twins
+    on the TRIGGER clock — ranked on display last_touch, clicky twin A (real
+    clock stale at 05-26) would win and shadow twin B's genuinely-new 07-22
+    real touch, silently swallowing the Hot reactivation."""
+    a = _row("abm_kaiser", "Hot", 30, lt="2026-07-23", lrt="2026-05-26")
+    b = _row("csv_kaiser", "Hot", 26, lt="2026-07-22", lrt="2026-07-22")
+    a["name"] = b["name"] = "Kaiser Permanente"
+    led = {notify.company_key("Kaiser Permanente"):
+           {"tier": "Hot", "touch": "2026-07-15T00:00:00+00:00"}}
+    due = notify.accounts_to_notify([a, b], led, cutoff="2026-06-25")
+    assert [(d["account"]["account_id"], d["reason"]) for d in due] == [
+        ("csv_kaiser", "hot_activity")]        # B's clock wins the dedup + fires
+
+
+def test_abm_gate_is_company_level():
+    """MAR2 twin class: ABM membership is a property of the COMPANY, not of
+    whichever twin wins the dedup — a scored-only twin with the newest touch
+    must not mask its ABM sibling and suppress the company's card."""
+    scored = _row("csv_summa", "Hot", 24, lt="2026-07-23", lrt="2026-07-23",
+                  lists=("scored",))
+    abm = _row("abm_summa", "Hot", 22, lt="2026-07-20", lrt="2026-07-20",
+               lists=("abm",))
+    scored["name"] = abm["name"] = "Summa Health"
+    due = notify.accounts_to_notify([scored, abm], {}, cutoff="2026-06-25",
+                                    abm_only=True)
+    # the company fires (via whichever twin won the dedup) — not suppressed
+    assert [d["account"]["account_id"] for d in due] == ["csv_summa"]

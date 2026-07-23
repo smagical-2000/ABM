@@ -96,6 +96,16 @@ def test_twin_split_trips_I1_and_I4(repo):
     _ev(repo, "csv_summa_health_system", "pod:3", "podcast_lead", 4)
     _ev(repo, "abm_summahealthsystem", "crm:meeting:4", "meeting_booked", 10)
     _ev(repo, "abm_summahealthsystem", "email:click:5", "click", 1)
+    # I4 models the ABM-only sender (2026-07-23): membership comes off the
+    # contacts' matched_lists — the scored twin alone must not read non-ABM.
+    repo.upsert_contact({"source": "sfdc", "external_id": "ct1",
+                         "company": "Summa Health System",
+                         "account_id": "csv_summa_health_system",
+                         "matched_lists": ["scored"]})
+    repo.upsert_contact({"source": "sfdc", "external_id": "ct2",
+                         "company": "Summa Health System",
+                         "account_id": "abm_summahealthsystem",
+                         "matched_lists": ["abm"]})
     repo.set_setting("notified_tiers", '{"summahealthsystem": {"tier": "Warm", '
                      '"touch": "2026-06-30T00:00:00+00:00"}}')
 

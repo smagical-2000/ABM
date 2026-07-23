@@ -390,15 +390,16 @@ class EngagementJsonRepository:
             aid = e.get("account_id")
             if not aid or e.get("kind") in DEPRECATED_KINDS:   # retired kinds never count
                 continue
-            if (e.get("points") or 0) > 0:
+            pts = int(e.get("points") or 0)
+            if pts > 0:
                 scored_exts.setdefault(aid, set()).add(e.get("contact_ext"))
             slot = ev.setdefault(aid, {"score": 0, "click_pts": 0, "clicks": 0,
                                        "replies": 0, "meetings": 0, "last_touch": None,
                                        "last_real_touch": None})
-            slot["score"] += int(e.get("points") or 0)
+            slot["score"] += pts
             kind = e.get("kind")
             if kind in CLICK_KINDS:
-                slot["click_pts"] += int(e.get("points") or 0)
+                slot["click_pts"] += pts
             if kind in ("click", "outbound_click"):
                 slot["clicks"] += 1
             elif kind in ("reply", "outbound_reply"):
@@ -406,17 +407,17 @@ class EngagementJsonRepository:
             elif kind in ("meeting_booked", "outbound_meeting_booked"):
                 slot["meetings"] += 1
             ot = e.get("occurred_at")
-            # last_touch = latest SCORED touch only (zero-point delivered/open/
-            # bounce rows must not advance it — phantom Hot re-alerts otherwise).
-            # Keep in sync with the engaged_accounts view in engagement_schema.sql.
-            if (e.get("points") or 0) > 0 and ot and (
-                    slot["last_touch"] is None or ot > slot["last_touch"]):
-                slot["last_touch"] = ot
-            # Trigger clock (MAR2-44 #1): real touches only — a scanner click may
-            # advance the display touch above but never the notify trigger.
-            if ((e.get("points") or 0) > 0 and ot and kind not in CLICK_KINDS
-                    and (slot["last_real_touch"] is None or ot > slot["last_real_touch"])):
-                slot["last_real_touch"] = ot
+            if pts > 0 and ot:
+                # last_touch = latest SCORED touch only (zero-point delivered/
+                # open/bounce rows must not advance it — phantom Hot re-alerts
+                # otherwise). Sync w/ the engaged_accounts view in engagement_schema.sql.
+                if slot["last_touch"] is None or ot > slot["last_touch"]:
+                    slot["last_touch"] = ot
+                # Trigger clock (MAR2-44 #1): real touches only — a scanner click
+                # may advance the display touch above but never the notify trigger.
+                if kind not in CLICK_KINDS and (
+                        slot["last_real_touch"] is None or ot > slot["last_real_touch"]):
+                    slot["last_real_touch"] = ot
         cc: dict[str, dict] = {}
         seen_people: dict[str, set] = {}   # account_id -> person keys (dedup the count)
         for c in self._store["contacts"].values():
@@ -606,9 +607,21 @@ class EngagementPostgresRepository:
         self._pool.close()
 
     def ensure_schema(self) -> None:
+        from psycopg import errors
         sql = (Path(__file__).resolve().parent / "engagement_schema.sql").read_text()
         with self._pool.connection() as conn:
-            conn.execute(sql)
+            try:
+                conn.execute(sql)
+            except errors.InvalidTableDefinition:
+                # 42P16: CREATE OR REPLACE VIEW cannot drop/reorder columns, so a
+                # column change to engaged_accounts (e.g. last_real_touch,
+                # 2026-07-23) would crash-loop every container replaying the
+                # schema against the older view shape — a stale cron would boot-
+                # fail forever instead of self-healing. The view is a derived
+                # read-time rollup (no data), so drop it and replay the schema.
+                conn.rollback()
+                conn.execute("DROP VIEW IF EXISTS engaged_accounts")
+                conn.execute(sql)
         logger.info("engagement schema ensured")
 
     def land_raw(self, kind, payload, *, source=SOURCE_REPLYIO,

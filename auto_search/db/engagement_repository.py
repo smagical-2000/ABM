@@ -322,6 +322,7 @@ def _engaged_row(account_id: str, ev: dict, c: dict) -> dict:
         "opened": c.get("opened"),
         "replied_sends": c.get("replied_sends"),
         "last_touch": ev.get("last_touch"),
+        "last_real_touch": ev.get("last_real_touch"),
     }
 
 
@@ -392,7 +393,8 @@ class EngagementJsonRepository:
             if (e.get("points") or 0) > 0:
                 scored_exts.setdefault(aid, set()).add(e.get("contact_ext"))
             slot = ev.setdefault(aid, {"score": 0, "click_pts": 0, "clicks": 0,
-                                       "replies": 0, "meetings": 0, "last_touch": None})
+                                       "replies": 0, "meetings": 0, "last_touch": None,
+                                       "last_real_touch": None})
             slot["score"] += int(e.get("points") or 0)
             kind = e.get("kind")
             if kind in CLICK_KINDS:
@@ -410,6 +412,11 @@ class EngagementJsonRepository:
             if (e.get("points") or 0) > 0 and ot and (
                     slot["last_touch"] is None or ot > slot["last_touch"]):
                 slot["last_touch"] = ot
+            # Trigger clock (MAR2-44 #1): real touches only — a scanner click may
+            # advance the display touch above but never the notify trigger.
+            if ((e.get("points") or 0) > 0 and ot and kind not in CLICK_KINDS
+                    and (slot["last_real_touch"] is None or ot > slot["last_real_touch"])):
+                slot["last_real_touch"] = ot
         cc: dict[str, dict] = {}
         seen_people: dict[str, set] = {}   # account_id -> person keys (dedup the count)
         for c in self._store["contacts"].values():

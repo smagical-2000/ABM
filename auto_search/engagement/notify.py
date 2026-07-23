@@ -573,7 +573,13 @@ def accounts_to_notify(accounts: list[dict], notified: dict,
             continue
         if abm_only and "abm" not in (a.get("lists") or []):
             continue                                   # non-ABM never activates (Sunny)
-        touch = a.get("last_touch")
+        # TRIGGER clock (MAR2-44 #1, 2026-07-23): gates read the REAL-touch clock,
+        # clicks excluded — a scanner click kept re-arming the cutoff and the
+        # Hot-reactivation trigger for three mornings straight (score was capped,
+        # the clock was not). Rows without the key (legacy fixtures) keep the old
+        # clock; the live view always provides it.
+        touch = (a.get("last_real_touch") if "last_real_touch" in a
+                 else a.get("last_touch"))
         if cutoff and (not touch or str(touch)[:10] < cutoff):
             continue                                   # stale history — never alert
         prev_tier, prev_touch = _ledger_lookup(notified, a)

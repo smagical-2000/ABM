@@ -277,3 +277,58 @@ def test_activation_abm_only_drops_non_abm():
     # default (abm_only=False) keeps both — the pure function stays list-agnostic
     both = notify.accounts_to_notify(board, {}, cutoff="2026-06-25")
     assert len({d["account"]["account_id"] for d in both}) == 2
+
+
+# ── 2026-07-23: the trigger clock reads REAL touches only (MAR2-44 #1) ─────────
+# Replays the three ghost mornings (07-21..23): scanner clicks advanced
+# last_touch and re-armed the cutoff + Hot-reactivation gates every night.
+
+
+def _row(aid, tier, score, *, lt, lrt=..., lists=("abm",)):
+    r = {"account_id": aid, "name": aid, "tier": tier, "score": score,
+         "last_touch": lt, "lists": list(lists)}
+    if lrt is not ...:
+        r["last_real_touch"] = lrt
+    return r
+
+
+def test_click_never_rearms_hot_reactivation():
+    """Newport shape: Hot, ledgered 05-26, one scanner click today. Must NOT fire.
+    The same account with a REAL touch today must fire."""
+    led = {"newport": {"tier": "Hot", "touch": "2026-05-26T12:00:00+00:00"}}
+    clicky = _row("newport", "Hot", 75, lt="2026-07-23", lrt="2026-05-26")
+    assert notify.accounts_to_notify([clicky], led, cutoff="2026-06-25") == []
+    real = _row("newport", "Hot", 75, lt="2026-07-23", lrt="2026-07-23")
+    due = notify.accounts_to_notify([real], led, cutoff="2026-06-25")
+    assert [d["reason"] for d in due] == ["hot_activity"]
+
+
+def test_cutoff_reads_real_clock():
+    """Tenet shape: stale real history (03-23), fresh clicks only — never fires,
+    not even as a rise."""
+    row = _row("tenetfl", "Hot", 23, lt="2026-07-23", lrt="2026-03-23")
+    assert notify.accounts_to_notify([row], {}, cutoff="2026-06-25") == []
+    # no real touch at all (clicks only, ever) -> never fires
+    none = _row("clicksonly", "Warm", 12, lt="2026-07-23", lrt=None)
+    assert notify.accounts_to_notify([none], {}, cutoff="2026-06-25") == []
+
+
+def test_legacy_rows_without_key_keep_old_clock():
+    row = _row("legacy", "Warm", 12, lt="2026-07-22")   # no last_real_touch key
+    due = notify.accounts_to_notify([row], {}, cutoff="2026-06-25")
+    assert [d["account"]["account_id"] for d in due] == ["legacy"]
+
+
+def test_json_rollup_exposes_last_real_touch(client):
+    """The JSON rollup mirrors the SQL view: clicks advance last_touch (display)
+    but not last_real_touch (trigger)."""
+    _seed_clicky_account(client._eng, account_id="abm_clockco")
+    # add a click NEWER than the reply so the two clocks diverge
+    client._eng.add_event({"source": "replyio", "external_id": "cx", "channel": "email",
+                           "kind": "click", "points": 1, "contact_ext": "p1",
+                           "company": "Acme", "account_id": "abm_clockco",
+                           "occurred_at": "2026-07-23T00:00:00+00:00", "raw": {}})
+    row = next(r for r in client._eng.engaged_accounts()
+               if r["account_id"] == "abm_clockco")
+    assert str(row["last_touch"])[:10] == "2026-07-23"       # display clock: the click
+    assert str(row["last_real_touch"])[:10] == "2026-07-16"  # trigger clock: the reply

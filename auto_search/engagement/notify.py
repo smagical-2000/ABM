@@ -218,6 +218,8 @@ def notify_lead(lead: dict, *, webhook: str | None = None, test: bool = False,
 #   SPECIALTY_AE   "health_system=Alykhan Jina;payer=Manu Gupta;specialty=…"
 # SFDC account owner (when known) wins over the specialty fallback. Without a Slack
 # id we render a PLAIN "@Name" (names them, does not ping) — fill AE_SLACK_IDS to ping.
+# A segment may name TWO people, comma-separated ("payer=Matt Royalty,Aidan Noonan"):
+# both are tagged, joined with " & ". See `_mentions`.
 
 
 def _parse_pairs(raw: str | None) -> dict[str, str]:
@@ -228,6 +230,34 @@ def _parse_pairs(raw: str | None) -> dict[str, str]:
             if k.strip() and v.strip():
                 out[k.strip()] = v.strip()
     return out
+
+
+def _mention(name: str, ids: dict[str, str]) -> str:
+    """One owner reference: a real `<@id>` ping when the id is known, else a
+    plain "@Name" (names them, does not ping)."""
+    sid = ids.get(name)
+    return f"<@{sid}>" if sid else f"@{name}"
+
+
+def _mentions(value: str | None, ids: dict[str, str]) -> str | None:
+    """Render a routing value — which may name ONE person or SEVERAL — as owner
+    references joined with " & ", or None when it names nobody.
+
+    DUAL COVERAGE (sales, 2026-07-27): a segment can be covered by two people
+    during interim coverage, written comma-separated in the same env var —
+    `SPECIALTY_AE="payer=Matt Royalty,Aidan Noonan"`. Each name resolves
+    INDEPENDENTLY through the id map, so a colleague we have no Slack id for is
+    still named ("<@U01> & @Colin Moynihan") instead of the pair degrading to
+    one. A single name renders byte-identically to before, which is what keeps
+    every existing route unchanged.
+
+    A comma is therefore the multi-owner separator: never write a person as
+    "Last, First" in these vars.
+    """
+    names = [n.strip() for n in str(value or "").split(",") if n.strip()]
+    if not names:
+        return None
+    return " & ".join(_mention(n, ids) for n in names)
 
 
 def ae_slack_ids() -> dict[str, str]:
@@ -245,7 +275,9 @@ def resolve_ae(account: dict, *, owner_name: str | None = None,
 
     Prefer the SFDC account owner; else fall back to the AE assigned to the
     account's framework (health_system / specialty / payer). Returns a `<@id>`
-    Slack mention when the id is known (a real ping), else a plain "@Name"."""
+    Slack mention when the id is known (a real ping), else a plain "@Name" —
+    and both, joined with " & ", when the segment names two people (see
+    `_mentions`)."""
     ids = ae_slack_ids() if ids is None else ids   # {} = deliberately no pings (test mode)
     by_specialty = by_specialty if by_specialty is not None else specialty_ae()
     # `framework_key` is the raw rubric key (health_system/specialty/payer); fall back to
@@ -257,10 +289,7 @@ def resolve_ae(account: dict, *, owner_name: str | None = None,
     # catch-all means an unscored (no-framework) Hot account still tags someone, instead
     # of silently going untagged.
     name = (owner_name or "").strip() or by_specialty.get(fw_key) or _env_name("DEFAULT_AE")
-    if not name:
-        return None
-    sid = ids.get(name)
-    return f"<@{sid}>" if sid else f"@{name}"
+    return _mentions(name, ids)
 
 
 def sdr_slack_ids() -> dict[str, str]:
@@ -282,10 +311,7 @@ def resolve_sdr(account: dict, *, ids: dict[str, str] | None = None,
               or _framework_from_segment(account.get("segment")) or "")
     # framework SDR → DEFAULT_SDR catch-all, so an unscored Warm account still tags someone.
     name = by_specialty.get(fw_key) or _env_name("DEFAULT_SDR")
-    if not name:
-        return None
-    sid = ids.get(name)
-    return f"<@{sid}>" if sid else f"@{name}"
+    return _mentions(name, ids)
 
 
 def _env_name(var: str) -> str | None:

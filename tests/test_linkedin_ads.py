@@ -302,6 +302,51 @@ async def test_failed_airtable_upsert_records_no_heat(patched, monkeypatch):
     assert all(c["event_rows"] == [] for c in crossed)
 
 
+async def test_no_slack_card_when_the_durable_write_fails(patched, monkeypatch):
+    """The card used to post BEFORE the Airtable upsert. On an Airtable failure
+    the loop continues without persisting the contact row, so the person is
+    absent from the dedup set next run — and the identical lead card was
+    re-posted to the leads-ads channel every 15 minutes until Airtable
+    recovered. The durable write goes first now."""
+    monkeypatch.setattr(runner, "cross_and_persist", lambda **kw: (1, 1))
+    cards: list[dict] = []
+    monkeypatch.setattr(runner.notify, "notify_lead",
+                        lambda lead, **kw: cards.append(lead) or True)
+
+    out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=object(),
+                           scoring_repo=None, discovery_repo=None,
+                           airtable_client=_FakeAirtable(fail=True),
+                           replyio_client=_FakeReply(), dry_run=False,
+                           allow_empty_store=True)
+    assert out["stats"].get("airtable_failed") == 3
+    assert cards == []                       # nothing announced that didn't land
+    assert not out["stats"].get("slack_notified")
+
+
+async def test_slack_card_follows_the_airtable_upsert(patched, monkeypatch):
+    """Ordering, not just counts: every card is preceded by its own row landing
+    in Airtable (the Airtable automation is what creates the Salesforce lead,
+    so the card is still the heads-up 'before Salesforce')."""
+    monkeypatch.setattr(runner, "cross_and_persist", lambda **kw: (3, 3))
+    order: list[str] = []
+
+    class _OrderedAirtable(_FakeAirtable):
+        async def upsert(self, fields, *, merge_on):
+            order.append("airtable")
+            return await super().upsert(fields, merge_on=merge_on)
+
+    monkeypatch.setattr(runner.notify, "notify_lead",
+                        lambda lead, **kw: order.append("slack") or True)
+
+    out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=object(),
+                           scoring_repo=None, discovery_repo=None,
+                           airtable_client=_OrderedAirtable(),
+                           replyio_client=_FakeReply(), dry_run=False,
+                           allow_empty_store=True)
+    assert out["stats"]["slack_notified"] == 3
+    assert order == ["airtable", "slack"] * 3
+
+
 async def test_already_processed_profile_skipped_before_spend(patched, monkeypatch):
     """C2: a person already pushed is skipped before the paid enrich."""
     enrich_calls: list[str] = []

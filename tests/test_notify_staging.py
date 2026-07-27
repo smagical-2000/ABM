@@ -67,7 +67,7 @@ def test_staged_send_posts_test_only_and_keeps_account_due(client, monkeypatch):
     monkeypatch.setattr(notify_mod, "activate_account",
                         lambda a, e, **kw: calls.append(kw) or True)
 
-    out = client.post("/api/engagement/notify-changes").json()
+    out = client.post("/api/engagement/notify-changes?dry_run=false").json()
     assert out["stage"] == "test" and out["posted"] == 1
     assert calls[0]["test"] is True          # [TEST] card
     assert calls[0]["webhook"] is None       # falls back to the PRIVATE webhook
@@ -80,7 +80,7 @@ def test_staged_send_posts_test_only_and_keeps_account_due(client, monkeypatch):
     assert tled and next(iter(tled.values()))["tier"].lower() == "hot"
     again = client.post("/api/engagement/notify-changes?dry_run=true").json()
     assert again["due"] == 0                 # test channel: seen once, silent now
-    repeat = client.post("/api/engagement/notify-changes").json()
+    repeat = client.post("/api/engagement/notify-changes?dry_run=false").json()
     assert repeat["posted"] == 0             # no re-flood
     # the LIVE view still owes the card: explicit stage=live sees it as due
     live_view = client.post(
@@ -94,7 +94,7 @@ def test_explicit_live_param_overrides_and_marks_ledger(client, monkeypatch):
     app.state.engagement_repo.set_setting("notify_stage", "test")
     monkeypatch.setattr(notify_mod, "activate_account", lambda a, e, **kw: True)
 
-    out = client.post("/api/engagement/notify-changes?stage=live").json()
+    out = client.post("/api/engagement/notify-changes?stage=live&dry_run=false").json()
     assert out["stage"] == "live" and out["posted"] == 1
     led = json.loads(app.state.engagement_repo.get_setting("notified_tiers"))
     # MAR2-31: entries are company-keyed; this fixture's board can't resolve a
@@ -104,6 +104,41 @@ def test_explicit_live_param_overrides_and_marks_ledger(client, monkeypatch):
     assert led["abm_dueco"]["account_id"] == "abm_dueco"
     after = client.post("/api/engagement/notify-changes?dry_run=true").json()
     assert after["due"] == 0                 # consumed by the live push
+
+
+def test_bare_post_is_a_dry_run_not_a_live_send(client, monkeypatch):
+    """SAFE BY DEFAULT (COO QA 2026-07-27): a parameterless authenticated POST
+    used to fire REAL cards at the AE/SDR routing — one curl slip or a script
+    bug reached live sales channels. Sending is now an explicit act
+    (dry_run=false); every scheduled caller passes it."""
+    app = client.app
+    _seed_due_account(app)
+    calls = []
+    monkeypatch.setattr(notify_mod, "activate_account",
+                        lambda a, e, **kw: calls.append(1) or True)
+
+    out = client.post("/api/engagement/notify-changes?stage=live").json()
+    assert out["due"] == 1 and out["posted"] == 0 and out["dry_run"] is True
+    assert calls == []                       # nothing reached Slack
+    assert app.state.engagement_repo.get_setting("notified_tiers") in (None, "", "{}")
+    # ...and the explicit opt-in still sends, unchanged
+    out2 = client.post("/api/engagement/notify-changes?stage=live&dry_run=false").json()
+    assert out2["posted"] == 1 and calls
+
+
+def test_seed_is_still_audit_gated_without_an_explicit_dry_run(client):
+    """The dry_run default flip must NOT open a hole in the MAR2-32 interlock:
+    seeding WRITES the baseline, so a bare `seed=true` stays held on a red
+    board exactly as before."""
+    app = client.app
+    _seed_due_account(app)
+    app.state.engagement_repo.add_event({
+        "source": "replyio", "external_id": "e:click:c1", "channel": "email",
+        "kind": "click", "points": 3, "contact_ext": "c1", "company": "Due Co",
+        "account_id": "abm_dueco", "occurred_at": "2026-07-07T11:00:00+00:00"})
+    out = client.post("/api/engagement/notify-changes?seed=true").json()
+    assert out.get("stage") == "audit" and out.get("held") is True
+    assert app.state.engagement_repo.get_setting("notified_tiers") in (None, "", "{}")
 
 
 def test_stage_setting_endpoints(client):
@@ -140,11 +175,12 @@ def test_circuit_breaker_holds_and_allow_burst_overrides(client, monkeypatch):
     calls = []
     monkeypatch.setattr(notify_mod, "activate_account",
                         lambda a, e, **kw: calls.append(1) or True)
-    out = client.post("/api/engagement/notify-changes?stage=live").json()
+    out = client.post("/api/engagement/notify-changes?stage=live&dry_run=false").json()
     assert out.get("held") is True and out["posted"] == 0 and calls == []
     assert app.state.engagement_repo.get_setting("notified_tiers") in (None, "{}", "")
     # deliberate override sends
-    out2 = client.post("/api/engagement/notify-changes?stage=live&allow_burst=true").json()
+    out2 = client.post(
+        "/api/engagement/notify-changes?stage=live&allow_burst=true&dry_run=false").json()
     assert out2.get("held") is None and out2["posted"] == 1 and calls
 
 
@@ -192,7 +228,7 @@ def test_interlock_holds_send_when_audit_red(client, monkeypatch):
     calls = []
     monkeypatch.setattr(notify_mod, "activate_account",
                         lambda a, e, **kw: calls.append(1) or True)
-    out = client.post("/api/engagement/notify-changes?stage=live").json()
+    out = client.post("/api/engagement/notify-changes?stage=live&dry_run=false").json()
     assert out.get("held") is True and out.get("stage") == "audit"
     assert out["posted"] == 0 and calls == []
     assert any(v["code"] == "I2-points" for v in out["violations"])

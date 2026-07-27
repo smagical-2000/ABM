@@ -44,6 +44,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
 from auto_search.clients.apify_jobs import ApifyJobsClient, IndeedJob, LinkedInJob
+from auto_search.clients.upstream import UpstreamQuotaError
 from auto_search.models import RawSignal
 from auto_search.normalize import clean_domain, parse_iso_datetime, slugify
 from auto_search.rcm_titles import ESSENTIAL_RCM_TITLES, STANDARD, EssentialTitle
@@ -191,6 +192,10 @@ class JobPostingsConnector:
         """Fetch one title from the given boards (default: all configured);
         tolerate a board failing or a client that doesn't implement it (keeps
         unit tests board-agnostic).
+
+        UpstreamQuotaError is the exception to that tolerance: a capped Apify
+        account fails EVERY board for EVERY title, so swallowing it just yields
+        0 rows across ~35 searches and stamps the connector green (2026-07-27).
         """
         sources = sources or self._sources
         hits: list[tuple[str, object]] = []
@@ -200,6 +205,8 @@ class JobPostingsConnector:
                     query, country=self._country,
                     from_days=from_days, max_rows=self._max_rows)
                 hits += [("indeed", j) for j in rows]
+            except UpstreamQuotaError:
+                raise
             except Exception as e:  # noqa: BLE001 — one board mustn't kill the run
                 logger.warning("indeed search %s failed: %s", query, e)
         if "linkedin" in sources and hasattr(self._client, "search_linkedin"):
@@ -207,6 +214,8 @@ class JobPostingsConnector:
                 rows = await self._client.search_linkedin(
                     query.strip('"'), days=days, limit=self._max_rows)
                 hits += [("linkedin", j) for j in rows]
+            except UpstreamQuotaError:
+                raise
             except Exception as e:  # noqa: BLE001
                 logger.warning("linkedin search %s failed: %s", query, e)
         return hits

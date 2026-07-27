@@ -41,19 +41,39 @@ load_dotenv()   # no override: operator env (e.g. DATABASE_URL) must win
 logger = logging.getLogger("run_engagement_replyio")
 
 
+OVERLAP_DAYS = 10
+COHORT_START = "2026-01-01"
+
+
 def _default_since(engagement_repo) -> str:
-    """Window start when --since is not given: last sync minus a 10-day overlap
-    (idempotent upserts absorb the re-pull; late activity lands inside it),
-    else the 2026 cohort start for a store that has never synced."""
+    """Window start when --since is not given: the last SUCCESSFUL sync minus a
+    10-day overlap (idempotent upserts absorb the re-pull; late activity lands
+    inside it), else the 2026 cohort start.
+
+    'Successful' is load-bearing. set_sync_state stamps last_synced_at on BOTH
+    success and failure, and run_sync records status='failed' with a fresh stamp
+    on every exception — so resuming from last_synced_at let a FAILING daily run
+    walk the cursor forward while ingesting nothing. A 12-day outage (revoked
+    key, Reply.io 5xxs past the retry cap) then resumed at day 12 − 10 = day 2 of
+    the outage: days 0-2 of clicks/replies were never pulled, and those accounts'
+    heat sits permanently low. `window_to` is written ONLY on success, so it is
+    the one field that cannot drift; a store with no successful window re-pulls
+    the cohort rather than guessing (the pull is idempotent, so the cost of
+    over-pulling is time, and the cost of under-pulling is lost history).
+    """
     try:
         state = engagement_repo.get_sync_state("replyio") or {}
-        last = state.get("last_synced_at")
-        if last:
-            dt = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
-            return (dt.date() - timedelta(days=10)).isoformat()
+        anchor = state.get("window_to")
+        if not anchor and state.get("status") == "success":
+            anchor = state.get("last_synced_at")   # rows predating window_to
+        if anchor:
+            dt = datetime.fromisoformat(str(anchor).replace("Z", "+00:00"))
+            return (dt.date() - timedelta(days=OVERLAP_DAYS)).isoformat()
     except (ValueError, TypeError):
-        logger.warning("unparseable replyio last_synced_at — using full window")
-    return "2026-01-01"
+        logger.warning("unparseable replyio sync cursor — using full window")
+    except Exception:  # noqa: BLE001 — an unreadable cursor must re-pull, not crash
+        logger.warning("replyio sync state unreadable — using full window")
+    return COHORT_START
 
 
 def main() -> int:

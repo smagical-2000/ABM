@@ -34,6 +34,7 @@ from dotenv import load_dotenv
 
 from auto_search.db import get_repository
 from auto_search.db.scoring_repository import get_scoring_repository
+from auto_search.ops.logsetup import quiet_http_logs
 from auto_search.scoring import spend_guard
 from auto_search.social import SocialTarget, poll_events, poll_targets
 
@@ -90,6 +91,7 @@ def main() -> int:
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S")
+    quiet_http_logs()   # httpx INFO prints the full request URL (secret hygiene)
     try:
         return asyncio.run(_main(args))
     except Exception:  # noqa: BLE001 — cron must exit non-zero on failure, with a trace

@@ -36,6 +36,12 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, field_validator
 
+from auto_search.clients.upstream import (
+    UpstreamError,
+    apify_auth,
+    raise_for_upstream,
+)
+
 logger = logging.getLogger(__name__)
 
 # One actor per signal feed.
@@ -293,14 +299,36 @@ class SignalBaseClient:
                 break
 
     async def _run_sync(self, actor: str, body: dict) -> dict:
-        url = _RUN_SYNC.format(actor=actor)
-        params = {"token": self._token}
+        """One page of a feed. A refusal RAISES: the pre-2026-07-27 version
+        returned resp.json() unchecked, so a 403 quota body (no `data` key) read
+        as '0 records (credits: ?)' → clean page-1 break → connector 'success'.
+        A missing `data` key is that same tell, at any status."""
+        short = actor.split("~")[-1]
+        status, payload = await self._post(_RUN_SYNC.format(actor=actor), body)
+        raise_for_upstream(f"signalbase[{short}]", status, payload)
+        if not isinstance(payload, dict) or "data" not in payload:
+            raise UpstreamError(
+                f"signalbase[{short}] response carries no 'data' key "
+                f"(not a SignalBase payload): {str(payload)[:200]}")
+        return payload
+
+    async def _post(self, url: str, body: dict) -> tuple[int, Any]:
+        headers = apify_auth(self._token)
         if self._http is not None:
-            resp = await self._http.post(url, params=params, json=body)
-            return resp.json()
+            resp = await self._http.post(url, headers=headers, json=body)
+            return resp.status_code, _parse(resp)
         async with httpx.AsyncClient(timeout=120.0) as c:
-            resp = await c.post(url, params=params, json=body)
-            return resp.json()
+            resp = await c.post(url, headers=headers, json=body)
+            return resp.status_code, _parse(resp)
+
+
+def _parse(resp: httpx.Response) -> Any:
+    """Parsed JSON, or the raw text when the body isn't JSON — either way the
+    evidence reaches raise_for_upstream instead of vanishing."""
+    try:
+        return resp.json()
+    except ValueError:
+        return resp.text
 
 
 def _compact(d: dict[str, Any]) -> dict[str, Any]:

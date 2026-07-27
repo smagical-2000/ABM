@@ -31,6 +31,20 @@ Env
     (none required — the site is public)
     WARN_USE_CACHE=true            read the cached JSON instead of scraping
     WARN_CACHE_PATH=./data/...     cache location (default ./data/warn_cache.json)
+
+STATUS: UPSTREAM DEAD (verified 2026-07-27)
+-------------------------------------------
+warntracker.com itself stopped updating around 2026-04-27. Loading the site
+fresh and reading its OWN /api/sample_warn_listings response returns 200 rows
+whose newest Notice Date is 2026-04-27 — the identical frozen snapshot we get;
+it is the only data API the homepage calls, and the state pages 404. WARN
+filings are statutory and continuous, so a three-month-old newest notice means
+the SITE is dead, not the market. Our last new company from this source was
+2026-06-09.
+
+So the stale-feed tripwire below fires on EVERY run, by design and correctly.
+Do not "fix" it by widening _STALE_FEED_DAYS or by retrying — this source needs
+REPLACING (state WARN portal aggregation, DOL data, or layoffs.fyi).
 """
 
 from __future__ import annotations
@@ -100,15 +114,24 @@ class WarnTrackerConnector:
         rows = await self._fetch_rows()
         logger.info("warntracker returned %d total rows", len(rows))
 
-        # Fail LOUDLY on a frozen feed instead of succeeding on a corpse — the
-        # daily leg's failure alerting takes it from here (a raised error =
-        # connector marked failed = ops alert; a quiet 0-yield run = nothing).
+        # Fail LOUDLY on a frozen feed instead of succeeding on a corpse. The
+        # chain this comment used to claim did not actually exist until
+        # 2026-07-27: run_discovery's 1-of-N policy caught the exception,
+        # printed a warning and exited 0, so run_daily said "all legs OK" and
+        # the only loud path was run_digest's throttled 24h source-silence
+        # WARNING, lumped in with every other quiet source. It is real now —
+        # a raised error marks the connector_runs row FAILED and run_discovery
+        # posts one consolidated FAILURE-severity ops alert naming this source
+        # (see scripts/run_discovery.py alert_failed_sources). A quiet 0-yield
+        # run still tells nobody anything, which is exactly why we raise.
         newest = _newest_notice_date(rows)
         if rows and newest is not None and \
                 newest < datetime.now(UTC) - timedelta(days=_STALE_FEED_DAYS):
             raise RuntimeError(
                 f"warntracker feed stale: newest notice {newest.date().isoformat()} "
-                "— endpoint serving frozen sample")
+                "— endpoint serving frozen sample. warntracker.com stopped updating "
+                "~2026-04-27 (verified 2026-07-27): REPLACE the source, do not "
+                "retry or widen the window.")
 
         drops: Counter[str] = Counter()
         yielded = 0

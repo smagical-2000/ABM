@@ -2378,6 +2378,16 @@ def create_app() -> FastAPI:
                                        "before a live enrollment run")
         from auto_search.engagement.replyio_client import ReplyioClient
         client = ReplyioClient()                    # raises clearly if the key is absent
+        # CHECK-AND-CLAIM, atomically (COO QA 2026-07-27). The busy check at the
+        # top of the handler is separated from this claim by `await
+        # _json_body(request)` and the settings reads — the event loop yields in
+        # between, so a double-clicked Run (or a retrying UI) passed the check
+        # twice and started two live enrollment passes over the same accounts:
+        # the ledger double-records and HeyReach add_leads has no
+        # 409-on-existing softener. These two statements have no await between
+        # them, so nothing can slip through the door once it is claimed.
+        if getattr(app.state, "campaigns_running", False):
+            return {"started": False, "busy": True}
         app.state.campaigns_running = True
 
         async def _run() -> None:

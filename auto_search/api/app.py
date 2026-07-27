@@ -2587,9 +2587,16 @@ def create_app() -> FastAPI:
             em = (f.get("Email") or "").strip().lower()
             li = (f.get("LinkedIn URL") or "").strip().lower()
             member = li.rstrip("/").rsplit("/", 1)[-1] if li else ""
+            from auto_search.engagement.cross import corporate_email_domain
             from auto_search.normalize import normalize_company_name as _n
+            # LAST resort but never skip it: the lead's OWN corporate address
+            # is the cheapest, most reliable domain we hold, and it was being
+            # ignored — every dispatch went out with_domain=0 (2026-07-27),
+            # so Clay's waterfall keyed on a company LABEL with no site.
+            # Personal providers resolve to None, so a gmail lead is unchanged.
             return (dom_by_email.get(em) or (dom_by_member.get(member) if member else None)
-                    or dom_by_company.get(_n(f.get("Company Name") or "")))
+                    or dom_by_company.get(_n(f.get("Company Name") or ""))
+                    or corporate_email_domain(em))
 
         leads = []
         with_domain = 0
@@ -2597,6 +2604,12 @@ def create_app() -> FastAPI:
             f = r["fields"]
             if not (_has(f, "First Name") or _has(f, "Last Name")):
                 continue                        # junk rows never leave the building
+            # Never spend Clay credits on our own people or test rows — the
+            # same gate the capture path applies (a 'Magical / yy@gmail.com'
+            # row was going out on every dispatch, 2026-07-27).
+            from auto_search.social.filters import is_magical
+            if is_magical(f.get("Company Name"), f.get("LinkedIn URL")):
+                continue
             needs = [k for k, col in (("email", "Email"), ("phone", "Phone"))
                      if not _has(f, col)]
             if not needs or (needs_filter != "any" and needs_filter not in needs):

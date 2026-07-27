@@ -313,6 +313,13 @@ def _usable_name_key_raw(key: str | None) -> str | None:
     return key if key and key not in _GENERIC_NAME_KEYS else None
 
 
-def _email_domain(email: str | None) -> str | None:
+def corporate_email_domain(email: str | None) -> str | None:
+    """The registrable CORPORATE domain in an email address, or None for a
+    personal/free provider. Public because the Clay dispatch needs the same
+    judgement (a lead's own address is the cheapest domain we have, and it was
+    being ignored — Clay received company names with no site to key on)."""
     e = (email or "").strip().lower()
     return _usable_domain(e.rsplit("@", 1)[-1]) if "@" in e else None
+
+
+_email_domain = corporate_email_domain    # internal alias (call sites above)

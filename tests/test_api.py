@@ -621,3 +621,34 @@ class TestClayResultsFill:
                    content=b'[{"record_id":"recBLANK","phone":"+1 700"}]')
         assert r.status_code == 200 and r.json()["received"] == 1
         assert self._FakeAT.instances[0].patched == [("recBLANK", {"Phone": "+1 700"})]
+
+
+class TestClayDispatchDomainAndMagicalGate:
+    """Clay bridge quality (2026-07-27 live probe): every dispatch went out
+    with_domain=0 — the resolver checked our contacts store, the LinkedIn
+    member id and the company name, but never the lead's OWN corporate email,
+    so Clay's waterfall keyed on a company LABEL with no website. A
+    'Magical / yy@gmail.com' test row was also going out on every batch."""
+
+    def test_corporate_email_supplies_the_domain(self):
+        from auto_search.engagement.cross import corporate_email_domain
+        assert corporate_email_domain("Chandlergilliam@equitashealth.com") == \
+            "equitashealth.com"
+        assert corporate_email_domain("kcleary@yourhealth.org") == "yourhealth.org"
+
+    def test_personal_providers_still_resolve_to_no_domain(self):
+        """A gmail lead must be unchanged — we must not tell Clay that a
+        prospect's employer is gmail.com."""
+        from auto_search.engagement.cross import corporate_email_domain
+        for addr in ("yy@gmail.com", "someone@yahoo.com", "x@icloud.com"):
+            assert corporate_email_domain(addr) is None, addr
+
+    def test_subdomain_email_collapses_to_the_registrable_domain(self):
+        from auto_search.engagement.cross import corporate_email_domain
+        assert corporate_email_domain("a@mail.equitashealth.com") == \
+            "equitashealth.com"
+
+    def test_magical_rows_are_filtered_from_dispatch(self):
+        from auto_search.social.filters import is_magical
+        assert is_magical("Magical", None) is True
+        assert is_magical("Equitas Health", None) is False

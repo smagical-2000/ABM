@@ -116,6 +116,11 @@ class CrossIndex:
                     "cross: refusing abm sibling %s -> %s (domain conflict "
                     "%s vs %s)", rec["account_id"], sib["account_id"],
                     dom, sib.get("domain"))
+                # Queue for verification like the match-time vetoes — the first
+                # two live refusals (den.health/denverhealth.org,
+                # scanhealthplan.com/thescangroup.org) are both plausibly the
+                # SAME org, and without this they'd stay split forever.
+                self.vetoed_pairs.add((dom or "", sib.get("domain") or "", name))
                 sib = None
             if sib:
                 self._abm_sibling[rec["account_id"]] = sib

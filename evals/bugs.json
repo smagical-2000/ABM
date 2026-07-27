@@ -405,6 +405,96 @@
    "fix": "last_real_touch column (newest scored NON-click touch) in the SQL view + JSON rollup, and ONE shared notify.trigger_touch helper read by the gates, the twin-dedup ranking, the seed baseline, the /activate cutoff clock, and the audit I4 rebuild.",
    "guard": "tests/test_ship_batch.py::test_click_never_rearms_hot_reactivation + ::test_cutoff_reads_real_clock + ::test_legacy_rows_without_key_keep_old_clock + ::test_json_rollup_exposes_last_real_touch (the 4 replays) + ::test_twin_dedup_uses_trigger_clock + ::test_abm_gate_is_company_level (twin shadowing) + ::test_schema_click_literals_lockstep + tests/test_tofu_trigger_and_hot_rule.py::test_seed_baselines_to_now_then_nothing_fires",
    "lesson": "A rule has dimensions — points AND clocks. Capping the score fixed one surface while the clock kept lying on the others; fix + test each surface, and make every touch-reader share ONE selection helper so the next surface cannot quietly diverge."
+  },
+  {
+   "id": "notify-ledger-late-write-2026-07-27",
+   "date": "2026-07-27",
+   "area": "engagement notify (POST /api/engagement/notify-changes ledger persistence)",
+   "symptom": "Duplicate AE/SDR cards for accounts already handed off: a run that raised partway through the send loop re-posted every card it had already delivered on the next trigger 15 minutes later, and overlapping runs each lost the other's entries.",
+   "root_cause": "Cards posted inside the loop but repo.set_setting('notified_tiers') ran ONCE after it, over a copy of the ledger loaded before the loop. Any mid-loop raise (a dropped psycopg connection in events_for_account, a deploy/OOM restart) left delivered cards unrecorded, and the whole-loop read-modify-write let the last of three concurrent triggers (daily cron leg, TOFU event-driven push, a human in the console) silently discard the others' entries.",
+   "fix": "_persist_notified records each card and flushes it immediately, re-reading the stored ledger and merge-strongest-ing onto it, so the RMW window is one upsert instead of the whole send loop.",
+   "guard": "tests/test_notify_durability.py::test_delivered_card_is_recorded_before_a_mid_loop_error + ::test_concurrent_writers_entries_are_not_clobbered",
+   "lesson": "A side effect and its ledger entry are one unit: persist the moment the effect lands, and re-read immediately before writing so the read-modify-write window is one upsert, not a whole loop."
+  },
+  {
+   "id": "notify-changes-live-by-default-2026-07-27",
+   "date": "2026-07-27",
+   "area": "engagement notify endpoint defaults (security / blast radius)",
+   "symptom": "A bare authenticated POST to /api/engagement/notify-changes - no params at all - fired real cards at the live AE/SDR channels. One curl slip or script bug reached sales.",
+   "root_cause": "dry_run defaulted to False, so the destructive mode was the default mode, behind a single shared Basic-auth credential used by every teammate and every ops script.",
+   "fix": "dry_run defaults to True; scripts/run_engagement_notify.py (the daily cron leg and the TOFU runner's event-driven push both shell out to it) sends dry_run=false explicitly. The audit interlock now gates on 'this call writes something' (seed or not dry_run), since seeding rewrites the baseline and never honoured dry_run.",
+   "guard": "tests/test_notify_staging.py::test_bare_post_is_a_dry_run_not_a_live_send + ::test_seed_is_still_audit_gated_without_an_explicit_dry_run + tests/test_run_engagement_notify.py::test_send_passes_the_cap_as_limit",
+   "lesson": "Side-effectful endpoints default to the SAFE mode; sending is an explicit act. When flipping such a default, grep every caller first - and re-check any guard phrased as 'not dry_run', because its meaning inverts."
+  },
+  {
+   "id": "soql-inline-escape-2026-07-27",
+   "date": "2026-07-27",
+   "area": "auto_search/engagement/sfdc_client.py (SOQL construction)",
+   "symptom": "No live incident: lead_exists interpolated an email taken straight from LinkedIn lead-gen form payloads into a query against the production Salesforce org, escaped by a bespoke two-character replace.",
+   "root_cause": "Escaping was inline and per-call-site. The HIGH_INTENT_SOURCES IN-list hand-rolled a different escape that skipped backslashes entirely, and nothing told the next author that a dynamic value needs one at all.",
+   "fix": "One soql_quote() helper (backslash before quote, control characters dropped) used by every dynamic value, and query() documents that raw f-string interpolation of external data is banned.",
+   "guard": "tests/test_sfdc_client.py::test_soql_quote_escapes_backslash_before_quote + ::test_soql_quote_strips_control_characters + ::test_lead_exists_escapes_the_external_email + ::test_lead_source_list_is_escaped_including_backslashes",
+   "lesson": "One escaping helper per query language, documented at the query boundary. A bespoke inline escape is how the NEXT clause ends up with none."
+  },
+  {
+   "id": "unclamped-limit-params-2026-07-27",
+   "date": "2026-07-27",
+   "area": "auto_search/api/app.py list endpoints (news, engagement inbox, ops changelog)",
+   "symptom": "GET /api/news?limit=-1 and /api/engagement/inbox?limit=-1 returned a bare 500 (Postgres rejects a negative LIMIT); GET /api/ops/changelog?limit=0 returned the newest single entry instead of none.",
+   "root_cause": "Raw ints went from the query string to SQL LIMIT unvalidated, and the changelog coerced with max(1, limit) - which turns 'give me none' into 'give me one' and hides negatives.",
+   "fix": "_clamp_limit at the route layer (0 <= limit <= 1000, clamped not 422'd) plus an explicit zero branch on the changelog page.",
+   "guard": "tests/test_api_limit_clamps.py::test_clamp_limit_bounds + ::test_news_negative_limit_is_empty_not_an_error + ::test_inbox_negative_limit_is_empty_not_an_error + ::test_changelog_zero_limit_returns_no_entries",
+   "lesson": "Clamp pagination at the route layer and give zero its own branch - entries[-0:] is the whole list, and max(1, n) silently rewrites the caller's intent."
+  },
+  {
+   "id": "heyreach-redelivery-restamp-2026-07-27",
+   "date": "2026-07-27",
+   "area": "POST /api/campaigns/webhooks/heyreach (ingest idempotency)",
+   "symptom": "Ghost 'Hot again - new activity' cards: a HeyReach retry of an old connection-accept restamped it as today, so a Hot account re-alerted with zero real activity.",
+   "root_cause": "The receiver stamped occurred_at=now() on every delivery and add_event's ON CONFLICT overwrites occurred_at with EXCLUDED, so a redelivery (HeyReach retries any non-2xx; duplicate registrations fan out per campaign) advanced last_real_touch past the notify ledger's recorded touch.",
+   "fix": "Prefer the payload's own timestamp (pure response_notify.heyreach_event_time, mirroring smartlead_event_to_engagement) so a replay is a byte-identical write, and skip the delivery outright when the external_id is already stored.",
+   "guard": "tests/test_heyreach_connect.py::test_webhook_stores_the_events_own_timestamp + ::test_redelivered_event_never_restamps_occurred_at + ::test_event_time_reads_iso_and_epoch_shapes",
+   "lesson": "A webhook receiver must be idempotent under replay: take the event's OWN timestamp so a retry rewrites the same instant, and dedupe on external_id for payloads that carry no time. Dedup on the ROW is not dedup on the TRIGGER."
+  },
+  {
+   "id": "tofu-card-before-durable-write-2026-07-27",
+   "date": "2026-07-27",
+   "area": "auto_search/engagement/linkedin_ads_runner.py (per-lead write order)",
+   "symptom": "While Airtable was failing, the identical LinkedIn lead card re-posted to the leads-ads channel every 15-minute tick, and Apollo/FullEnrich were re-billed for the same person each time.",
+   "root_cause": "The Slack card posted BEFORE the Airtable upsert. On failure the loop continues without appending the contact row (the durable dedup key), so the person was reprocessed - and re-announced - next run.",
+   "fix": "The card now follows the successful upsert, which keeps its meaning (the Airtable automation is what creates the Salesforce lead, so it is still the heads-up before Salesforce).",
+   "guard": "tests/test_linkedin_ads.py::test_no_slack_card_when_the_durable_write_fails + ::test_slack_card_follows_the_airtable_upsert",
+   "lesson": "Announce only what you have durably written. An un-retractable side effect (a Slack post, an email) must follow the write it describes, never precede it."
+  },
+  {
+   "id": "campaigns-run-check-then-act-2026-07-27",
+   "date": "2026-07-27",
+   "area": "POST /api/campaigns/run (single-flight busy flag)",
+   "symptom": "A double-clicked Run could start two live enrollment passes over the same accounts - double ledger entries, and HeyReach add_leads has no 409-on-existing softener.",
+   "root_cause": "The campaigns_running check sat before 'await _json_body(request)' and the flag was only set several statements later; the event loop yields in between, so a second request passed the check before the first claimed the flag.",
+   "fix": "A re-check and the claim are now adjacent with no await between them, immediately before the background pass is scheduled; the early check is kept so a busy response is still immediate.",
+   "guard": "tests/test_busy_flags.py::test_two_concurrent_live_runs_start_only_once + ::test_live_run_still_starts_when_idle",
+   "lesson": "Check-and-claim must be adjacent with no await between them. A busy flag set after an await is not a lock."
+  },
+  {
+   "id": "schedule-coro-drop-wedges-flag-2026-07-27",
+   "date": "2026-07-27",
+   "area": "auto_search/api/app.py::_schedule_coro (background scheduling)",
+   "symptom": "After a dropped background schedule, every later sync answered {busy: true} until the container was redeployed.",
+   "root_cause": "Endpoints set app.state.<x>_running = True and relied on the scheduled coroutine's finally to clear it. _schedule_coro's no-loop path logged, closed the coroutine and returned, so that finally never ran.",
+   "fix": "_schedule_coro returns whether it scheduled and takes the caller's flag name, clearing it in a finally that covers the no-loop drop and any unexpected scheduling failure; wired into news, engagement, campaigns, social, discovery and batch.",
+   "guard": "tests/test_busy_flags.py::test_dropped_background_work_never_wedges_the_endpoint + ::test_schedule_coro_reports_whether_it_scheduled",
+   "lesson": "If a flag's release lives inside work that might never run, the scheduler owns the release too - clear it in a finally at the point that knows scheduling failed."
+  },
+  {
+   "id": "sfdc-no-retry-no-reauth-2026-07-27",
+   "date": "2026-07-27",
+   "area": "auto_search/engagement/sfdc_client.py (transport resilience)",
+   "symptom": "A transient Salesforce 503, or a token expiring mid-pull, failed the entire SFDC leg: BOFU heat landed a day late and the daily-cron FAILED alert paged for a blip.",
+   "root_cause": "query() raise_for_status()ed on the first non-2xx with zero retries - unlike the Reply.io/HeyReach/Airtable clients - and the cached client-credentials token was never refreshed, so one 401 turned every remaining page into a 401.",
+   "fix": "Reads retry twice with capped exponential backoff (Retry-After wins) and replay a page once after refreshing the token on 401. Writes (create_lead) are excluded - a replayed POST duplicates a Lead.",
+   "guard": "tests/test_sfdc_client.py::test_query_retries_a_transient_5xx + ::test_query_honours_retry_after_on_429 + ::test_query_retry_is_bounded_then_raises + ::test_query_reauthenticates_once_on_401 + ::test_writes_are_never_retried",
+   "lesson": "Every outbound client gets the same bounded backoff, and cached credentials need a refresh path. Retry READS only - a replayed write duplicates a record."
   }
  ]
 }

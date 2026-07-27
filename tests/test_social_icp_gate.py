@@ -131,3 +131,33 @@ async def test_excluded_healthcare_adjacent_industries_are_dropped():
         result, calls = await _run(_engager(industry=industry))
         assert result.reason == "not_healthcare_provider", industry
         assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_competitor_staff_never_becomes_a_lead():
+    """2026-07-27 DM probe: Assort Health's own founders engaged with their
+    team's posts and would have entered the funnel; Tennr itself once did."""
+    comps = frozenset({"assorthealth", "tennr", "linkedin.com/company/tennrai"})
+    result, calls = await _run(
+        _engager(company_name="Assort Health", industry="Hospitals and Health Care"),
+        competitor_names=comps)
+    assert result.accepted is False and result.reason == "competitor_staff"
+    assert calls == []
+    # a real provider with the same industry sails through
+    ok, calls2 = await _run(
+        _engager(company_name="Acme Health System", industry="Hospitals and Health Care"),
+        competitor_names=comps)
+    assert ok.accepted is True and len(calls2) == 1
+
+
+def test_competitor_name_set_builds_from_targets():
+    from types import SimpleNamespace as T
+
+    from auto_search.social.poll import _competitor_name_set
+    s = _competitor_name_set([
+        T(kind="competitor", label="Assort Health",
+          linkedin_url="https://www.linkedin.com/company/assorthealth/"),
+        T(kind="own", label="Magical", linkedin_url="https://www.linkedin.com/company/getmagical"),
+    ])
+    assert "assorthealth" in s and "linkedin.com/company/assorthealth" in s
+    assert not any("getmagical" in x for x in s)

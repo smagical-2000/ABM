@@ -247,7 +247,8 @@ async def poll_targets(
                 _tally_skip(summary, "below_threshold")
                 continue
             summary["decision_makers"] += 1
-            kw = {"repo": repo, "op": op, "can_qualify": can_qualify, "abm_lookup": abm_lookup}
+            kw = {"repo": repo, "op": op, "can_qualify": can_qualify, "abm_lookup": abm_lookup,
+                  "competitor_names": _competitor_name_set(targets)}
             if qualify_fn is not None:
                 kw["qualify_fn"] = qualify_fn
             budget = max_enrich - enrich_count
@@ -460,3 +461,22 @@ async def _enrich_and_record(enrich_fn, url: str, op, summary: dict, budget: int
                   company_key=None, model="apify:fresh-linkedin-profile")
     summary["enriched"] += 1
     return enriched
+
+
+def _competitor_name_set(targets) -> frozenset[str]:
+    """Normalized labels + bare url_keys of competitor targets, for the
+    competitor-staff gate (own-page targets excluded: is_magical covers us)."""
+    from auto_search.normalize import normalize_company_name
+    out: set[str] = set()
+    for t in targets:
+        if getattr(t, "kind", "") != "competitor":
+            continue
+        if getattr(t, "label", None):
+            key = normalize_company_name(t.label)
+            if key:
+                out.add(key)
+        url = (getattr(t, "linkedin_url", "") or "").strip().lower()
+        url = url.replace("https://", "").replace("http://", "").replace("www.", "").rstrip("/")
+        if url:
+            out.add(url)
+    return frozenset(out)

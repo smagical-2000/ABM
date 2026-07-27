@@ -112,3 +112,26 @@ def is_attending(comment_text: str | None, post_title: str | None = None) -> tup
         if m:
             return True, m.group(0)
     return False, ""
+
+
+def is_competitor_staff(company_name: str | None, *links: str | None,
+                        competitors: frozenset[str] = frozenset()) -> bool:
+    """True if the person WORKS AT a tracked competitor (drop them).
+
+    The DM-audience probe (2026-07-27) showed the biggest contamination class:
+    a competitor's own founders/CRO/engineers engaging with their team's posts
+    (Assort Health x4, Skypoint x2) — and Tennr itself once landed on the board
+    as a "lead". Same shape as is_magical, generalized to every tracked
+    competitor: match on normalized company name or a company-page link.
+    `competitors` carries normalized names AND url_keys from social_targets."""
+    if not competitors:
+        return False
+    from auto_search.normalize import normalize_company_name
+    if normalize_company_name(company_name or "") in competitors:
+        return True
+    for link in links:
+        lk = (link or "").strip().lower().replace("https://", "").replace(
+            "http://", "").replace("www.", "").rstrip("/")
+        if lk and lk in competitors:
+            return True
+    return False

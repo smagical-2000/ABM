@@ -89,7 +89,12 @@ from auto_search.social import (
     poll_targets,
 )
 
-load_dotenv(override=True)
+# NO override (2026-07-27): .env fills GAPS, it never replaces what the
+# operator exported. override=True here meant an exported DATABASE_URL was
+# silently swapped for .env's on import — the local-vs-prod mixup that sent
+# three discovery runs to a local Postgres. .env is gitignored, so containers
+# never had one; this only ever hurt operator and CI runs.
+load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Manual-run date windows: likes/comments use a posted-since date (days), event

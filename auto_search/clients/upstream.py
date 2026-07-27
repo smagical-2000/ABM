@@ -28,6 +28,17 @@ import json
 from typing import Any
 
 
+def apify_auth(token: str) -> dict[str, str]:
+    """Apify auth as a HEADER, never `?token=`.
+
+    httpx logs the full request URL at INFO, so a token in the query string is
+    printed dozens of times per cron run into Railway's log store (2026-07-27:
+    the live key was sitting in the discovery-cron and social logs). Apify
+    accepts `Authorization: Bearer <token>` on every v2 endpoint — verified
+    live against run-sync and run-sync-get-dataset-items."""
+    return {"Authorization": f"Bearer {token}"}
+
+
 class UpstreamError(RuntimeError):
     """An upstream API refused the call. NEVER convert this to an empty result."""
 

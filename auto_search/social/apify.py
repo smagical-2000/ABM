@@ -25,7 +25,12 @@ from typing import Any
 import httpx
 from pydantic import BaseModel
 
-from auto_search.clients.upstream import UpstreamError, UpstreamQuotaError, is_quota
+from auto_search.clients.upstream import (
+    UpstreamError,
+    UpstreamQuotaError,
+    apify_auth,
+    is_quota,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,11 +164,13 @@ def _token() -> str:
 async def _run_actor(actor: str, payload: dict, *, client: httpx.AsyncClient | None = None) -> list[dict]:
     """Run an actor synchronously and return its dataset items."""
     url = f"{_BASE}/{actor}/run-sync-get-dataset-items"
-    params = {"token": _token()}
+    # Header auth, never `?token=` — httpx logs the full URL at INFO, which put
+    # the live Apify key in Railway's logs on every cron run (2026-07-27).
+    headers = apify_auth(_token())
     owns = client is None
     client = client or httpx.AsyncClient(timeout=_TIMEOUT_S)
     try:
-        resp = await client.post(url, params=params, json=payload)
+        resp = await client.post(url, headers=headers, json=payload)
         if resp.status_code >= 400:
             # A capped account gets its OWN class so per-target handlers can't
             # swallow it as "one bad profile" (2026-07-27 hard-limit outage).

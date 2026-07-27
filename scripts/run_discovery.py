@@ -53,6 +53,7 @@ from auto_search.connectors.leadership_changes import LeadershipChangesConnector
 from auto_search.connectors.warntracker import WarnTrackerConnector
 from auto_search.db import get_repository
 from auto_search.ops.alerts import post_ops_alert, should_alert
+from auto_search.ops.logsetup import quiet_http_logs
 from auto_search.scoring import spend_guard
 
 load_dotenv()   # no override: operator env (e.g. DATABASE_URL) must win
@@ -106,8 +107,7 @@ def configure_logging(debug: bool) -> None:
         level=logging.DEBUG if debug else logging.INFO,
         format="  %(levelname)-7s %(message)s",
     )
-    for noisy in ("httpx", "httpcore", "anthropic"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+    quiet_http_logs()
 
 
 def banner(text: str) -> None:

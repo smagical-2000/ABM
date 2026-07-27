@@ -37,6 +37,7 @@ from auto_search.db import get_repository
 from auto_search.db.engagement_repository import get_engagement_repository
 from auto_search.db.scoring_repository import get_scoring_repository
 from auto_search.engagement import linkedin_ads, linkedin_ads_runner
+from auto_search.ops.logsetup import quiet_http_logs
 
 load_dotenv()   # no override: an operator-exported env (e.g. DATABASE_URL) must win
                 # (2026-07-08: override=True let a local .env silently redirect a
@@ -147,6 +148,7 @@ def main() -> int:
                     help="bypass the min-interval cost throttle (manual immediate run)")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    quiet_http_logs()   # httpx INFO prints the full request URL (secret hygiene)
     # Deploy-verification stamp: every tick prints the code revision it runs, so
     # "is the fix actually live?" is answered by the logs, never by deploy status.
     # (A stale Docker layer cache once served old code under a SUCCESS deploy.)

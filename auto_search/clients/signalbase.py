@@ -36,7 +36,11 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, field_validator
 
-from auto_search.clients.upstream import UpstreamError, raise_for_upstream
+from auto_search.clients.upstream import (
+    UpstreamError,
+    apify_auth,
+    raise_for_upstream,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -309,12 +313,12 @@ class SignalBaseClient:
         return payload
 
     async def _post(self, url: str, body: dict) -> tuple[int, Any]:
-        params = {"token": self._token}
+        headers = apify_auth(self._token)
         if self._http is not None:
-            resp = await self._http.post(url, params=params, json=body)
+            resp = await self._http.post(url, headers=headers, json=body)
             return resp.status_code, _parse(resp)
         async with httpx.AsyncClient(timeout=120.0) as c:
-            resp = await c.post(url, params=params, json=body)
+            resp = await c.post(url, headers=headers, json=body)
             return resp.status_code, _parse(resp)
 
 

@@ -26,7 +26,11 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, ConfigDict
 
-from auto_search.clients.upstream import UpstreamError, raise_for_upstream
+from auto_search.clients.upstream import (
+    UpstreamError,
+    apify_auth,
+    raise_for_upstream,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -193,12 +197,12 @@ class ApifyJobsClient:
     async def _post_json(self, url: str, body: dict) -> tuple[int, Any]:
         """POST and return (status_code, parsed body). The status is half the
         signal — a 403 body parses fine and looks like data-shaped JSON."""
-        params = {"token": self._token}
+        headers = apify_auth(self._token)
         if self._http is not None:
-            resp = await self._http.post(url, params=params, json=body)
+            resp = await self._http.post(url, headers=headers, json=body)
             return resp.status_code, _parse(resp)
         async with httpx.AsyncClient(timeout=self._timeout) as c:
-            resp = await c.post(url, params=params, json=body)
+            resp = await c.post(url, headers=headers, json=body)
             return resp.status_code, _parse(resp)
 
 

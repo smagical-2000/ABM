@@ -251,20 +251,6 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
                 break
             continue
 
-        # Slack heads-up BEFORE the lead is written to Airtable (Airtable then creates
-        # the Salesforce lead via its own automation). EVERY captured reactor posts to
-        # the LinkedIn-ads-engagement channel (Sunny 2026-07-22): that channel is the
-        # raw "who engaged with our ads" feed, ABM or not. The ABM rule governs the
-        # ACTIVATION channel, not this one — a non-ABM engager (IntelePeer/Joe
-        # Galinanes, 2026-07-22) still belongs here, tagged so nobody mistakes an
-        # engagement heads-up for a sales handoff.
-        # Best-effort + off-loop (the poster is sync) so a Slack hiccup never blocks.
-        if await asyncio.to_thread(notify.notify_lead, {
-                "name": display, "title": title, "company": company, "email": email,
-                "phone": phone, "linkedin": enriched_url, "abm": abm_match,
-                "segment": la.segment_for(r["category"])}):
-            stats["slack_notified"] += 1
-
         # ── writes: Airtable first (the sink). Heat + Reply.io only if it lands, so a
         #    failed push never zombie-scores an account or pushes outreach. Upsert
         #    merges on Email when we have one, else LinkedIn URL (phone-only leads),
@@ -283,6 +269,25 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
             stats["airtable_failed"] += 1
             results.append(outcome)
             continue
+
+        # Slack heads-up AFTER the row lands in Airtable (Airtable then creates the
+        # Salesforce lead via its own automation, so this is still the heads-up
+        # "before Salesforce"). It used to post BEFORE the upsert: on an Airtable
+        # failure the loop continues WITHOUT persisting the contact row, so the
+        # person was absent from the dedup set and the identical card re-posted
+        # every 15-minute tick until Airtable recovered. Announce only what landed.
+        # EVERY captured reactor posts to the LinkedIn-ads-engagement channel
+        # (Sunny 2026-07-22): that channel is the raw "who engaged with our ads"
+        # feed, ABM or not. The ABM rule governs the ACTIVATION channel, not this
+        # one — a non-ABM engager (IntelePeer/Joe Galinanes, 2026-07-22) still
+        # belongs here, tagged so nobody mistakes an engagement heads-up for a
+        # sales handoff.
+        # Best-effort + off-loop (the poster is sync) so a Slack hiccup never blocks.
+        if await asyncio.to_thread(notify.notify_lead, {
+                "name": display, "title": title, "company": company, "email": email,
+                "phone": phone, "linkedin": enriched_url, "abm": abm_match,
+                "segment": la.segment_for(r["category"])}):
+            stats["slack_notified"] += 1
 
         # Tracking mirror (Galyna, 2026-07-08): the same row is ALSO written to
         # the "TOFU Leads by ABM" base, stamped Synced At, so the team can audit

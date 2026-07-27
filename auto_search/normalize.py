@@ -141,6 +141,27 @@ def parse_iso_datetime(s: str | None) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
+# Second-level labels that form multi-part public suffixes with a 2-letter
+# country code ("foo.co.uk" is registrable at three labels, not two).
+_MULTIPART_SLDS = frozenset({"co", "com", "org", "net", "ac", "gov", "edu"})
+
+
+def registrable_domain(domain: str | None) -> str | None:
+    """Collapse a host to its registrable domain for identity COMPARISON only
+    (2026-07-27 merge audit: email.chop.edu / nsmtp.kp.org defeated domain
+    matching and dropped contacts to the unguarded name tier). Stored values
+    stay verbatim — only comparisons and index keys collapse."""
+    dom = clean_domain(domain)
+    if not dom:
+        return None
+    parts = dom.split(".")
+    if len(parts) <= 2:
+        return dom
+    if parts[-2] in _MULTIPART_SLDS and len(parts[-1]) == 2:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
+
+
 def clean_domain(website: str | None) -> str | None:
     """Return a bare domain, or None if the value isn't a clean domain.
 

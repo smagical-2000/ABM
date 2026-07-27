@@ -17,7 +17,14 @@ from __future__ import annotations
 
 from auto_search.abm.models import AbmMatch, TargetAccount
 from auto_search.abm.util import bare_domain
-from auto_search.normalize import normalize_company_name
+from auto_search.normalize import normalize_company_name, registrable_domain
+
+
+def _domains_conflict(a: str | None, b: str | None) -> bool:
+    """Both sides carry a domain and they resolve to different registrable
+    domains — the one situation a name match must never auto-confirm."""
+    ra, rb = registrable_domain(a), registrable_domain(b)
+    return bool(ra and rb and ra != rb)
 
 
 class AbmIndex:
@@ -64,6 +71,11 @@ class AbmIndex:
         if seen:
             for target in candidates:
                 if target.state and target.state.upper() in seen:
+                    # Domain-contradiction cap (2026-07-27 merge audit): a name
+                    # match with a provably different domain on each side is
+                    # never auto-confirmed, state agreement or not.
+                    if _domains_conflict(dom, bare_domain(target.domain)):
+                        return _to_match(target, "review", "name+state/domain-conflict")
                     return _to_match(target, "confirmed", "name+state")
         return _to_match(candidates[0], "review", "name")
 

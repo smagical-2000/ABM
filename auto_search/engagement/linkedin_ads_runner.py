@@ -109,7 +109,7 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
     one failure is counted and skipped so the batch always completes. `max_leads` stops
     after that many leads are created/would-be-created (e.g. 1 for the live spot-check)."""
     now = now or datetime.now(UTC).isoformat()
-    index = build_index(scoring_repo, discovery_repo)        # ABM / scored cross
+    index = build_index(scoring_repo, discovery_repo, engagement_repo)  # ABM / scored cross
 
     # Durable per-person dedup: contact external_ids we've already persisted.
     processed: set[str] = set()

@@ -166,7 +166,7 @@ def patched(monkeypatch):
     # Always patched: the email-or-phone rule reaches FullEnrich for no-email
     # leads, and a test must NEVER hit the real (billable) API.
     monkeypatch.setattr(runner.phone_waterfall.enrichment, "enrich_contact", fake_fe_none)
-    monkeypatch.setattr(runner, "build_index", lambda s, d: _FakeIndex())
+    monkeypatch.setattr(runner, "build_index", lambda s, d, e=None: _FakeIndex())
 
 
 async def test_dry_run_makes_no_writes(patched, monkeypatch):
@@ -483,7 +483,7 @@ async def test_capture_all_persists_non_abm_contacts_for_dedup(patched, monkeypa
     key; without it every scan re-bills Apollo/FullEnrich for him — while
     heat events stay ABM-only."""
     from auto_search.engagement import sync as sync_mod
-    monkeypatch.setattr(sync_mod, "build_index", lambda s, d: _FakeIndex())
+    monkeypatch.setattr(sync_mod, "build_index", lambda s, d, e=None: _FakeIndex())
     repo = _FakeEngRepo()
     out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=repo,
                            scoring_repo=None, discovery_repo=None,

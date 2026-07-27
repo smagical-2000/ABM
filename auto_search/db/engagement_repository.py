@@ -103,6 +103,12 @@ class EngagementRepository(Protocol):
         """Most recent meaningful touches across all accounts (the Inbox feed)."""
         ...
 
+    def event_account_ids(self) -> set[str]:
+        """Every DISTINCT account_id that appears on any raw event — deprecated
+        kinds included, so the identity heal sees splits the board rollup hides
+        (2026-07-27: abm_intermountainhealth's sole deprecated-kind event)."""
+        ...
+
     def contact_emails_for_source(self, source: str) -> set[str]:
         """Every non-empty contact email stored under `source` — the capture
         ledger the SFDC echo filter checks (narrow read; never a full-row scan)."""
@@ -486,6 +492,10 @@ class EngagementJsonRepository:
                       key=lambda e: e.get("occurred_at") or "", reverse=True)
         return rows[:limit]
 
+    def event_account_ids(self) -> set:
+        return {e["account_id"] for e in self._store["events"].values()
+                if e.get("account_id")}
+
     def contact_emails_for_source(self, source) -> set:
         return {c["email"] for c in self._store["contacts"].values()
                 if c.get("source") == source and c.get("email")}
@@ -783,6 +793,14 @@ class EngagementPostgresRepository:
                 (limit,),
             ).fetchall()
         return [_norm(dict(r)) for r in rows]
+
+    def event_account_ids(self) -> set:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT account_id FROM engagement_events "
+                "WHERE account_id IS NOT NULL"
+            ).fetchall()
+        return {r[0] if not isinstance(r, dict) else r["account_id"] for r in rows}
 
     def contact_emails_for_source(self, source) -> set:
         # Narrow read (uses the (source, external_id) PK prefix) — the echo

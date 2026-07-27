@@ -32,7 +32,7 @@ logger = logging.getLogger("run_unresolved_triage")
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     erepo = get_engagement_repository()
-    index = build_index(get_scoring_repository(), get_repository())
+    index = build_index(get_scoring_repository(), get_repository(), erepo)
     unresolved = erepo.contacts(unresolved_only=True)
 
     clusters: dict[str, list[dict]] = {}

@@ -42,7 +42,7 @@ def main() -> int:
     since = (datetime.now(UTC).date() - timedelta(days=WINDOW_DAYS)).isoformat()
     now = datetime.now(UTC).isoformat()
     erepo = get_engagement_repository()
-    index = build_index(get_scoring_repository(), get_repository())
+    index = build_index(get_scoring_repository(), get_repository(), erepo)
 
     contact_rows, event_rows, counts = collect_sfdc_rows(
         SalesforceClient(), erepo, since=since, now=now)

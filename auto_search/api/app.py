@@ -306,7 +306,8 @@ def _engagement_intent_signals(engagement_repo, name: str,
     return []
 
 
-def _classify_import_row(name, account_id, *, get_company, exists):
+def _classify_import_row(name, account_id, *, get_company, exists,
+                         domain=None, domain_of=None):
     """Decide what to do with one imported CSV row, by company IDENTITY — not the
     import's own id scheme, which is exactly why duplicates slipped through:
 
@@ -315,14 +316,36 @@ def _classify_import_row(name, account_id, *, get_company, exists):
               (it leaves the Discovery panel) instead of making a signal-less twin
       "new"   not seen → create a fresh CSV account
 
-    `get_company(key) -> PanelCompany|None` and `exists(account_id) -> bool` are
-    injected so this is unit-testable without the app. Returns (action, company).
+    Domain veto (2026-07-27 merge audit): a name-key hit whose stored domain
+    provably differs from the row's own domain is a DIFFERENT company — the row
+    gets its own account instead of being skipped/merged into the impostor
+    (an imported Healthfirst NY was silently swallowed by Florida's hf.org).
+
+    `get_company(key) -> PanelCompany|None`, `exists(account_id) -> bool` and
+    `domain_of(account_id) -> str|None` are injected so this is unit-testable
+    without the app. Returns (action, company).
     """
+    from auto_search.normalize import registrable_domain
+
+    def _conflicts(stored):
+        ra, rb = registrable_domain(domain), registrable_domain(stored)
+        return bool(ra and rb and ra != rb)
+
     key = normalize_company_name(name)
-    if exists("acc_" + key) or exists(account_id):
-        return "skip", None
+    for existing_id in ("acc_" + key, account_id):
+        if exists(existing_id):
+            if _conflicts(domain_of(existing_id) if domain_of else None):
+                logger.info("import: %r domain %s conflicts with existing %s — "
+                            "creating a separate account", name, domain, existing_id)
+                return "new", None
+            return "skip", None
     company = get_company(key)
     if company is not None and getattr(company, "icp_status", None) in ("qualified", "needs_review"):
+        if _conflicts(getattr(company, "domain", None)):
+            logger.info("import: %r domain %s conflicts with discovery %s — "
+                        "creating a separate account", name, domain,
+                        getattr(company, "company_key", key))
+            return "new", None
         return "move", company
     return "new", None
 
@@ -2130,7 +2153,8 @@ def create_app() -> FastAPI:
         now = time.time()
         if cache and (now - cache["at"] < 600):
             return cache["index"]
-        index = engagement_sync_mod.build_index(app.state.scoring_repo, app.state.repo)
+        index = engagement_sync_mod.build_index(app.state.scoring_repo, app.state.repo,
+                                                app.state.engagement_repo)
         app.state.cross_index_cache = {"at": now, "index": index}
         return index
 
@@ -3356,9 +3380,14 @@ def create_app() -> FastAPI:
         svc_ = svc(app)
         scoring = app.state.scoring
         csv_fresh, moved, skipped = [], [], 0
+        srepo = getattr(app.state, "scoring_repo", None)
+        dom_by_id = {r.get("account_id"): r.get("domain")
+                     for r in (srepo.list_accounts()
+                               if hasattr(srepo, "list_accounts") else [])}
         for a in result.accounts:
             action, company = _classify_import_row(
-                a.name, a.account_id, get_company=svc_.get_company, exists=scoring.exists)
+                a.name, a.account_id, get_company=svc_.get_company,
+                exists=scoring.exists, domain=a.domain, domain_of=dom_by_id.get)
             if action == "skip":
                 skipped += 1
             elif action == "move":

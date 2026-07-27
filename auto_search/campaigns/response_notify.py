@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import UTC, datetime
 
 import httpx
 
@@ -162,6 +163,53 @@ def heyreach_event_kind(event_type: str) -> str | None:
         return "linkedin_connect_message"
     if et in _REPLY_EVENTS_HEYREACH:
         return "linkedin_reply"
+    return None
+
+
+_HEYREACH_TIME_KEYS = ("timestamp", "eventTimestamp", "event_timestamp",
+                       "eventTime", "event_time", "occurredAt", "occurred_at",
+                       "createdAt", "created_at", "time", "date")
+
+
+def _to_iso(value) -> str | None:
+    """Any plausible webhook timestamp -> an aware ISO-8601 string, or None.
+    Accepts ISO strings (naive ones are pinned to UTC, like every other ingest
+    path) and epoch seconds/millis. PURE."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        secs = value / 1000 if value > 1e11 else float(value)
+        if secs <= 0:
+            return None
+        try:
+            return datetime.fromtimestamp(secs, UTC).isoformat()
+        except (OverflowError, OSError, ValueError):
+            return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return (dt if dt.tzinfo else dt.replace(tzinfo=UTC)).isoformat()
+
+
+def heyreach_event_time(payload: dict) -> str | None:
+    """The HeyReach event's OWN timestamp, or None when it doesn't send one. PURE.
+
+    The receiver prefers this over receipt time so a REDELIVERY (HeyReach
+    retries any non-2xx; duplicate registrations fan out per campaign) rewrites
+    the same instant instead of restamping an old touch as today — the phantom
+    Hot-reactivation class. Mirrors smartlead_event_to_engagement."""
+    if not isinstance(payload, dict):
+        return None
+    lead = payload.get("lead") if isinstance(payload.get("lead"), dict) else {}
+    for src in (payload, lead):
+        for k in _HEYREACH_TIME_KEYS:
+            iso = _to_iso(src.get(k))
+            if iso:
+                return iso
     return None
 
 

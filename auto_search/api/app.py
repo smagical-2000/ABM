@@ -2279,7 +2279,22 @@ def create_app() -> FastAPI:
         m = _cross_index_cached().match(company=company, email=lead.get("emailAddress"))
         if not m:
             return {"ok": True, "matched": False}       # untracked company — dropped
-        now_iso = datetime.now(UTC).isoformat()
+        # IDEMPOTENT REDELIVERY (COO QA 2026-07-27). HeyReach retries any
+        # non-2xx and duplicate registrations fan out per campaign, while
+        # add_event's ON CONFLICT overwrites occurred_at with EXCLUDED — so a
+        # redelivery of a July-18 accept used to restamp it as today,
+        # advancing last_real_touch and re-arming notify's hot_activity gate:
+        # a ghost "Hot again" card with zero real activity (the MAR2-44
+        # phantom-reactivation class, reintroduced via webhooks). Two guards:
+        #   1. take the event's OWN timestamp when HeyReach sends one, so a
+        #      replay is a byte-identical write;
+        #   2. drop the delivery outright when this external_id is stored —
+        #      covers payloads that carry no timestamp at all.
+        event_ext = f"linkedin:{kind}:{profile or company}"
+        if event_ext in erepo.external_ids_for_source("heyreach"):
+            return {"ok": True, "matched": True, "kind": kind, "duplicate": True}
+        now_iso = (campaigns_responses.heyreach_event_time(body)
+                   or datetime.now(UTC).isoformat())
         erepo.upsert_contact({
             "source": "heyreach", "external_id": f"li:{profile or company}",
             "email": lead.get("emailAddress"), "company": company,
@@ -2288,7 +2303,7 @@ def create_app() -> FastAPI:
             "match_tier": m.tier, "matched_lists": list(m.lists)})
         erepo.add_event({
             "source": "heyreach",
-            "external_id": f"linkedin:{kind}:{profile or company}",
+            "external_id": event_ext,
             "channel": "linkedin", "kind": kind,
             "points": engagement_scoring.points_for(kind),
             "contact_ext": f"li:{profile or company}", "company": company,

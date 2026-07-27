@@ -62,6 +62,27 @@ def test_note_absent_or_blank_or_bad_input():
     assert rn.heyreach_connect_message(None) is None
 
 
+# ── pure: the event's own timestamp ──────────────────────────────────────
+
+
+def test_event_time_reads_iso_and_epoch_shapes():
+    assert rn.heyreach_event_time(
+        {"timestamp": "2026-07-18T12:00:00Z"}) == "2026-07-18T12:00:00+00:00"
+    # naive strings are pinned to UTC, like every other ingest path
+    assert rn.heyreach_event_time(
+        {"createdAt": "2026-07-18T12:00:00"}) == "2026-07-18T12:00:00+00:00"
+    # epoch seconds and epoch millis both resolve to the same instant
+    secs = rn.heyreach_event_time({"time": 1784548800})
+    assert secs == rn.heyreach_event_time({"time": 1784548800000})
+
+
+def test_event_time_none_when_absent_or_unparseable():
+    assert rn.heyreach_event_time({}) is None
+    assert rn.heyreach_event_time({"timestamp": ""}) is None
+    assert rn.heyreach_event_time({"timestamp": "not a date"}) is None
+    assert rn.heyreach_event_time(None) is None
+
+
 # ── integration: the webhook end to end ──────────────────────────────────
 
 
@@ -128,6 +149,36 @@ def test_webhook_untracked_company_dropped(client):
                                 "companyName": "Some Random LLC"},
                        "campaignId": "509139"})
     assert r.json().get("matched") is False
+
+
+def test_webhook_stores_the_events_own_timestamp(client):
+    """occurred_at must be the event's time, not receipt time — otherwise a
+    HeyReach retry of an old accept lands as today's activity."""
+    _post(client, {"eventType": "CONNECTION_REQUEST_ACCEPTED",
+                   "lead": {"profileUrl": "https://linkedin.com/in/tess",
+                            "companyName": "Acme Health"},
+                   "timestamp": "2026-07-18T12:00:00Z", "campaignId": "509139"})
+    assert _connect_events(client)[0]["occurred_at"] == "2026-07-18T12:00:00+00:00"
+
+
+def test_redelivered_event_never_restamps_occurred_at(client):
+    """HeyReach retries every non-2xx and duplicate registrations fan out per
+    campaign. add_event's ON CONFLICT overwrites occurred_at, so a redelivery
+    used to advance last_real_touch and re-arm notify's Hot-reactivation gate —
+    a ghost 'Hot again' card with zero real activity (MAR2-44 class)."""
+    body = {"eventType": "CONNECTION_REQUEST_ACCEPTED",
+            "lead": {"profileUrl": "https://linkedin.com/in/dup",
+                     "companyName": "Acme Health"},
+            "campaignId": "509139"}          # no payload timestamp -> now()
+    first = _post(client, body).json()
+    assert first.get("matched") is True and not first.get("duplicate")
+    stamped = _connect_events(client)[0]["occurred_at"]
+
+    again = _post(client, body).json()       # the retry
+    assert again.get("duplicate") is True
+    events = _connect_events(client)
+    assert len(events) == 1                  # still one row...
+    assert events[0]["occurred_at"] == stamped   # ...at its ORIGINAL time
 
 
 def test_webhook_bad_secret_rejected(client):

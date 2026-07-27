@@ -25,7 +25,11 @@ from auto_search.models import CompanyCandidate, QualificationResult, RawSignal
 from auto_search.normalize import normalize_company_name
 from auto_search.qualifier import qualify
 from auto_search.scoring import spend_guard
-from auto_search.social.filters import is_attending, is_magical
+from auto_search.social.filters import (
+    is_attending,
+    is_competitor_staff,
+    is_magical,
+)
 from auto_search.social.models import Engager, IngestResult
 from auto_search.social.seniority import is_decision_maker
 
@@ -55,6 +59,7 @@ async def ingest_engager(
     op: spend_guard.Operation | None = None,
     can_qualify: QualifyGate | None = None,
     abm_lookup: AbmLookup | None = None,
+    competitor_names: frozenset[str] = frozenset(),
 ) -> IngestResult:
     """Run one engager through the gauntlet and persist if it survives.
 
@@ -69,6 +74,13 @@ async def ingest_engager(
     # which would false-positive on personal sites / pasted Magical links).
     if is_magical(engager.company_name, engager.company_website):
         return _skip("magical_employee")
+
+    # A competitor's own staff is not a lead (2026-07-27 DM-audience probe:
+    # Assort Health's founders engaging with their own team's posts; Tennr
+    # itself once surfaced on the board). Checked before any paid step.
+    if is_competitor_staff(engager.company_name, engager.company_website,
+                           competitors=competitor_names):
+        return _skip("competitor_staff")
 
     dm, _why = is_decision_maker(
         engager.job_title, engager.job_title_levels, engager.job_title_role)

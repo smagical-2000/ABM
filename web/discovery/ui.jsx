@@ -260,7 +260,7 @@ function EmptyState({ onRun, variant }) {
       {!needs && !deferred && (
         <button onClick={onRun}
           className="mt-5 inline-flex items-center gap-2 rounded-lg bg-zinc-900 px-3.5 py-2 text-[13px] font-medium text-white transition-colors hover:bg-zinc-800">
-          <Icons.refresh className="h-4 w-4" />Run discovery
+          <Icons.zap className="h-4 w-4" />Scan signals
         </button>
       )}
     </div>

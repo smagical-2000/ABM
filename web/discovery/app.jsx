@@ -384,6 +384,11 @@ function RunConfigPopover({ scope, onScope, limit, onLimit, social, onManageSoci
 
 // ── ConfirmDeleteModal — guard a destructive bulk delete ─────────────────────
 function ConfirmDeleteModal({ count, onCancel, onConfirm }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onCancel(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onCancel]);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-zinc-900/30 backdrop-blur-[2px] animate-fade" onClick={onCancel} />
@@ -992,7 +997,9 @@ function App() {
             ) : visibleCount === 0 ? (
               searchQ
                 ? <window.NoResults query={searchQ} onClear={() => setSearchQ('')} />
-                : <EmptyState variant={tab} onRun={() => pushToast('Discovery runs on a schedule', 'muted')} />
+                : <EmptyState variant={tab} onRun={() => discoRunning
+                    ? pushToast('A discovery run is already in progress', 'muted')
+                    : setConfirmRun(true)} />
             ) : (
               filtered.map((c, i) => {
                 // The auto-score line: drawn once, before the first Watch lead that
@@ -1471,7 +1478,7 @@ function ScoredView({ refreshKey, pushToast, onCount }) {
         {/* AE one-off lookup: resolve (cheap) -> confirm card -> full score + QA.
             onStarted arms the live poller; with the one-flow brief on it also
             remembers the account so the brief auto-opens as it assembles. */}
-        <window.LookupBar pushToast={pushToast}
+        <window.LookupBar pushToast={pushToast} accounts={accounts}
           onOpenAccount={(id) => { setOpenAcc(id); load(true); }}
           onStarted={(briefId) => {
             wasActiveRef.current = true;

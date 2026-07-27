@@ -1,6 +1,6 @@
 // ── Auto-scoring: a daily deadline at which any company still in the queue is
 //    automatically promoted to scoring, so nothing stalls. ───────────────────
-const { useState } = React;
+const { useState, useEffect, useRef } = React;
 
 // next occurrence of `hour`:00 (local) strictly after `fromTs`
 function nextDeadline(hour, fromTs) {
@@ -80,10 +80,23 @@ window.AutoScorePill = AutoScorePill;
 
 // ── Settings popover ────────────────────────────────────────────────────────
 function AutoScorePopover({ enabled, onToggle, hour, onHour, deadline, queued, onPreview, onClose }) {
+  // Outside-click dismiss via a document listener, NOT a fixed overlay: the
+  // header's backdrop-blur makes it the containing block for fixed children, so
+  // an overlay only ever covers the header strip (and swallows its clicks).
+  // The parent element is the anchor wrapper (pill + popover) — clicks there
+  // toggle via the pill itself.
+  const ref = useRef(null);
+  useEffect(() => {
+    const onDown = (e) => {
+      const root = (ref.current && ref.current.parentElement) || ref.current;
+      if (root && !root.contains(e.target)) onClose();
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, []);
   return (
     <>
-      <div className="fixed inset-0 z-40" onClick={onClose} />
-      <div className="absolute right-0 top-full z-50 mt-2 w-80 rounded-xl border border-zinc-200 bg-white p-4 shadow-xl shadow-zinc-900/10 animate-pop">
+      <div ref={ref} className="absolute right-0 top-full z-50 mt-2 w-80 rounded-xl border border-zinc-200 bg-white p-4 shadow-xl shadow-zinc-900/10 animate-pop">
         <div className="flex items-start justify-between gap-3">
           <div>
             <h3 className="text-[14px] font-semibold text-zinc-900">Automatic scoring</h3>

@@ -56,6 +56,8 @@ const HEAT = {
   Lower: { fg:'#a1a1aa', solid:'#d4d4d8', soft:'rgba(161,161,170,.10)', row:'transparent' },
 };
 const tierOf = (s)=> s>=21?'Hot':s>=12?'Warm':s>=6?'Some':'Lower';
+// Labels + weights mirror POINTS in engagement/scoring.py — keep in lockstep,
+// or a live kind renders as raw snake_case weighted as trivial.
 const KIND = {
   high_intent_lead:{ label:'BOFU', dot:'#f43f5e', weight:10, big:true },
   opportunity:     { label:'Opportunity',       dot:'#f43f5e', weight:10, big:true },
@@ -71,6 +73,7 @@ const KIND = {
   outbound_click:  { label:'Click (outbound)',   dot:'#0ea5e9', weight:1 },
   linkedin_reply:  { label:'LinkedIn reply',     dot:'#0a66c2', weight:6 },
   linkedin_connect:{ label:'LinkedIn connect',   dot:'#0a66c2', weight:2 },
+  linkedin_connect_message:{ label:'LinkedIn connect (note)', dot:'#0a66c2', weight:10, big:true },
 };
 const kindOf = (k)=> KIND[k] || { label:k||'Touch', dot:'#d4d4d8', weight:1 };
 const MATCH = { domain:{label:'Domain',fg:'#059669'}, name:{label:'Name',fg:'#0284c7'} };
@@ -123,6 +126,16 @@ function nameFromEmail(email){
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+// Notify-style company key — mirrors normalize.company_name_words / the notify
+// ledger's ledger_key (keep in lockstep): account ids churn across imports and
+// identity heals (abm_ -> csv_), a company's name key does not, so any dedup
+// ledger must join on this, never on the raw id.
+const _ENTITY_SUFFIXES=['inc','incorporated','llc','llp','lp','ltd','limited','corp','corporation','co','company','plc','pllc','pc','group','holdings','holding','partners','associates'];
+function companyKey(name){
+  const w=String(name||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim().split(' ').filter(Boolean);
+  while(w.length&&_ENTITY_SUFFIXES.includes(w[w.length-1])) w.pop();
+  return w.join('');
+}
 function relTime(iso){ if(!iso)return'—'; const d=Math.max(0,Date.now()-new Date(iso).getTime()),m=Math.round(d/60000); if(m<2)return'just now'; if(m<60)return`${m}m`; const h=Math.round(m/60); if(h<24)return`${h}h`; const dy=Math.round(h/24); return dy<30?`${dy}d`:new Date(iso).toLocaleDateString('en-US',{month:'short',day:'numeric'}); }
 function daysSince(iso){ return iso?Math.max(0,Math.round((Date.now()-new Date(iso).getTime())/86400000)):0; }
 // group drawer touches by kind + day so the timeline reads "Click ×8 · Jun 11 · +8"
@@ -148,6 +161,7 @@ const TX = {
 };
 
 function Sparkline({ series, color, w=92, h=30, fill=true, animate=true }){
+  if(!series||!series.length) series=[0];   // a bad account stub must never unmount the app
   const P=5;  // inset so the end dot (r≈4.5) + its glow stay inside the box (no leak)
   const max=Math.max(...series,1), min=Math.min(...series,0);
   const span=max-min||1;
@@ -480,8 +494,19 @@ function DetailDrawer({ account:a, detail, accounts, onClose, onActivate }){
   if(!a) return null;
   const tier=tierOf(a.score), hc=HEAT[tier];
   const d=detail||{contacts:[],events:[]};
-  const breakdown={};
-  d.events.forEach(e=>{ const pts=e.pts*(e.count||1); breakdown[e.kind]=(breakdown[e.kind]||0)+pts; });
+  // Breakdown applies the SAME sequential click cap as tierCrossings (AGT-1453),
+  // so its rows reconcile with the capped hero/Total-heat score; the raw click
+  // count is kept per kind to annotate what was clamped.
+  const breakdown={}, rawClicks={};
+  let clickRun=0;
+  [...d.events].sort((x,y)=>(x.ts||'').localeCompare(y.ts||'')).forEach(e=>{
+    let pts=e.pts*(e.count||1);
+    if(CLICK_KINDS.includes(e.kind)){
+      rawClicks[e.kind]=(rawClicks[e.kind]||0)+pts;
+      const take=Math.max(0,Math.min(pts,3-clickRun)); clickRun+=pts; pts=take;
+    }
+    breakdown[e.kind]=(breakdown[e.kind]||0)+pts;
+  });
   const total=Object.values(breakdown).reduce((s,v)=>s+v,0)||a.score;
   const col=a.trend==='up'?'#10b981':a.trend==='down'?'#d4d4d8':'#a1a1aa';
   const t=TREND[a.trend]||TREND.flat;
@@ -525,10 +550,11 @@ function DetailDrawer({ account:a, detail, accounts, onClose, onActivate }){
           <div style={{...TX.label,marginTop:22,marginBottom:10}}>Score breakdown</div>
           <div style={{borderRadius:12,border:'1px solid #f4f4f5',overflow:'hidden'}}>
             {Object.entries(breakdown).sort((x,y)=>y[1]-x[1]).map(([k,pts],i,arr)=>{ const m=kindOf(k);
+              const raw=rawClicks[k]||0;
               return (
                 <div key={k} style={{display:'flex',alignItems:'center',gap:12,padding:'9px 14px',borderBottom:i<arr.length-1?'1px solid #fafafa':'none'}}>
                   <span style={{width:7,height:7,borderRadius:'50%',background:m.dot,flexShrink:0}}/>
-                  <span style={{...TX.body,flex:1}}>{m.label}</span>
+                  <span style={{...TX.body,flex:1}}>{m.label}{raw>pts&&<span style={{...TX.meta}}> (×{raw} raw, capped at 3)</span>}</span>
                   <div style={{width:70,height:3,borderRadius:999,background:'#f4f4f5',overflow:'hidden'}}><div style={{height:'100%',width:`${(pts/total)*100}%`,background:m.dot,borderRadius:999,opacity:.7}}/></div>
                   <span style={{fontSize:13,fontWeight:600,fontVariantNumeric:'tabular-nums',color:'#3f3f46',width:30,textAlign:'right'}}>+{pts}</span>
                 </div>
@@ -557,7 +583,8 @@ function DetailDrawer({ account:a, detail, accounts, onClose, onActivate }){
           </div>
         </div>
         <div style={{borderTop:'1px solid #f4f4f5',padding:'14px 24px',display:'flex',gap:8}}>
-          {tier==='Hot'&&<button onClick={()=>onActivate(a)} style={{flex:1,display:'inline-flex',alignItems:'center',justifyContent:'center',gap:6,padding:'10px 16px',borderRadius:8,border:'none',fontFamily:'var(--font-sans)',fontSize:13,fontWeight:600,background:'#d97706',color:'#fff',cursor:'pointer'}}><Icon name="zap" size={15}/>Activate to SDR</button>}
+          {/* Routing matches the server: Hot -> AE, Warm/Some -> SDR */}
+          {(tier==='Hot'||tier==='Warm'||tier==='Some')&&<button onClick={()=>onActivate(a)} style={{flex:1,display:'inline-flex',alignItems:'center',justifyContent:'center',gap:6,padding:'10px 16px',borderRadius:8,border:'none',fontFamily:'var(--font-sans)',fontSize:13,fontWeight:600,background:'#d97706',color:'#fff',cursor:'pointer'}}><Icon name="zap" size={15}/>Activate to {tier==='Hot'?'AE':'SDR'}</button>}
           <Button variant="secondary" size="lg" iconLeft="doc" onClick={onClose}>Close</Button>
         </div>
       </aside>
@@ -566,7 +593,7 @@ function DetailDrawer({ account:a, detail, accounts, onClose, onActivate }){
 }
 
 // ── ACTIVATE MODAL (Slack preview; fetches its own recent touches) ────────────
-function ActivateModal({ account:a, onClose, onConfirm }){
+function ActivateModal({ account:a, stage, live, onClose, onConfirm }){
   const [ev,setEv]=useState([]);
   useEffect(()=>{ if(a) window.API.engagementAccount(a.id).then(d=>setEv(mapDetail(d).events)).catch(()=>{}); },[a&&a.id]);
   if(!a) return null;
@@ -576,7 +603,15 @@ function ActivateModal({ account:a, onClose, onConfirm }){
       <div className="pop" style={{position:'relative',width:'100%',maxWidth:440,background:'#fff',borderRadius:16,border:'1px solid #e4e4e7',overflow:'hidden',boxShadow:'0 20px 40px rgba(24,24,27,.12)'}}>
         <div style={{padding:'20px 24px 16px',borderBottom:'1px solid #f4f4f5'}}>
           <h3 style={{margin:0,fontSize:16,fontWeight:600,color:'#18181b'}}>Activate {a.name}</h3>
-          <p style={{margin:'4px 0 0',...TX.body}}>Posts a heat card to the engagement Slack channel.</p>
+          {/* Say where the post ACTUALLY lands: the notify_stage=test gate coerces
+              every activation to a [TEST] post, whatever the live toggle claims. */}
+          <p style={{margin:'4px 0 0',...TX.body}}>{stage==null
+            ? 'Posts a heat card to the engagement Slack channel.'
+            : stage==='test'
+              ? 'Staged (notify_stage=test): posts a [TEST] heat card to the private test channel — the real AE/SDR channels get nothing.'
+              : (live===true)
+                ? 'LIVE: posts a heat card to the real AE/SDR channel with an @-ping.'
+                : 'Posts a heat card to the private testing channel.'}</p>
         </div>
         <div style={{margin:20,borderRadius:10,border:'1px solid #e1e1e1',overflow:'hidden'}}>
           <div style={{height:3,background:'#4f46e5'}}/>
@@ -614,6 +649,7 @@ function EngagementView({ pushToast }){
   const [syncing,setSyncing]=useState(false);
   const [running,setRunning]=useState(false);   // server-side: a sync is in progress
   const [live,setLive]=useState(null);          // server-side: live routing on/off (null=loading)
+  const [stage,setStage]=useState(null);        // server-side: notify_stage ('test' = staging gate coerces EVERY post to the test channel)
   const [cutoff,setCutoff]=useState(null);      // server-side: send-cutoff date (YYYY-MM-DD) or ''
   const [settingsOpen,setSettingsOpen]=useState(false);   // gear popover (mode, cutoff, auto-route, reset)
   // Auto-activate: when on, every Hot account is activated once (enriched + posted
@@ -641,7 +677,13 @@ function EngagementView({ pushToast }){
     let aid; try{ aid=new URLSearchParams(window.location.search).get('account'); }catch(_e){ aid=null; }
     if(!aid) return;
     deepLinkRef.current=true;
-    openAccount(accounts.find(x=>x.id===aid) || {id:aid, name:aid, score:0});
+    // Exact id first; else the company behind a stale/healed id (abm_ -> csv_
+    // churn — old Slack cards deep-link ids that no longer exist on the board).
+    const bodyOf=id=>{const s=String(id||''),i=s.indexOf('_');return (i>0?s.slice(i+1):s).toLowerCase().replace(/[^a-z0-9]/g,'');};
+    const hit=accounts.find(x=>x.id===aid)
+      || accounts.find(x=>bodyOf(x.id)===bodyOf(aid) || companyKey(x.name)===bodyOf(aid));
+    if(hit) openAccount(hit);
+    else pushToast&&pushToast(`Account "${aid}" isn't on this board — the link may be stale`,'danger');
   },[loading,accounts]);  // eslint-disable-line
 
   // Poll the server's `running` flag so the UI reflects the ACTUAL background sync
@@ -688,7 +730,9 @@ function EngagementView({ pushToast }){
       .catch(e=>pushToast&&pushToast(`Reset failed: ${e.message}`,'danger')); }
 
   useEffect(()=>{ window.API.liveRouting().then(s=>setLive(!!s.enabled)).catch(()=>{}); },[]);
+  useEffect(()=>{ window.API.notifyStage().then(s=>setStage(s.stage||'live')).catch(()=>{}); },[]);
   useEffect(()=>{ window.API.sendCutoff().then(s=>setCutoff(s.cutoff||'')).catch(()=>{}); },[]);
+  const staged=stage==='test';   // the truth about where a post actually lands
   // Live-routing toggle. Flipping it sends NOTHING — it only changes where the NEXT
   // activation goes (real AE/SDR channels + @ping vs the private testing channel). The
   // June-25 send cutoff still holds back the already-processed backlog in EITHER mode.
@@ -721,7 +765,7 @@ function EngagementView({ pushToast }){
   function notifyChanges(kind){
     const qs=kind==='preview'?'?dry_run=true':kind==='seed'?'?seed=true':'?limit=5';
     if(kind==='send'&&!window.confirm('Send tier-change notifications now?\n\n'
-      +((live===true)?'LIVE — real AE/SDR channels.':'TEST — your private channel only.')
+      +((live===true&&stage!=='test')?'LIVE — real AE/SDR channels.':'TEST — your private channel only.')
       +'\n\nCapped at 5 cards for safety.')) return;
     setSettingsOpen(false);
     fetch('/api/engagement/notify-changes'+qs,{method:'POST'}).then(r=>r.json()).then(d=>{
@@ -743,7 +787,11 @@ function EngagementView({ pushToast }){
     if(!autoActivate || !accounts.length || autoRef.current) return;
     let done; try{ done=new Set(JSON.parse(localStorage.getItem('engagementActivated')||'[]')); }catch(_e){ done=new Set(); }
     const routable=new Set(['Hot','Warm','Some']);
-    const todo=accounts.filter(a=>routable.has(tierOf(a.score)) && !done.has(a.id));
+    // Dedup ledger joins on the notify-style company key, not the raw id — an
+    // id re-key (abm_ -> csv_) must not re-send an already-routed company.
+    // Older ledger entries were raw ids, so honor both forms when filtering.
+    const keyOf=a=>companyKey(a.name)||a.id;
+    const todo=accounts.filter(a=>routable.has(tierOf(a.score)) && !done.has(keyOf(a)) && !done.has(a.id));
     if(!todo.length) return;
     autoRef.current=true;
     const hot=todo.filter(a=>tierOf(a.score)==='Hot').length;
@@ -755,7 +803,7 @@ function EngagementView({ pushToast }){
         try{
           const r=await window.API.activateEngagement(a.id);
           if(r&&r.suppressed){ held++; continue; }   // before cutoff — skip, don't mark done
-          done.add(a.id); sent++;
+          done.add(keyOf(a)); sent++;
           try{ localStorage.setItem('engagementActivated', JSON.stringify([...done])); }catch(_e){}
         }catch(_e){ /* leave for the next cycle */ }
       }
@@ -804,7 +852,7 @@ function EngagementView({ pushToast }){
               <button onClick={()=>setSettingsOpen(v=>!v)} title="Settings: live mode, send cutoff, auto-route, reset"
                 style={{display:'inline-flex',alignItems:'center',gap:7,borderRadius:8,background:settingsOpen?'#f4f4f5':'#fff',border:'1px solid #e4e4e7',padding:'8px 11px',fontFamily:'var(--font-sans)',fontSize:13,fontWeight:600,color:'#3f3f46',cursor:'pointer'}}>
                 <span style={{fontSize:14,lineHeight:1}}>⚙</span>
-                <span title={(live===true)?'Live':'Testing'} style={{display:'inline-block',width:7,height:7,borderRadius:'50%',background:(live===true)?'#ef4444':'#d4d4d8'}}/>
+                <span title={staged?'Staged — test channel only':(live===true)?'Live':'Testing'} style={{display:'inline-block',width:7,height:7,borderRadius:'50%',background:staged?'#f59e0b':(live===true)?'#ef4444':'#d4d4d8'}}/>
               </button>
               {settingsOpen && <>
                 <div onClick={()=>setSettingsOpen(false)} style={{position:'fixed',inset:0,zIndex:40}}/>
@@ -812,8 +860,10 @@ function EngagementView({ pushToast }){
                   {/* Live / Testing */}
                   <div style={{display:'flex',alignItems:'center',gap:10,padding:'9px 10px',borderRadius:8}}>
                     <div style={{flex:1}}>
-                      <div style={{fontSize:13,fontWeight:600,color:(live===true)?'#b91c1c':'#18181b'}}>{(live===true)?'Live — real channels':'Testing only'}</div>
-                      <div style={{fontSize:11.5,color:'#a1a1aa',marginTop:2,lineHeight:1.35}}>{(live===true)?'Activations ping the real AE/SDR channels':'Activations stay on your private channel'}</div>
+                      <div style={{fontSize:13,fontWeight:600,color:(live===true&&!staged)?'#b91c1c':'#18181b'}}>{staged?'Staged — test channel only':(live===true)?'Live — real channels':'Testing only'}</div>
+                      <div style={{fontSize:11.5,color:staged?'#b45309':'#a1a1aa',marginTop:2,lineHeight:1.35}}>{staged
+                        ?`notify_stage=test: every post goes to the test channel as [TEST]${(live===true)?' — live routing is armed for when the stage flips':''}`
+                        :(live===true)?'Activations ping the real AE/SDR channels':'Activations stay on your private channel'}</div>
                     </div>
                     <span onClick={toggleLive} title="Toggle live vs testing" style={{position:'relative',width:34,height:20,borderRadius:999,background:(live===true)?'#ef4444':'#e4e4e7',cursor:'pointer',flexShrink:0,transition:'background .15s'}}>
                       <span style={{position:'absolute',top:2,left:(live===true)?16:2,width:16,height:16,borderRadius:'50%',background:'#fff',boxShadow:'0 1px 2px rgba(0,0,0,.2)',transition:'left .15s'}}/>
@@ -921,7 +971,7 @@ function EngagementView({ pushToast }){
       </main>
 
       {open&&<DetailDrawer account={open} detail={detail} accounts={accounts} onClose={()=>setOpen(null)} onActivate={setActivating}/>}
-      {activating&&<ActivateModal account={activating} onClose={()=>setActivating(null)} onConfirm={()=>handleActivate(activating)}/>}
+      {activating&&<ActivateModal account={activating} stage={stage} live={live} onClose={()=>setActivating(null)} onConfirm={()=>handleActivate(activating)}/>}
     </div>
   );
 }

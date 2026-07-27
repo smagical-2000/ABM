@@ -1,8 +1,10 @@
 // ── Campaigns tab — DEMO SWAP (2026-07-22, Sunny: show the Campaign Automation
 // prototype in the exec presentation, hide/restore later). ────────────────────
-// The production v1 enrolment board is preserved verbatim in campaigns.v1.jsx.bak
-// (and in git history). To RESTORE: `cp campaigns.v1.jsx.bak campaigns.jsx` and
-// delete campaign-autopilot-demo.html.
+// The production v1 enrolment board is preserved verbatim in
+// docs/archive/campaigns.v1.jsx.bak (and in git history — it lived here until
+// the QA sweep flagged it as publicly served). To RESTORE:
+// `cp ../../docs/archive/campaigns.v1.jsx.bak campaigns.jsx` (from this dir)
+// and delete campaign-autopilot-demo.html.
 //
 // The prototype is a self-contained static HTML file (its own <style>/<script>,
 // fully isolated) rendered in an iframe so it can't collide with the live app.

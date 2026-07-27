@@ -100,6 +100,23 @@ def _recovery_alert(repo) -> None:
         logger.warning("ops recovery alert failed (continuing)")
 
 
+def _stamp_attempt(repo, status: str, *, dry_run: bool, stats: dict | None = None) -> None:
+    """Record that a REAL (spending) attempt happened, so the min-interval cost
+    throttle counts it. Both outcomes stamp: the throttle guards SPEND, and a
+    failed run has usually already paid Apify. `last_synced_at` is passed
+    explicitly because set_sync_state only auto-stamps on success/failed — a
+    future status string would silently leave it NULL (→ never throttles).
+    Dry runs never spend, so they never arm the throttle. Best-effort: a stamp
+    failure must not change the run's outcome."""
+    if dry_run:
+        return
+    try:
+        repo.set_sync_state(source=_SYNC_SOURCE, status=status, stats=stats,
+                            last_synced_at=datetime.now(UTC))
+    except Exception:  # noqa: BLE001
+        logger.warning("sync-state stamp failed (throttle may not apply next tick)")
+
+
 def _hours_since(ts) -> float | None:
     """Hours since an ISO/datetime timestamp, or None if unset/unparseable."""
     if not ts:
@@ -202,6 +219,13 @@ def main() -> int:
         logger.exception("[run_linkedin_tofu] run failed")
         import traceback
         _crash_alert(engagement_repo, traceback.format_exc())
+        # Stamp the FAILED attempt so the 6h cost throttle still applies. A crash
+        # AFTER the paid Apify scrape (Airtable/Reply client construction, a DB
+        # flap inside cross_and_persist) used to leave sync_state untouched, so
+        # the next 15-min tick re-ran the whole paid scan — up to 4x/hour for the
+        # rest of the active window, and the crash alert is throttled to 3h, so
+        # the spend was quiet. --force is still the manual bypass.
+        _stamp_attempt(engagement_repo, "failed", dry_run=args.dry_run)
         return 1
     _recovery_alert(engagement_repo)           # posts once iff a crash alert was open
     # Mirror health: the tracking table's whole job is proving nothing is
@@ -228,11 +252,8 @@ def main() -> int:
                                       title="TOFU tracking mirror healthy again")
         except Exception:  # noqa: BLE001
             logger.warning("mirror recovery alert failed (continuing)")
-    if not args.dry_run:                       # stamp the last real run for the throttle
-        # pass last_synced_at explicitly: set_sync_state only auto-stamps on
-        # status success/failed, so "ok" alone would leave it NULL (→ never throttles).
-        engagement_repo.set_sync_state(source=_SYNC_SOURCE, status="success",
-                                       stats=summary["stats"], last_synced_at=datetime.now(UTC))
+    _stamp_attempt(engagement_repo, "success", dry_run=args.dry_run,
+                   stats=summary["stats"])
     print(f"[run_linkedin_tofu] {'dry-run ' if args.dry_run else ''}ok: {summary['stats']}",
           flush=True)
     # Event-driven handoff: this sync just WROTE new engagement events, so the

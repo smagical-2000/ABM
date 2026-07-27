@@ -111,6 +111,28 @@ class RejectBody(BaseModel):
 _BATCH_CONCURRENCY = max(1, int(os.getenv("SCORING_BATCH_CONCURRENCY", "4")))
 
 
+# Ceiling for any list endpoint's `limit`. Bounds a single response (the inbox
+# already served 552 KB at limit=100000) without 422-ing a client that asks for
+# more than exists.
+_MAX_PAGE = 1000
+
+
+def _clamp_limit(value: int, maximum: int = _MAX_PAGE) -> int:
+    """0 <= limit <= maximum, clamped at the route layer.
+
+    Raw ints reached SQL `LIMIT %s` unvalidated: limit=-1 made Postgres raise
+    and the client got a bare 500 (/api/news, /api/engagement/inbox). Clamping
+    rather than 422-ing keeps every current caller working; limit=0 means an
+    EMPTY page, which is also why the changelog's old `max(1, limit)` had to go
+    (it turned "give me none" into "give me the newest one").
+    """
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return maximum
+    return max(0, min(n, maximum))
+
+
 def _schedule_coro(app: FastAPI, coro) -> None:
     """Run a coroutine in the background, callable from sync or async handlers.
 
@@ -766,7 +788,8 @@ def create_app() -> FastAPI:
         if not hasattr(repo, "news_items"):
             return {"items": [], **base}
         topics = (topic,) if topic in news.TOPICS else None
-        return {"items": repo.news_items(topics=topics, days=days, limit=limit), **base}
+        return {"items": repo.news_items(topics=topics, days=max(0, days),
+                                         limit=_clamp_limit(limit)), **base}
 
     @app.post("/api/news/refresh")
     def news_refresh(reenrich: bool = False):
@@ -1064,7 +1087,7 @@ def create_app() -> FastAPI:
         all_contacts = repo.contacts()
         tier_by_contact = {c["external_id"]: c.get("match_tier") for c in all_contacts}
         events = []
-        for e in repo.recent_events(limit=limit):
+        for e in repo.recent_events(limit=_clamp_limit(limit)):
             aid = e.get("account_id")
             disp = scored.get(aid) or abm.get(aid) or {}
             events.append({
@@ -1587,7 +1610,11 @@ def create_app() -> FastAPI:
         if not repo:
             raise HTTPException(status_code=503, detail="store not available")
         entries = json.loads(repo.get_setting("automation_changelog") or "[]")
-        return {"entries": entries[-max(1, limit):][::-1], "total": len(entries)}
+        n = _clamp_limit(limit)
+        # entries[-0:] is the WHOLE list, so limit=0 needs its own branch (the
+        # old max(1, limit) turned it into "the newest one" instead).
+        page = entries[-n:] if n else []
+        return {"entries": page[::-1], "total": len(entries)}
 
     @app.post("/api/ops/changelog")
     async def ops_changelog_add(request: Request):

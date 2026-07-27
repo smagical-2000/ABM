@@ -176,6 +176,20 @@ def main() -> int:
               flush=True)
     except Exception:  # noqa: BLE001 — reporting must never fail the daily run
         logger.exception("source streak check failed (digest already handled)")
+
+    # Sync staleness tripwire (2026-07-27 TOFU outage) — the digest PRINTED
+    # "linkedin_tofu last sync 3 days ago (success)" and alarmed nobody. Same
+    # contract as the streak tripwire: after the card, best-effort, one
+    # consolidated WARNING throttled to 24h inside check_sync_staleness.
+    try:
+        from auto_search.ops import sync_staleness
+        rows = sync_staleness.check_sync_staleness(get_engagement_repository())
+        stale = [s["source"] for s in rows if s["breached"]]
+        print(f"[digest] sync staleness: "
+              f"{'STALE: ' + ', '.join(stale) if stale else 'all fresh'}",
+              flush=True)
+    except Exception:  # noqa: BLE001 — reporting must never fail the daily run
+        logger.exception("sync staleness check failed (digest already handled)")
     return 0
 
 

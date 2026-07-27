@@ -161,3 +161,37 @@ def test_competitor_name_set_builds_from_targets():
     ])
     assert "assorthealth" in s and "linkedin.com/company/assorthealth" in s
     assert not any("getmagical" in x for x in s)
+
+
+def test_tally_counts_only_passing_verdicts_as_qualified():
+    """2026-07-27: qualified=16 reported while prod had 25/25 disqualified —
+    action='qualified' only means the qualifier RAN. A rejection must land in
+    not_icp, never in the qualified count."""
+    from types import SimpleNamespace as R
+    from auto_search.social.poll import _new_summary, _tally_result
+    s = _new_summary()
+    _tally_result(s, R(action="qualified", reason="disqualified", accepted=True))
+    _tally_result(s, R(action="qualified", reason="qualified", accepted=True))
+    _tally_result(s, R(action="qualified", reason="needs_review", accepted=True))
+    assert s["qualified"] == 2
+    assert s["skipped"].get("not_icp") == 1
+
+
+def test_competitor_staff_prefix_catches_silna():
+    """Employer 'Silna' vs tracked label 'Silna Health' — the exact miss that
+    let a competitor qualify as a lead on 2026-07-27."""
+    from auto_search.social.filters import is_competitor_staff
+    comps = frozenset({"silnahealth", "linkedin.com/company/silna-health"})
+    assert is_competitor_staff("Silna", competitors=comps)
+    assert is_competitor_staff("Silna Health Inc", competitors=comps)
+    assert not is_competitor_staff("Silvermine Health", competitors=comps)
+    assert not is_competitor_staff("Sil", competitors=comps)   # <5 chars never prefix-matches
+
+
+def test_investor_headlines_skip_before_spend():
+    from auto_search.social.poll import _looks_investor
+    assert _looks_investor("Partner, Healthcare VC at Meridian Street Capital") is False  # HC hint wins
+    assert _looks_investor("Managing Partner at Stage 2 Capital")
+    assert _looks_investor("Angel investor & advisor")
+    assert _looks_investor("EVP & CIO, Cambia Health Solutions") is False
+    assert _looks_investor("Founder, co-CEO @ Assort Health | AI Agents") is False

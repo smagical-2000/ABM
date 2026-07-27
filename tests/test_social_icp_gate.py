@@ -168,6 +168,7 @@ def test_tally_counts_only_passing_verdicts_as_qualified():
     action='qualified' only means the qualifier RAN. A rejection must land in
     not_icp, never in the qualified count."""
     from types import SimpleNamespace as R
+
     from auto_search.social.poll import _new_summary, _tally_result
     s = _new_summary()
     _tally_result(s, R(action="qualified", reason="disqualified", accepted=True))

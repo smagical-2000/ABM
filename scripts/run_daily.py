@@ -184,8 +184,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    # hard_exit, not sys.exit: interpreter finalization tries to join psycopg's
-    # pool threads and can raise PythonFinalizationError / hang forever, leaving
-    # a container Railway still counts as running — so the cron stops ticking.
-    from auto_search.ops.shutdown import hard_exit
-    hard_exit(main(), *_POOLS)
+    # run_entrypoint (os._exit), not sys.exit: interpreter finalization tries to
+    # join psycopg's pool threads and can raise PythonFinalizationError / hang
+    # forever, leaving a container Railway still counts as running — so the cron
+    # stops ticking. It hard-exits even if main() raises.
+    from auto_search.ops.shutdown import run_entrypoint
+    run_entrypoint(main, pools=_POOLS)

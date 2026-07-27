@@ -38,7 +38,7 @@ from auto_search.db.engagement_repository import get_engagement_repository
 from auto_search.db.scoring_repository import get_scoring_repository
 from auto_search.engagement import linkedin_ads, linkedin_ads_runner
 from auto_search.ops.logsetup import quiet_http_logs
-from auto_search.ops.shutdown import close_pools, hard_exit
+from auto_search.ops.shutdown import close_pools, run_entrypoint
 
 load_dotenv()   # no override: an operator-exported env (e.g. DATABASE_URL) must win
                 # (2026-07-08: override=True let a local .env silently redirect a
@@ -297,7 +297,8 @@ def _run() -> int:
 
 
 if __name__ == "__main__":
-    # hard_exit, not sys.exit: interpreter finalization tries to join psycopg's
-    # pool threads and can raise PythonFinalizationError / hang forever, leaving
-    # a container Railway still counts as running — so the cron stops ticking.
-    hard_exit(main())
+    # run_entrypoint (os._exit), not sys.exit: interpreter finalization tries to
+    # join psycopg's pool threads and can raise PythonFinalizationError / hang
+    # forever, leaving a container Railway still counts as running — so the cron
+    # stops ticking. It hard-exits even if main() raises.
+    run_entrypoint(main)

@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import traceback
 
 logger = logging.getLogger(__name__)
 
@@ -50,3 +51,23 @@ def hard_exit(code: int, *objs) -> None:
             pass
     logging.shutdown()
     os._exit(int(code))
+
+
+def run_entrypoint(main, pools=None) -> None:
+    """Run `main` and hard-exit with its code — including when it RAISES.
+
+    A bare `hard_exit(main())` is skipped by an uncaught exception, which drops
+    the process straight back into normal finalization: the exact hang this
+    module exists to prevent, on the one path where it is most likely (a repo
+    that could not connect still left a half-open pool). `pools` is read AFTER
+    main returns, so an entrypoint can register repos as it opens them."""
+    try:
+        code = main()
+    except SystemExit as e:                      # sys.exit() inside main
+        code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+    except KeyboardInterrupt:
+        code = 130
+    except BaseException:  # noqa: BLE001 — last stop before the process dies
+        traceback.print_exc()
+        code = 1
+    hard_exit(code, *(pools or ()))

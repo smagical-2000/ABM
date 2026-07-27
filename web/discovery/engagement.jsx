@@ -763,7 +763,9 @@ function EngagementView({ pushToast }){
   // account to its pre-cutoff tier so only FUTURE rises fire), or send (capped at 5). It
   // fires once per upward tier move — Some/Warm → SDR, Hot → AE — respecting the live toggle.
   function notifyChanges(kind){
-    const qs=kind==='preview'?'?dry_run=true':kind==='seed'?'?seed=true':'?limit=5';
+    // dry_run=false is REQUIRED since the endpoint's default flipped to safe
+    // (2026-07-27): a bare send would silently preview instead of sending.
+    const qs=kind==='preview'?'?dry_run=true':kind==='seed'?'?seed=true':'?limit=5&dry_run=false';
     if(kind==='send'&&!window.confirm('Send tier-change notifications now?\n\n'
       +((live===true&&stage!=='test')?'LIVE — real AE/SDR channels.':'TEST — your private channel only.')
       +'\n\nCapped at 5 cards for safety.')) return;

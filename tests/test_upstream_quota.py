@@ -233,3 +233,72 @@ class TestConsolidatedFailureAlert:
         monkeypatch.setattr(rd, "post_ops_alert", lambda **kw: calls.append(kw) or True)
         rd.alert_failed_sources({}, state_repo=_FakeStateRepo())
         assert calls == []
+
+
+# ── the raise -> connector failed -> ops alert chain, end to end ──────
+# warntracker.py's comment ("a raised error = connector marked failed = ops
+# alert") described a chain that did NOT exist: run_discovery's 1-of-N policy
+# caught the exception, printed a warning and exited 0, so run_daily reported
+# "all legs OK" and the only loud path was run_digest's throttled 24h
+# source-silence WARNING, lumped in with every other quiet source. This pins
+# the chain the comment claims.
+
+
+class _RunRecordingRepo:
+    """Minimal discovery-repo surface run_connector touches, recording runs."""
+
+    def __init__(self):
+        self.runs: list[dict] = []
+
+    def start_run(self, source):
+        self.runs.append({"source": source, "status": "running", "error": None})
+        return len(self.runs) - 1
+
+    def update_run(self, run_id, **counts):
+        self.runs[run_id].update(counts)
+
+    def finish_run(self, run_id, *, status, error=None):
+        self.runs[run_id].update(status=status, error=error)
+
+    def already_qualified(self, *_a, **_kw):
+        return False
+
+    def save_candidate(self, _c):
+        raise AssertionError("no candidate should be produced by a dead source")
+
+    def stats(self):
+        return {}
+
+    def abm_targets(self):
+        return []
+
+
+class _DeadFeedConnector:
+    source_name = "warntracker"
+    signal_types = ["layoff"]
+
+    async def pull(self, since):
+        raise RuntimeError("warntracker feed stale: newest notice 2026-04-27 "
+                           "— endpoint serving frozen sample")
+        yield  # pragma: no cover — makes pull an async generator
+
+
+class TestDeadSourcePagesAsAFailure:
+    async def test_raising_connector_marks_the_run_failed_and_alerts(self, monkeypatch):
+        repo = _RunRecordingRepo()
+        calls: list[dict] = []
+        monkeypatch.setattr(rd, "post_ops_alert", lambda **kw: calls.append(kw) or True)
+
+        with pytest.raises(RuntimeError, match="frozen sample"):
+            await rd.run_connector("layoffs", _DeadFeedConnector(),
+                                   NOW - timedelta(days=1), repo,
+                                   limit=None, qualify=True)
+
+        assert repo.runs[0]["status"] == "failed"          # connector_runs row
+        assert "frozen sample" in repo.runs[0]["error"]
+
+        # ...and the runner turns that into a FAILURE-severity page, not a
+        # warning buried in the next day's digest.
+        rd.alert_failed_sources({"layoffs": "RuntimeError: warntracker feed stale"},
+                                state_repo=_FakeStateRepo())
+        assert len(calls) == 1 and calls[0]["severity"] == "failure"

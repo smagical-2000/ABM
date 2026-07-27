@@ -111,6 +111,19 @@ class TestWarntrackerStaleTripwire:
             async for _ in c.pull(since=NOW - timedelta(days=365)):
                 pass
 
+    async def test_the_raised_message_carries_the_verdict(self, tmp_path, monkeypatch):
+        """UPSTREAM-DEAD (2026-07-27): warntracker.com itself froze in April, so
+        the alert must say REPLACE, not retry. run_discovery puts this string
+        straight into the ops card, and it must survive the per-source clip."""
+        c = _cached_connector(tmp_path, monkeypatch,
+                              [_warn_row(NOW - timedelta(days=90))])
+        with pytest.raises(RuntimeError) as ei:
+            async for _ in c.pull(since=NOW - timedelta(days=365)):
+                pass
+        msg = str(ei.value)
+        assert "REPLACE the source" in msg
+        assert len(f"RuntimeError: {msg}") <= 280
+
     async def test_fresh_feed_passes_and_yields(self, tmp_path, monkeypatch):
         rows = [_warn_row(NOW - timedelta(days=2))]
         c = _cached_connector(tmp_path, monkeypatch, rows)

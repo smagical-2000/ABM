@@ -284,7 +284,10 @@ def alert_failed_sources(failures: dict[str, str], *, state_repo=None) -> bool:
                  if quota else f"{len(failures)} discovery source(s) FAILED")
         return post_ops_alert(
             kind=kind, severity="failure", service="discovery-cron", title=title,
-            detail="\n".join(f"{src}: {err[:200]}" for src, err in sorted(failures.items())),
+            # 280 chars per source: enough to carry a connector's own verdict
+            # (warntracker's "REPLACE the source, do not retry") into the card,
+            # so the reader acts on the alert instead of opening Railway.
+            detail="\n".join(f"{src}: {err[:280]}" for src, err in sorted(failures.items())),
             runbook=_QUOTA_RUNBOOK if quota else _FAIL_RUNBOOK)
     except Exception:  # noqa: BLE001 — best-effort by contract
         logging.getLogger(__name__).exception("connector-failure alert failed")

@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from collections.abc import Iterator
 
 import httpx
@@ -27,6 +28,8 @@ logger = logging.getLogger(__name__)
 
 _API_VERSION = "v60.0"
 _PAGE_CAP = 500          # hard stop so a bad nextRecordsUrl can't loop forever
+_MAX_RETRIES = 2         # per page, on 429/5xx — plus at most ONE 401 re-auth
+_BACKOFF_CAP_SECONDS = 30.0
 # Floor for the high-intent lead pull — leads older than this are stale; we only
 # track the 2026-onward cohort (per the user). Open-ended (since -> now).
 SINCE_DEFAULT = "2026-01-01"
@@ -108,8 +111,7 @@ class SalesforceClient:
         path = f"/services/data/{self._api}/query"
         params: dict | None = {"q": soql}
         for _ in range(_PAGE_CAP):
-            resp = self._send("GET", f"{self._instance}{path}", params=params,
-                              headers={"Authorization": f"Bearer {self._token}"})
+            resp = self._get_with_retry(f"{self._instance}{path}", params=params)
             resp.raise_for_status()
             data = resp.json()
             yield from data.get("records", [])
@@ -229,6 +231,41 @@ class SalesforceClient:
 
     # ── transport ───────────────────────────────────────────────────────
 
+    def _get_with_retry(self, url: str, *, params: dict | None) -> httpx.Response:
+        """One READ request with a bounded retry. GET-class only — writes
+        (create_lead) are never retried, since a replayed POST duplicates a Lead.
+
+        Unlike the Reply.io / HeyReach / Airtable clients, this one used to
+        raise_for_status() on the first non-2xx with zero retries, and the
+        client-credentials token cached in _authenticate was never refreshed.
+        So a 2-minute instance maintenance 503, or a token expiring partway
+        through the daily pull (high-intent + tradeshow + TOFU + meetings),
+        failed the whole SFDC leg: BOFU heat lands a day late and the daily-cron
+        FAILED alert pages for a transient.
+
+        429/5xx back off (honouring Retry-After) up to _MAX_RETRIES; a 401
+        clears the cached token and re-authenticates ONCE, then replays the
+        page. Both budgets are bounded, so this always terminates.
+        """
+        attempt, reauthed = 0, False
+        while True:
+            resp = self._send("GET", url, params=params,
+                              headers={"Authorization": f"Bearer {self._token}"})
+            if resp.status_code == 401 and not reauthed:
+                logger.info("salesforce 401 — refreshing the access token and retrying")
+                reauthed = True
+                self._token = None
+                self._ensure_auth()
+                continue
+            if (resp.status_code == 429 or resp.status_code >= 500) and attempt < _MAX_RETRIES:
+                attempt += 1
+                delay = _retry_after(resp, attempt)
+                logger.warning("salesforce %s — retry %d/%d in %.1fs",
+                               resp.status_code, attempt, _MAX_RETRIES, delay)
+                time.sleep(delay)
+                continue
+            return resp
+
     def _send(self, method: str, url: str, *, params: dict | None = None,
               data: dict | None = None, json: dict | None = None,
               headers: dict | None = None) -> httpx.Response:
@@ -238,3 +275,15 @@ class SalesforceClient:
         with httpx.Client(timeout=self._timeout) as client:
             return client.request(method, url, params=params, data=data,
                                   json=json, headers=headers)
+
+
+def _retry_after(resp: httpx.Response, attempt: int) -> float:
+    """The server's Retry-After when it sends one, else capped exponential
+    backoff. Mirrors replyio_client._retry_after."""
+    header = resp.headers.get("Retry-After")
+    if header:
+        try:
+            return min(float(header), _BACKOFF_CAP_SECONDS)
+        except ValueError:
+            pass
+    return min(2.0 ** attempt, _BACKOFF_CAP_SECONDS)

@@ -85,7 +85,21 @@ _VERIFY_PAIRS_PER_RUN = 10
 
 def _verify_conflict_pairs(engagement_repo, manual: list[dict]) -> None:
     """Fetch-and-cache verdicts for uncached domain-conflict pairs (max
-    _VERIFY_PAIRS_PER_RUN per sync, 8s per fetch)."""
+    _VERIFY_PAIRS_PER_RUN per sync, 8s per fetch).
+
+    Runs ONLY off the event loop (review 2026-07-27): the API's async sync
+    legs call cross_and_persist directly on the loop, and up to 20 serial
+    8s homepage fetches would freeze every webhook and healthcheck. The
+    daily cron legs run in plain subprocesses — verification happens there,
+    daily, which is all the queue needs."""
+    import asyncio
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass                    # no loop — cron/CLI context, safe to fetch
+    else:
+        logger.debug("site-verify deferred (event-loop context)")
+        return
     from auto_search.engagement import site_verify
     checked = 0
     for entry in manual:

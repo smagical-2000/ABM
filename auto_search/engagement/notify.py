@@ -288,7 +288,15 @@ def resolve_ae(account: dict, *, owner_name: str | None = None,
     # Order: explicit SFDC owner → the AE for this framework → DEFAULT_AE catch-all. The
     # catch-all means an unscored (no-framework) Hot account still tags someone, instead
     # of silently going untagged.
-    name = (owner_name or "").strip() or by_specialty.get(fw_key) or _env_name("DEFAULT_AE")
+    # SFDC owner is a SINGLE person and may legitimately contain a comma
+    # ("Davies, Ben"; "Aly Jina, MBA") — never comma-split it (review
+    # 2026-07-27). Only the env-sourced routing values use the comma as the
+    # multi-owner separator.
+    owner = (owner_name or "").strip()
+    if owner:
+        sid = ids.get(owner)
+        return f"<@{sid}>" if sid else f"@{owner}"
+    name = by_specialty.get(fw_key) or _env_name("DEFAULT_AE")
     return _mentions(name, ids)
 
 

@@ -40,6 +40,14 @@ _CACHE_KEY = "domain_pair_verdicts"
 _FETCH_CAP_BYTES = 400_000
 _UA = "abm-scorer-identity-verify/1.0 (+https://usemagical.com)"
 
+# Registrar / parking / marketplace hosts: landing here proves a domain is
+# DEAD, not that two domains share an owner.
+_PARKING_DOMAINS = frozenset({
+    "hugedomains.com", "sedoparking.com", "sedo.com", "godaddy.com",
+    "dan.com", "afternic.com", "parkingcrew.net", "bodis.com",
+    "namecheap.com", "porkbun.com", "squadhelp.com", "undeveloped.com",
+})
+
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
 _META_RE = re.compile(
     r"<meta[^>]+(?:property=[\"']og:site_name[\"']|name=[\"']description[\"'])"
@@ -109,10 +117,17 @@ def verify_same_company(name_a: str, domain_a: str, name_b: str, domain_b: str,
 
     fa = registrable_domain(a.final_host) or ""
     fb = registrable_domain(b.final_host) or ""
-    if fa and fa == fb:
+    # Convergence onto a parking/registrar/marketplace host is NOT identity —
+    # two unrelated defunct clinic domains both landing on hugedomains.com is
+    # exactly the dead-domain pair this ladder must never auto-confirm.
+    if fa and fa == fb and fa not in _PARKING_DOMAINS:
         return Verdict("same", "high", "redirect-convergence", [fa])
     ca = registrable_domain(a.canonical_host) or ""
     cb = registrable_domain(b.canonical_host) or ""
+    if ca in _PARKING_DOMAINS:
+        ca = ""
+    if cb in _PARKING_DOMAINS:
+        cb = ""
     if (ca and ca == rb) or (cb and cb == ra) or (ca and ca == cb):
         return Verdict("same", "high", "cross-canonical", [ca or cb])
     if fa == rb or fb == ra:
@@ -133,15 +148,19 @@ def verify_same_company(name_a: str, domain_a: str, name_b: str, domain_b: str,
 # ── verdict cache (engagement settings JSON) ─────────────────────────────
 
 
-def _load(repo) -> dict:
+def _load(repo) -> dict | None:
+    """The verdict store, or None when it could not be READ (a transient DB
+    error must never masquerade as an empty store — a subsequent write would
+    wipe every cached verdict, including permanent human ones)."""
     try:
         return json.loads(repo.get_setting(_CACHE_KEY) or "{}")
     except Exception:  # noqa: BLE001
-        return {}
+        logger.warning("site-verify verdict store unreadable")
+        return None
 
 
 def cached_verdict(repo, dom_a: str | None, dom_b: str | None) -> Verdict | None:
-    row = _load(repo).get(pair_key(dom_a, dom_b))
+    row = (_load(repo) or {}).get(pair_key(dom_a, dom_b))
     if not row:
         return None
     return Verdict(row.get("verdict", "unknown"), row.get("confidence", "low"),
@@ -152,6 +171,8 @@ def store_verdict(repo, dom_a: str | None, dom_b: str | None, v: Verdict, *,
                   decided_by: str = "auto") -> None:
     """Persist a verdict. Human rows are permanent — auto never overwrites."""
     state = _load(repo)
+    if state is None:   # unreadable store: skip rather than clobber it
+        return
     key = pair_key(dom_a, dom_b)
     prior = state.get(key)
     if prior and prior.get("decided_by") == "human" and decided_by != "human":
@@ -169,12 +190,12 @@ def store_verdict(repo, dom_a: str | None, dom_b: str | None, v: Verdict, *,
 def verified_same_pairs(repo) -> set[str]:
     """Pair keys with a high-confidence 'same' verdict — the ONLY set that may
     relax a domain-conflict gate (low-confidence 'same' stays review-only)."""
-    return {k for k, row in _load(repo).items()
+    return {k for k, row in (_load(repo) or {}).items()
             if row.get("verdict") == "same"
             and (row.get("confidence") == "high"
                  or row.get("decided_by") == "human")}
 
 
 def verified_different_pairs(repo) -> set[str]:
-    return {k for k, row in _load(repo).items()
+    return {k for k, row in (_load(repo) or {}).items()
             if row.get("verdict") == "different"}

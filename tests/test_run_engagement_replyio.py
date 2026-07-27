@@ -69,10 +69,18 @@ def test_repeated_failures_never_drift():
     assert rer._default_since(_Repo(state)) == _d(40)
 
 
-def test_failure_with_no_prior_success_repulls_the_cohort():
-    # No window_to was ever written -> we have no trustworthy cursor. A full
-    # re-pull is idempotent (upsert by external_id); a guessed window is not.
+def test_failure_with_no_prior_success_gets_a_bounded_window():
+    # Review 2026-07-27: a full-cohort re-pull on EVERY failed retry can itself
+    # exceed Reply.io's rate caps and loop forever. A failed row with a stamp
+    # anchors on it with a 30-day guard band; outages beyond that page via the
+    # sync-staleness tripwire. Only a NEVER-synced store re-pulls the cohort.
     repo = _Repo({"status": "failed", "last_synced_at": NOW.isoformat()})
+    expected = (NOW.date() - timedelta(days=30)).isoformat()
+    assert rer._default_since(repo) == expected
+
+
+def test_never_synced_store_repulls_the_cohort():
+    repo = _Repo({})
     assert rer._default_since(repo) == "2026-01-01"
 
 
@@ -102,3 +110,15 @@ def test_broken_repo_falls_back_to_the_cohort():
             raise RuntimeError("db down")
 
     assert rer._default_since(_Boom()) == "2026-01-01"
+
+
+def test_failed_legacy_row_gets_bounded_window_not_full_cohort(tmp_path):
+    """Review 2026-07-27: a pre-upgrade row (no window_to) whose latest run
+    FAILED must not trigger an unbounded cohort re-pull on every retry — it
+    anchors on the stamp with a 30-day guard band instead."""
+    from auto_search.db.engagement_repository import EngagementJsonRepository
+    repo = EngagementJsonRepository(tmp_path / "e.json")
+    repo.set_sync_state(source="replyio", status="failed",
+                        last_synced_at="2026-07-20T12:00:00+00:00")
+    got = rer._default_since(repo)
+    assert got == "2026-06-20"          # 30-day band, NOT 2026-01-01

@@ -57,6 +57,12 @@ RUNBOOK = ("per-source triage lives in the 2026-07-23 live source audit "
 # see SOURCE_ALIASES below.
 THRESHOLDS: dict[str, int] = {
     "jobs": 3,
+    # Per-board jobs rows (review 2026-07-27): the 'jobs' collapse alone hides
+    # a single board dying while its sibling produces (indeed was ~47% of all
+    # jobs discoveries). Wider than the aggregate so one slow board doesn't
+    # double-page, but a dead one names itself within a week.
+    "indeed": 5,
+    "linkedin": 5,
     "social_competitor_post": 3,
     "warntracker": 10,
     "signalbase_leadership": 10,
@@ -65,7 +71,8 @@ THRESHOLDS: dict[str, int] = {
     "social_magical_post": 14,
     "social_event": 14,
 }
-_WEEKDAY_SOURCES = frozenset({"jobs", "social_competitor_post"})
+_WEEKDAY_SOURCES = frozenset({"jobs", "indeed", "linkedin",
+                              "social_competitor_post"})
 
 # Persisted discovery_signals.source -> the THRESHOLDS key it belongs to.
 # JobPostingsConnector declares source_name='jobs' (that is what connector_runs
@@ -103,11 +110,15 @@ _SQL_LAST_PARK = "SELECT MAX(first_parked_at) FROM parked_companies"
 
 def _collapse(raw: dict[str, datetime]) -> dict[str, datetime]:
     """Fold per-board source keys onto their connector key (newest wins), so the
-    streak reads the same names THRESHOLDS and the digest do."""
-    out: dict[str, datetime] = {}
+    streak reads the same names THRESHOLDS and the digest do. The per-board
+    keys are KEPT alongside the collapsed one (review 2026-07-27): a single
+    board dying while its sibling produces would otherwise be invisible —
+    'jobs' would stay fresh forever while half the pipeline is dark. The
+    per-board rows have their own (wider) THRESHOLDS entries."""
+    out: dict[str, datetime] = dict(raw)
     for src, t in raw.items():
         key = SOURCE_ALIASES.get(src, src)
-        if key not in out or t > out[key]:
+        if key != src and (key not in out or t > out[key]):
             out[key] = t
     return out
 

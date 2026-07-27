@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 
 import httpx
 from dotenv import load_dotenv
@@ -73,4 +72,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # os._exit via run_entrypoint, not sys.exit: psycopg pool threads can hang
+    # interpreter finalization forever (the Jul 24-27 cron freeze class).
+    from auto_search.ops.shutdown import run_entrypoint
+    run_entrypoint(main)

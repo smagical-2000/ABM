@@ -186,50 +186,63 @@ def _run() -> int:
         return 0
 
     engagement_repo = _opened(get_engagement_repository())
-    engagement_repo.ensure_schema()
-    # Liveness stamp for the ops watchdog: EVERY tick (even a no-op) proves the
-    # 15-min cron is alive; the watchdog alerts when this goes stale in-window.
+    # Setup leg: schema, cost gates, the shares CSV, Airtable/Reply construction
+    # (a rotated PAT or missing AIRTABLE_* env raises in the constructor). These
+    # used to die as bare tracebacks whose only signal was the Railway exit code
+    # — the "nobody was told" class ops/alerts.py exists to kill. Alert + rc 1,
+    # but no _stamp_attempt: nothing was spent yet, so the cost throttle stays
+    # disarmed and the next tick may retry immediately. (Failures after the paid
+    # scrape are the NEXT try/except, which does stamp.)
     try:
-        engagement_repo.set_setting("ops_tofu_last_tick", datetime.now(UTC).isoformat())
-    except Exception:  # noqa: BLE001 — liveness stamping must never block the run
-        logger.warning("ops tick stamp failed (continuing)")
+        engagement_repo.ensure_schema()
+        # Liveness stamp for the ops watchdog: EVERY tick (even a no-op) proves the
+        # 15-min cron is alive; the watchdog alerts when this goes stale in-window.
+        try:
+            engagement_repo.set_setting("ops_tofu_last_tick", datetime.now(UTC).isoformat())
+        except Exception:  # noqa: BLE001 — liveness stamping must never block the run
+            logger.warning("ops tick stamp failed (continuing)")
 
-    # Cost guard: the Railway cron ticks every 15 min, but ad reactions barely change and
-    # re-scraping + re-enriching every tick was ~$12/day of Apify. Do the real work only
-    # every LINKEDIN_TOFU_MIN_INTERVAL_HOURS (default 6); other ticks skip BEFORE any spend.
-    # --dry-run and --force bypass it.
-    if not (args.dry_run or args.force) and not _within_active_hours():
-        print("[run_linkedin_tofu] outside active hours — no-op. (--force to override)",
-              flush=True)
-        return 0
-    min_h = float(os.getenv("LINKEDIN_TOFU_MIN_INTERVAL_HOURS", "6"))
-    if not (args.dry_run or args.force) and min_h > 0:
-        last = (engagement_repo.get_sync_state(source=_SYNC_SOURCE) or {}).get("last_synced_at")
-        hrs = _hours_since(last)
-        if hrs is not None and hrs < min_h:
-            print(f"[run_linkedin_tofu] throttled: last run {hrs:.1f}h ago (< {min_h}h) "
-                  "— no-op. (--force to override)", flush=True)
+        # Cost guard: the Railway cron ticks every 15 min, but ad reactions barely change and
+        # re-scraping + re-enriching every tick was ~$12/day of Apify. Do the real work only
+        # every LINKEDIN_TOFU_MIN_INTERVAL_HOURS (default 6); other ticks skip BEFORE any spend.
+        # --dry-run and --force bypass it.
+        if not (args.dry_run or args.force) and not _within_active_hours():
+            print("[run_linkedin_tofu] outside active hours — no-op. (--force to override)",
+                  flush=True)
             return 0
+        min_h = float(os.getenv("LINKEDIN_TOFU_MIN_INTERVAL_HOURS", "6"))
+        if not (args.dry_run or args.force) and min_h > 0:
+            last = (engagement_repo.get_sync_state(source=_SYNC_SOURCE) or {}).get("last_synced_at")
+            hrs = _hours_since(last)
+            if hrs is not None and hrs < min_h:
+                print(f"[run_linkedin_tofu] throttled: last run {hrs:.1f}h ago (< {min_h}h) "
+                      "— no-op. (--force to override)", flush=True)
+                return 0
 
-    csv_path = args.csv or os.getenv("LINKEDIN_TOFU_CSV") or str(_DEFAULT_CSV)
-    share_categories = linkedin_ads.load_share_categories(Path(csv_path).read_text())
-    if not share_categories:
-        logger.error("no usable share_ids in %s", csv_path)
-        _crash_alert(engagement_repo, f"no usable share_ids in {csv_path}")
+        csv_path = args.csv or os.getenv("LINKEDIN_TOFU_CSV") or str(_DEFAULT_CSV)
+        share_categories = linkedin_ads.load_share_categories(Path(csv_path).read_text())
+        if not share_categories:
+            logger.error("no usable share_ids in %s", csv_path)
+            _crash_alert(engagement_repo, f"no usable share_ids in {csv_path}")
+            return 1
+
+        airtable = reply = mirror = None
+        if not args.dry_run:
+            from auto_search.engagement.airtable_client import AirtableClient
+            from auto_search.engagement.replyio_client import ReplyioClient
+            airtable = AirtableClient()
+            reply = ReplyioClient()
+            # Tracking mirror (Galyna, 2026-07-08): dual-write every lead to the
+            # "TOFU Leads by ABM" base. Unset env -> no mirror, primary unaffected.
+            if os.getenv("AIRTABLE_TOFU_MIRROR_BASE_ID"):
+                mirror = AirtableClient(
+                    base_id=os.environ["AIRTABLE_TOFU_MIRROR_BASE_ID"],
+                    table=os.getenv("AIRTABLE_TOFU_MIRROR_TABLE", "TOFU Leads by ABM"))
+    except Exception:  # noqa: BLE001 — cron leg: alert + rc 1, never a silent traceback
+        logger.exception("[run_linkedin_tofu] setup failed before any spend")
+        import traceback
+        _crash_alert(engagement_repo, traceback.format_exc())
         return 1
-
-    airtable = reply = mirror = None
-    if not args.dry_run:
-        from auto_search.engagement.airtable_client import AirtableClient
-        from auto_search.engagement.replyio_client import ReplyioClient
-        airtable = AirtableClient()
-        reply = ReplyioClient()
-        # Tracking mirror (Galyna, 2026-07-08): dual-write every lead to the
-        # "TOFU Leads by ABM" base. Unset env -> no mirror, primary unaffected.
-        if os.getenv("AIRTABLE_TOFU_MIRROR_BASE_ID"):
-            mirror = AirtableClient(
-                base_id=os.environ["AIRTABLE_TOFU_MIRROR_BASE_ID"],
-                table=os.getenv("AIRTABLE_TOFU_MIRROR_TABLE", "TOFU Leads by ABM"))
     try:
         summary = asyncio.run(linkedin_ads_runner.run(
             share_categories=share_categories, engagement_repo=engagement_repo,

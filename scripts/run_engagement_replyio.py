@@ -64,11 +64,20 @@ def _default_since(engagement_repo) -> str:
     try:
         state = engagement_repo.get_sync_state("replyio") or {}
         anchor = state.get("window_to")
+        overlap = OVERLAP_DAYS
         if not anchor and state.get("status") == "success":
             anchor = state.get("last_synced_at")   # rows predating window_to
+        if not anchor and state.get("last_synced_at"):
+            # Pre-upgrade row whose latest run FAILED: a full-cohort re-pull on
+            # every retry can itself exceed Reply.io's rate caps and loop
+            # forever (review 2026-07-27). Anchor on the (possibly drifted)
+            # stamp with a much wider guard band instead — outages past 30
+            # days page via the sync-staleness tripwire long before this.
+            anchor = state.get("last_synced_at")
+            overlap = 30
         if anchor:
             dt = datetime.fromisoformat(str(anchor).replace("Z", "+00:00"))
-            return (dt.date() - timedelta(days=OVERLAP_DAYS)).isoformat()
+            return (dt.date() - timedelta(days=overlap)).isoformat()
     except (ValueError, TypeError):
         logger.warning("unparseable replyio sync cursor — using full window")
     except Exception:  # noqa: BLE001 — an unreadable cursor must re-pull, not crash
@@ -101,4 +110,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # os._exit via run_entrypoint, not sys.exit: psycopg pool threads can hang
+    # interpreter finalization forever (the Jul 24-27 cron freeze class).
+    from auto_search.ops.shutdown import run_entrypoint
+    run_entrypoint(main)

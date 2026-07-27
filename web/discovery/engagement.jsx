@@ -132,9 +132,18 @@ function nameFromEmail(email){
 // ledger must join on this, never on the raw id.
 const _ENTITY_SUFFIXES=['inc','incorporated','llc','llp','lp','ltd','limited','corp','corporation','co','company','plc','pllc','pc','group','holdings','holding','partners','associates'];
 function companyKey(name){
-  const w=String(name||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim().split(' ').filter(Boolean);
+  // Mirrors python notify.company_key INCLUDING its degeneracy guard (review
+  // 2026-07-27): when suffix-stripping collapses a name to ONE substantive
+  // word, key on the UNSTRIPPED words — otherwise 'Urology Group' and
+  // 'Urology Associates' (different companies) share a key and the second
+  // one is silently deduped out of auto-activation. Keep in lockstep.
+  const raw=String(name||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim().split(' ').filter(Boolean);
+  const w=[...raw];
   while(w.length&&_ENTITY_SUFFIXES.includes(w[w.length-1])) w.pop();
-  return w.join('');
+  const core=(w[0]==='the')?w.slice(1):w;
+  const basis=(core.length<=1&&raw.length>w.length)?raw:w;
+  if(basis.length>=3&&basis[0]==='the') return basis.slice(1).join('');
+  return basis.join('');
 }
 function relTime(iso){ if(!iso)return'—'; const d=Math.max(0,Date.now()-new Date(iso).getTime()),m=Math.round(d/60000); if(m<2)return'just now'; if(m<60)return`${m}m`; const h=Math.round(m/60); if(h<24)return`${h}h`; const dy=Math.round(h/24); return dy<30?`${dy}d`:new Date(iso).toLocaleDateString('en-US',{month:'short',day:'numeric'}); }
 function daysSince(iso){ return iso?Math.max(0,Math.round((Date.now()-new Date(iso).getTime())/86400000)):0; }

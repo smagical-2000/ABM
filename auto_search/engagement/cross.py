@@ -61,7 +61,12 @@ class CrossIndex:
                 continue
             dom = _usable_domain(a.get("domain"))
             rec = {"account_id": aid, "name": a.get("name") or aid, "domain": dom}
-            if dom:
+            # Exact host FIRST (wins at lookup), registrable form as fallback —
+            # sibling hosts on one parent domain must not steal each other.
+            exact = _exact_domain(a.get("domain"))
+            if exact:
+                self._note(self._s_domain, exact, rec, "scored-domain")
+            if dom and dom != exact:
                 self._note(self._s_domain, dom, rec, "scored-domain")
             for key in _name_keys(a.get("name") or ""):
                 self._note(self._s_key, key, rec, "scored-name")
@@ -82,7 +87,10 @@ class CrossIndex:
                 continue
             dom = _usable_domain(t.get("domain"))
             rec = {"account_id": f"abm_{primary}", "name": name, "domain": dom}
-            if dom:
+            exact = _exact_domain(t.get("domain"))
+            if exact:
+                self._note(self._a_domain, exact, rec, "abm-domain")
+            if dom and dom != exact:
                 self._note(self._a_domain, dom, rec, "abm-domain")
             # match on the target's normalized name + any expanded aliases,
             # plus the company_key form (dual-form, same as the scored side)
@@ -125,10 +133,13 @@ class CrossIndex:
 
     def match(self, *, company: str | None = None, domain: str | None = None,
               email: str | None = None) -> AccountMatch | None:
-        dom = _usable_domain(domain) or _email_domain(email)
+        raw_dom = domain if _exact_domain(domain) else (
+            (email or "").rsplit("@", 1)[-1] if "@" in (email or "") else None)
+        exact = _exact_domain(raw_dom)
+        dom = _usable_domain(raw_dom)
         keys = _name_keys(company or "")
-        scored, s_tier = _lookup(self._s_domain, self._s_key, dom, keys)
-        abm, a_tier = _lookup(self._a_domain, self._a_key, dom, keys)
+        scored, s_tier = _lookup(self._s_domain, self._s_key, exact, dom, keys)
+        abm, a_tier = _lookup(self._a_domain, self._a_key, exact, dom, keys)
         # Domain-contradiction veto: a name-tier hit whose stored domain
         # conflicts with the contact's own corporate domain is refused — the
         # contact stays unresolved-for-review instead of merging wrongly.
@@ -150,6 +161,18 @@ class CrossIndex:
             # the scored sibling (merged-row rule) so re-syncs can never re-mint
             # an abm_ twin for a scored company.
             sib = self._abm_sibling.get(abm["account_id"])
+            # Sibling-hop veto (review 2026-07-27, reproduced): when the ABM
+            # target row has NO domain, the build-time gate can't see a
+            # conflict — so a contact vetoed against the scored account would
+            # re-reach it through the hop. Re-check against the CONTACT here;
+            # on conflict the contact stays on the abm_ tile (never merged —
+            # the heal manual-queues conflicting-domain twins).
+            if sib and not _domains_compatible(dom, sib.get("domain"),
+                                               self.same_pairs):
+                logger.info("cross: sibling-hop veto %s -/-> %s (contact %s "
+                            "vs sibling %s)", abm["account_id"],
+                            sib["account_id"], dom, sib.get("domain"))
+                sib = None
             if sib:
                 return AccountMatch(sib["account_id"], sib["name"], a_tier,
                                     ("scored", "abm"))
@@ -176,7 +199,12 @@ def build_index(scoring_repo, discovery_repo, engagement_repo=None) -> CrossInde
 # ── helpers ────────────────────────────────────────────────────────────
 
 
-def _lookup(by_domain: dict, by_key: dict, dom: str | None, keys: list[str]):
+def _lookup(by_domain: dict, by_key: dict, exact: str | None, dom: str | None,
+            keys: list[str]):
+    # Exact host outranks the registrable-collapsed fallback (sibling hosts
+    # on one parent domain must resolve to their own account).
+    if exact and exact in by_domain:
+        return by_domain[exact], "domain"
     if dom and dom in by_domain:
         return by_domain[dom], "domain"
     for key in keys:
@@ -214,6 +242,15 @@ def _usable_domain(value: str | None) -> str | None:
     subdomains were defeating domain matches and dropping contacts to the
     unguarded name tier). Stored values stay verbatim; only keys collapse."""
     dom = registrable_domain(clean_domain(value))
+    return dom if dom and dom not in _PERSONAL_DOMAINS else None
+
+
+def _exact_domain(value: str | None) -> str | None:
+    """Uncollapsed host for domain-index precedence: two subsidiaries on one
+    parent registrable domain (mercy.trinityhealth.org / stjoes.…) each keep
+    their exact-host match; the registrable form is only the fallback key
+    (review 2026-07-27 — the collapse must never OUTRANK an exact host)."""
+    dom = clean_domain(value)
     return dom if dom and dom not in _PERSONAL_DOMAINS else None
 
 

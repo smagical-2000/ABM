@@ -331,3 +331,38 @@ def test_heal_sees_deprecated_kind_only_accounts():
     disc = _Discovery([{"name": "Intermountain Health"}])
     rep = identity.heal_identity_splits(repo, scoring, disc, dry_run=True)
     assert rep["merged"] == {"abm_intermountainhealth": "csv_intermountain"}
+
+
+def test_sibling_hop_cannot_bypass_the_veto():
+    """Review 2026-07-27 (reproduced pre-fix): when the ABM target row has NO
+    domain, the build-time sibling gate can't see a conflict — a contact vetoed
+    against the scored account must NOT re-reach it through the hop. The
+    contact stays on the abm_ tile (which the heal will manual-queue, never
+    merge)."""
+    from auto_search.engagement.cross import CrossIndex
+    idx = CrossIndex(
+        scored=[{"account_id": "acc_healthfirst", "name": "Health First",
+                 "domain": "hf.org"}],
+        abm_targets=[{"name": "Healthfirst", "domain": None}])
+    m = idx.match(company="Healthfirst", email="x@healthfirst.org")
+    assert m is not None
+    assert m.account_id == "abm_healthfirst"      # NOT acc_healthfirst
+    # and a compatible contact still takes the merged-row sibling
+    m2 = idx.match(company="Healthfirst", email="y@hf.org")
+    assert m2 is not None and m2.account_id == "acc_healthfirst"
+
+
+def test_exact_host_outranks_registrable_collapse():
+    """Review 2026-07-27: two subsidiaries on one parent registrable domain
+    each keep their own exact-host match; the collapse is only a fallback."""
+    from auto_search.engagement.cross import CrossIndex
+    idx = CrossIndex(
+        scored=[{"account_id": "acc_mercy", "name": "Mercy Trinity",
+                 "domain": "mercy.trinityhealth.org"},
+                {"account_id": "acc_stjoes", "name": "St Joes Trinity",
+                 "domain": "stjoes.trinityhealth.org"}],
+        abm_targets=[])
+    m = idx.match(email="a@stjoes.trinityhealth.org")
+    assert m is not None and m.account_id == "acc_stjoes"
+    m2 = idx.match(email="b@mercy.trinityhealth.org")
+    assert m2 is not None and m2.account_id == "acc_mercy"

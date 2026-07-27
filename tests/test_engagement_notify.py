@@ -499,3 +499,14 @@ def test_accounts_to_notify_upward_only_and_hot_terminal():
     got = {d["account"]["account_id"]: d["role"]
            for d in notify.accounts_to_notify(accounts, ledger)}
     assert got == {"new_some": "sdr", "up_warm": "sdr", "up_hot": "ae"}
+
+
+def test_sfdc_owner_with_comma_is_one_person_not_two():
+    """Review 2026-07-27: comma-splitting is for ENV routing values only —
+    an SFDC owner stored 'Davies, Ben' is one human, not a dual tag."""
+    from auto_search.engagement.notify import resolve_ae
+    got = resolve_ae({}, owner_name="Davies, Ben",
+                     ids={"Davies, Ben": "U0A3LE8KGEA"}, by_specialty={})
+    assert got == "<@U0A3LE8KGEA>"
+    got2 = resolve_ae({}, owner_name="Aly Jina, MBA", ids={}, by_specialty={})
+    assert got2 == "@Aly Jina, MBA"

@@ -50,8 +50,20 @@ def _run(script: str, *args: str) -> tuple[int, str]:
     tracebacks and logging go) is captured for the alert, then re-printed so
     the full log still lives in Railway."""
     print(f"\n=== {script} {' '.join(args)} ===", flush=True)
-    p = subprocess.run([sys.executable, str(_SCRIPTS / script), *args],
-                       stderr=subprocess.PIPE, text=True)
+    try:
+        # 1h hard cap per leg (review 2026-07-27): a leg hanging at interpreter
+        # finalization (the Jul 24-27 class) must never wedge the whole daily
+        # run — Railway would count it as still-active and stop scheduling.
+        p = subprocess.run([sys.executable, str(_SCRIPTS / script), *args],
+                           stderr=subprocess.PIPE, text=True, timeout=3600)
+    except subprocess.TimeoutExpired as e:
+        err = f"{script} exceeded the 1h leg cap — killed (likely hang)"
+        if e.stderr:
+            err += "\n" + (e.stderr if isinstance(e.stderr, str)
+                           else e.stderr.decode(errors="replace"))
+        sys.stderr.write(err + "\n")
+        sys.stderr.flush()
+        return 124, err
     if p.stderr:
         sys.stderr.write(p.stderr)
         sys.stderr.flush()

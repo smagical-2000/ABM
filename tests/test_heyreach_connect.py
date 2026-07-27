@@ -185,3 +185,37 @@ def test_webhook_bad_secret_rejected(client):
     r = client.post("/api/campaigns/webhooks/heyreach?secret=wrong",
                     json={"eventType": "CONNECTION_REQUEST_ACCEPTED"})
     assert r.status_code == 403
+
+
+def test_genuine_repeat_engagement_advances_the_touch(client):
+    """Review 2026-07-27: a SECOND real reply weeks later carries a NEW payload
+    timestamp — it must advance occurred_at (the account re-warms), not be
+    dropped as a duplicate. Only timestamp-less redeliveries may be dropped."""
+    base = {"eventType": "CONNECTION_REQUEST_ACCEPTED",
+            "lead": {"profileUrl": "https://linkedin.com/in/rep",
+                     "companyName": "Acme Health"},
+            "campaignId": "509139"}
+    first = _post(client, {**base, "timestamp": "2026-06-01T12:00:00Z"}).json()
+    assert first.get("matched") is True and not first.get("duplicate")
+
+    # weeks later, a genuinely NEW event (note: dates stay in the past —
+    # _event_row's _no_future clamps future stamps to now)
+    second = _post(client, {**base, "timestamp": "2026-07-20T09:30:00Z"}).json()
+    assert not second.get("duplicate")
+    events = _connect_events(client)
+    assert len(events) == 1
+    assert events[0]["occurred_at"] == "2026-07-20T09:30:00+00:00"
+
+
+def test_timestamped_replay_is_byte_identical(client):
+    """A redelivery of the SAME event (same payload timestamp) must not
+    change anything — guard 1 makes the write idempotent."""
+    base = {"eventType": "CONNECTION_REQUEST_ACCEPTED",
+            "lead": {"profileUrl": "https://linkedin.com/in/replay",
+                     "companyName": "Acme Health"},
+            "timestamp": "2026-07-10T08:00:00Z", "campaignId": "509139"}
+    _post(client, base)
+    _post(client, base)
+    events = _connect_events(client)
+    assert len(events) == 1
+    assert events[0]["occurred_at"] == "2026-07-10T08:00:00+00:00"

@@ -249,7 +249,9 @@ class TestJobsSourceAliases:
         repo = _fake_discovery_repo({"indeed": 5, "linkedin": 1})
         last = source_streaks.last_new_by_source(repo)
         assert "jobs" in last                       # was absent → "NEVER produced"
-        assert "indeed" not in last and "linkedin" not in last
+        # per-board keys are KEPT (review 2026-07-27): a dead board must stay
+        # visible alongside the collapsed aggregate
+        assert "indeed" in last and "linkedin" in last
         # newest of the two boards wins (linkedin, 1 day ago)
         assert (NOW - last["jobs"]).days == 1
 
@@ -266,7 +268,7 @@ class TestJobsSourceAliases:
         line = source_streaks.format_digest_line(
             source_streaks.compute_streaks(_fake_discovery_repo(ages), now=NOW))
         assert "jobs" not in line
-        assert "all 8 fresh" in line
+        assert "all 10 fresh" in line
 
     def test_a_run_where_every_find_parks_still_counts_as_alive(self):
         # The stacking gate parks lone standard hires: a legitimate run can find
@@ -321,3 +323,31 @@ class TestLeadershipServerParams:
         assert fake.kwargs["seniorities"] == "c_level,vp,director"
         assert "positions" not in fake.kwargs       # dead feed no longer requested
         assert fake.kwargs["date_preset"] != "today"
+
+
+class TestPerBoardJobsStreaks:
+    """Review 2026-07-27: the 'jobs' collapse must not hide a single board
+    dying while its sibling produces — indeed/linkedin get their own rows."""
+
+    def test_dead_indeed_breaches_while_jobs_stays_fresh(self):
+        from datetime import UTC, datetime, timedelta
+
+        from auto_search.ops import source_streaks as ss
+        now = datetime(2026, 7, 27, 14, 0, tzinfo=UTC)
+        raw = {"indeed": now - timedelta(days=12),   # dead board
+               "linkedin": now - timedelta(days=1)}  # healthy sibling
+        collapsed = ss._collapse(raw)
+        assert collapsed["jobs"] == raw["linkedin"]   # aggregate fresh
+        assert collapsed["indeed"] == raw["indeed"]   # board row survives
+        assert "indeed" in ss.THRESHOLDS and "linkedin" in ss.THRESHOLDS
+
+    def test_both_boards_fresh_no_per_board_breach(self):
+        from datetime import UTC, datetime, timedelta
+
+        from auto_search.ops import source_streaks as ss
+        now = datetime(2026, 7, 27, 14, 0, tzinfo=UTC)
+        raw = {"indeed": now - timedelta(days=1),
+               "linkedin": now - timedelta(days=1)}
+        collapsed = ss._collapse(raw)
+        assert collapsed["indeed"] == raw["indeed"]
+        assert collapsed["jobs"] == raw["linkedin"] or collapsed["jobs"] == raw["indeed"]

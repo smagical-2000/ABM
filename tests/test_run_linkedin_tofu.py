@@ -122,6 +122,41 @@ def test_dry_run_failure_does_not_stamp(monkeypatch, tmp_path):
     assert repo.get_sync_state(source=rlt._SYNC_SOURCE) is None
 
 
+def test_setup_failure_alerts_but_does_not_stamp(monkeypatch, tmp_path):
+    """Regression: a failure BEFORE any spend (Airtable client construction — a
+    rotated PAT or missing AIRTABLE_* env) used to die as a bare traceback: no
+    Slack ops alert, only the Railway exit code. It must go through the same
+    crash-alert path as a runner failure, but must NOT stamp sync_state — no
+    spend happened, so the cost throttle stays disarmed for the next tick."""
+    from auto_search.db.engagement_repository import EngagementJsonRepository
+    repo = EngagementJsonRepository(path=str(tmp_path / "e.json"))
+    _armed_for_a_live_run(monkeypatch, repo)
+
+    import auto_search.engagement.airtable_client as ac
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("AIRTABLE_API_KEY not set")
+    monkeypatch.setattr(ac, "AirtableClient", _boom)
+
+    async def _must_not_run(**_kw):
+        raise AssertionError("runner (Apify spend) must not run when setup fails")
+    monkeypatch.setattr(rlt.linkedin_ads_runner, "run", _must_not_run)
+
+    import auto_search.ops.alerts as alerts
+    posted = {}
+
+    def _fake_post(**kw):
+        posted.update(kw)
+        return True
+    monkeypatch.setattr(alerts, "post_ops_alert", _fake_post)
+
+    assert rlt.main() == 1
+    assert posted.get("kind") == "tofu-cron"     # the crash was TOLD, not just exited
+    assert posted.get("severity") == "failure"
+    # No spend → no stamp → the next tick is NOT cost-throttled and may retry.
+    assert repo.get_sync_state(source=rlt._SYNC_SOURCE) is None
+
+
 def test_no_throttle_when_no_prior_run(monkeypatch):
     """First run ever (no sync_state) is not throttled — it must proceed to the runner."""
     monkeypatch.setattr(rlt, "get_engagement_repository", lambda: _Repo(None))

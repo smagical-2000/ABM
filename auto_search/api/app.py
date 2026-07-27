@@ -27,6 +27,7 @@ import re
 import secrets as _secrets
 import time
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -374,19 +375,25 @@ def _classify_import_row(name, account_id, *, get_company, exists,
     for existing_id in ("acc_" + key, account_id):
         if exists(existing_id):
             if _conflicts(domain_of(existing_id) if domain_of else None):
+                # The row's own csv_<name> id would collide with the incumbent
+                # and upsert_account is ON CONFLICT DO UPDATE — "separate
+                # account" must mean a DISTINCT id, or the veto becomes an
+                # in-place hijack of the existing company (review 2026-07-27).
+                salt = re.sub(r"[^a-z0-9]+", "",
+                              registrable_domain(domain) or "conflict")
                 logger.info("import: %r domain %s conflicts with existing %s — "
                             "creating a separate account", name, domain, existing_id)
-                return "new", None
-            return "skip", None
+                return "new", None, f"{account_id}__{salt}"
+            return "skip", None, None
     company = get_company(key)
     if company is not None and getattr(company, "icp_status", None) in ("qualified", "needs_review"):
         if _conflicts(getattr(company, "domain", None)):
             logger.info("import: %r domain %s conflicts with discovery %s — "
                         "creating a separate account", name, domain,
                         getattr(company, "company_key", key))
-            return "new", None
-        return "move", company
-    return "new", None
+            return "new", None, None
+        return "move", company, None
+    return "new", None, None
 
 
 # Upload caps: a CSV import is raw-bodied, so bound it to avoid an OOM body or a
@@ -1457,6 +1464,12 @@ def create_app() -> FastAPI:
             # Baseline the TRIGGER clock (MAR2-44 #1, 2026-07-23): the gates
             # compare trigger_touch against this record — seeding the display
             # clock would bake a click-armed (newer) baseline into the ledger.
+            # Fresh-read before writing (review 2026-07-27): sends now persist
+            # per card, so a card recorded while this handler was computing must
+            # not be clobbered by our stale snapshot — merge the baseline INTO
+            # the latest ledger (record_notified is merge-strongest, so a fresh
+            # send entry survives a weaker seed row).
+            ledger = json.loads(repo.get_setting("notified_tiers") or "{}")
             for a in board:
                 engagement_notify.record_notified(
                     ledger, a, a.get("tier") or "Lower",
@@ -2332,10 +2345,16 @@ def create_app() -> FastAPI:
         #   2. drop the delivery outright when this external_id is stored —
         #      covers payloads that carry no timestamp at all.
         event_ext = f"linkedin:{kind}:{profile or company}"
-        if event_ext in erepo.external_ids_for_source("heyreach"):
+        payload_ts = campaigns_responses.heyreach_event_time(body)
+        # Guard 2 applies ONLY to timestamp-less payloads (review 2026-07-27):
+        # with a payload timestamp, a replay is a byte-identical write (guard 1)
+        # while a GENUINE second reply carries a NEW timestamp and must advance
+        # the touch — dropping every repeat external_id forever discarded exactly
+        # the repeat engagement the platform exists to catch. The id-scan also
+        # only runs on this rare branch (it reads every stored heyreach id).
+        if payload_ts is None and event_ext in erepo.external_ids_for_source("heyreach"):
             return {"ok": True, "matched": True, "kind": kind, "duplicate": True}
-        now_iso = (campaigns_responses.heyreach_event_time(body)
-                   or datetime.now(UTC).isoformat())
+        now_iso = payload_ts or datetime.now(UTC).isoformat()
         erepo.upsert_contact({
             "source": "heyreach", "external_id": f"li:{profile or company}",
             "email": lead.get("emailAddress"), "company": company,
@@ -3486,7 +3505,7 @@ def create_app() -> FastAPI:
                      for r in (srepo.list_accounts()
                                if hasattr(srepo, "list_accounts") else [])}
         for a in result.accounts:
-            action, company = _classify_import_row(
+            action, company, new_id = _classify_import_row(
                 a.name, a.account_id, get_company=svc_.get_company,
                 exists=scoring.exists, domain=a.domain, domain_of=dom_by_id.get)
             if action == "skip":
@@ -3495,6 +3514,8 @@ def create_app() -> FastAPI:
                 svc_.promote(company.company_key)          # leaves the Discovery panel
                 moved.append(scoring.enqueue_discovery(company.model_dump(), state="queued"))
             else:
+                if new_id:   # domain-conflict row: distinct id, never an overwrite
+                    a = replace(a, account_id=new_id)
                 csv_fresh.append(a)
         csv_rows = scoring.enqueue_csv(csv_fresh, state="queued", import_label=label)
         # Report flags only for rows that actually imported this run — a

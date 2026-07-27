@@ -127,8 +127,19 @@ def is_competitor_staff(company_name: str | None, *links: str | None,
     if not competitors:
         return False
     from auto_search.normalize import normalize_company_name
-    if normalize_company_name(company_name or "") in competitors:
+    key = normalize_company_name(company_name or "")
+    if key in competitors:
         return True
+    # Prefix containment for name keys (2026-07-27: employer "Silna" slipped
+    # past the exact match against label "Silna Health" and a COMPETITOR got
+    # qualified as a lead). ≥5 chars so short generic stems can't collide;
+    # url_key entries (contain "/") never prefix-match.
+    if key and len(key) >= 5:
+        for comp in competitors:
+            if "/" in comp or len(comp) < 5:
+                continue
+            if comp.startswith(key) or key.startswith(comp):
+                return True
     for link in links:
         lk = (link or "").strip().lower().replace("https://", "").replace(
             "http://", "").replace("www.", "").rstrip("/")

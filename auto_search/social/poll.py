@@ -108,8 +108,16 @@ def _tally_skip(summary: dict, reason: str) -> None:
 
 
 def _tally_result(summary: dict, res) -> None:
+    """action="qualified" means the QUALIFIER RAN, not that the company passed
+    (2026-07-27: a run reported qualified=16 while prod showed 25/25
+    disqualified — the number went to the operator as an ROI claim). Only a
+    passing verdict counts; a rejection tallies under not_icp, matching the
+    headline-first path's accounting exactly."""
     if res.action == "qualified":
-        summary["qualified"] += 1
+        if res.reason in ("qualified", "needs_review"):
+            summary["qualified"] += 1
+        else:
+            _tally_skip(summary, "not_icp")
     elif res.action == "appended":
         summary["appended"] += 1
     elif not res.accepted:
@@ -247,6 +255,9 @@ async def poll_targets(
                 _tally_skip(summary, "below_threshold")
                 continue
             summary["decision_makers"] += 1
+            if _looks_investor(e.position):
+                _tally_skip(summary, "investor_profile")
+                continue
             kw = {"repo": repo, "op": op, "can_qualify": can_qualify, "abm_lookup": abm_lookup,
                   "competitor_names": _competitor_name_set(targets)}
             if qualify_fn is not None:
@@ -480,3 +491,20 @@ def _competitor_name_set(targets) -> frozenset[str]:
         if url:
             out.add(url)
     return frozenset(out)
+
+
+_INVESTOR_RE = re.compile(
+    r"\b(investor|investing|venture|capital|vc|angel|private equity|portfolio)\b",
+    re.IGNORECASE)
+_HC_HINT_RE = re.compile(
+    r"health|medical|hospital|clinic|care|physician|rcm|revenue cycle|behavioral"
+    r"|dental|pediatr|oncol|nurs|payer|payor", re.IGNORECASE)
+
+
+def _looks_investor(headline: str | None) -> bool:
+    """Investor/VC headline with no healthcare marker → not a buyer, skip free.
+    "Partner at Meridian Street Capital" drops; "CEO at Capital Health" keeps
+    (the healthcare hint wins). Competitor-exec audiences are dense in this
+    class — 2026-07-27 run paid the LLM to reject CVC and Stage 2 Capital."""
+    h = headline or ""
+    return bool(_INVESTOR_RE.search(h)) and not _HC_HINT_RE.search(h)

@@ -50,8 +50,20 @@ def _run(script: str, *args: str) -> tuple[int, str]:
     tracebacks and logging go) is captured for the alert, then re-printed so
     the full log still lives in Railway."""
     print(f"\n=== {script} {' '.join(args)} ===", flush=True)
-    p = subprocess.run([sys.executable, str(_SCRIPTS / script), *args],
-                       stderr=subprocess.PIPE, text=True)
+    try:
+        # 1h hard cap per leg (review 2026-07-27): a leg hanging at interpreter
+        # finalization (the Jul 24-27 class) must never wedge the whole daily
+        # run — Railway would count it as still-active and stop scheduling.
+        p = subprocess.run([sys.executable, str(_SCRIPTS / script), *args],
+                           stderr=subprocess.PIPE, text=True, timeout=3600)
+    except subprocess.TimeoutExpired as e:
+        err = f"{script} exceeded the 1h leg cap — killed (likely hang)"
+        if e.stderr:
+            err += "\n" + (e.stderr if isinstance(e.stderr, str)
+                           else e.stderr.decode(errors="replace"))
+        sys.stderr.write(err + "\n")
+        sys.stderr.flush()
+        return 124, err
     if p.stderr:
         sys.stderr.write(p.stderr)
         sys.stderr.flush()
@@ -71,6 +83,11 @@ def _leg(name: str, script: str, *args: str) -> tuple[int, str, bool]:
     return rc2, err2, False
 
 
+# Repos opened in-process (the legs themselves are subprocesses). Closed on the
+# way out so nothing is left for the interpreter to join — see ops/shutdown.py.
+_POOLS: list = []
+
+
 def _report(failed: dict[str, str], recovered: list[str]) -> None:
     """Stamps + Slack alerts. Best-effort by construction: any exception here
     is swallowed — reporting must never change the run's outcome."""
@@ -81,6 +98,7 @@ def _report(failed: dict[str, str], recovered: list[str]) -> None:
         from auto_search.ops import alerts
 
         repo = get_engagement_repository()
+        _POOLS.append(repo)                     # closed by main()'s hard_exit
         now = datetime.now(UTC).isoformat()
         repo.set_setting("ops_daily_last_run", now)
         if not failed:
@@ -178,4 +196,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # run_entrypoint (os._exit), not sys.exit: interpreter finalization tries to
+    # join psycopg's pool threads and can raise PythonFinalizationError / hang
+    # forever, leaving a container Railway still counts as running — so the cron
+    # stops ticking. It hard-exits even if main() raises.
+    from auto_search.ops.shutdown import run_entrypoint
+    run_entrypoint(main, pools=_POOLS)

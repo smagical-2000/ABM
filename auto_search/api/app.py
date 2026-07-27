@@ -27,6 +27,7 @@ import re
 import secrets as _secrets
 import time
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -111,27 +112,66 @@ class RejectBody(BaseModel):
 _BATCH_CONCURRENCY = max(1, int(os.getenv("SCORING_BATCH_CONCURRENCY", "4")))
 
 
-def _schedule_coro(app: FastAPI, coro) -> None:
+# Ceiling for any list endpoint's `limit`. Bounds a single response (the inbox
+# already served 552 KB at limit=100000) without 422-ing a client that asks for
+# more than exists.
+_MAX_PAGE = 1000
+
+
+def _clamp_limit(value: int, maximum: int = _MAX_PAGE) -> int:
+    """0 <= limit <= maximum, clamped at the route layer.
+
+    Raw ints reached SQL `LIMIT %s` unvalidated: limit=-1 made Postgres raise
+    and the client got a bare 500 (/api/news, /api/engagement/inbox). Clamping
+    rather than 422-ing keeps every current caller working; limit=0 means an
+    EMPTY page, which is also why the changelog's old `max(1, limit)` had to go
+    (it turned "give me none" into "give me the newest one").
+    """
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return maximum
+    return max(0, min(n, maximum))
+
+
+def _schedule_coro(app: FastAPI, coro, *, busy_flag: str | None = None) -> bool:
     """Run a coroutine in the background, callable from sync or async handlers.
 
     Sync handlers run in a threadpool with no running loop, so we hand the
     coroutine to the main loop captured at startup; async handlers schedule it
     on their own loop. Either way the HTTP response returns immediately.
+
+    Returns True when the coroutine was handed to a loop. `busy_flag` names the
+    app.state single-flight flag the CALLER set before scheduling: every such
+    coroutine clears its own flag in a finally, so if the coroutine never runs
+    that finally never fires and the flag stays True until the container
+    restarts — every later sync answering {busy: true} forever (COO QA
+    2026-07-27). Clearing it here, in a finally, is the one place that covers
+    both the no-loop drop path and any unexpected scheduling failure.
     """
+    scheduled = False
     try:
-        loop = asyncio.get_running_loop()
-        task = loop.create_task(coro)
-    except RuntimeError:
-        loop = getattr(app.state, "loop", None)
-        if loop is None:
-            # Should never happen once the app has started; loud so dropped paid
-            # work is never silent.
-            logger.error("no event loop to schedule background work — DROPPING it")
-            coro.close()
-            return
-        task = asyncio.run_coroutine_threadsafe(coro, loop)
-    app.state.scoring_tasks.add(task)
-    task.add_done_callback(lambda t: app.state.scoring_tasks.discard(t))
+        try:
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(coro)
+        except RuntimeError:
+            loop = getattr(app.state, "loop", None)
+            if loop is None:
+                # Should never happen once the app has started; loud so dropped paid
+                # work is never silent.
+                logger.error("no event loop to schedule background work — DROPPING it")
+                coro.close()
+                return False
+            task = asyncio.run_coroutine_threadsafe(coro, loop)
+        app.state.scoring_tasks.add(task)
+        task.add_done_callback(lambda t: app.state.scoring_tasks.discard(t))
+        scheduled = True
+        return True
+    finally:
+        if not scheduled and busy_flag:
+            logger.error("background work dropped — clearing %s so the endpoint "
+                         "does not stay busy until restart", busy_flag)
+            setattr(app.state, busy_flag, False)
 
 
 def _claim_scoring(app: FastAPI, account_id: str) -> bool:
@@ -306,7 +346,8 @@ def _engagement_intent_signals(engagement_repo, name: str,
     return []
 
 
-def _classify_import_row(name, account_id, *, get_company, exists):
+def _classify_import_row(name, account_id, *, get_company, exists,
+                         domain=None, domain_of=None):
     """Decide what to do with one imported CSV row, by company IDENTITY — not the
     import's own id scheme, which is exactly why duplicates slipped through:
 
@@ -315,16 +356,44 @@ def _classify_import_row(name, account_id, *, get_company, exists):
               (it leaves the Discovery panel) instead of making a signal-less twin
       "new"   not seen → create a fresh CSV account
 
-    `get_company(key) -> PanelCompany|None` and `exists(account_id) -> bool` are
-    injected so this is unit-testable without the app. Returns (action, company).
+    Domain veto (2026-07-27 merge audit): a name-key hit whose stored domain
+    provably differs from the row's own domain is a DIFFERENT company — the row
+    gets its own account instead of being skipped/merged into the impostor
+    (an imported Healthfirst NY was silently swallowed by Florida's hf.org).
+
+    `get_company(key) -> PanelCompany|None`, `exists(account_id) -> bool` and
+    `domain_of(account_id) -> str|None` are injected so this is unit-testable
+    without the app. Returns (action, company).
     """
+    from auto_search.normalize import registrable_domain
+
+    def _conflicts(stored):
+        ra, rb = registrable_domain(domain), registrable_domain(stored)
+        return bool(ra and rb and ra != rb)
+
     key = normalize_company_name(name)
-    if exists("acc_" + key) or exists(account_id):
-        return "skip", None
+    for existing_id in ("acc_" + key, account_id):
+        if exists(existing_id):
+            if _conflicts(domain_of(existing_id) if domain_of else None):
+                # The row's own csv_<name> id would collide with the incumbent
+                # and upsert_account is ON CONFLICT DO UPDATE — "separate
+                # account" must mean a DISTINCT id, or the veto becomes an
+                # in-place hijack of the existing company (review 2026-07-27).
+                salt = re.sub(r"[^a-z0-9]+", "",
+                              registrable_domain(domain) or "conflict")
+                logger.info("import: %r domain %s conflicts with existing %s — "
+                            "creating a separate account", name, domain, existing_id)
+                return "new", None, f"{account_id}__{salt}"
+            return "skip", None, None
     company = get_company(key)
     if company is not None and getattr(company, "icp_status", None) in ("qualified", "needs_review"):
-        return "move", company
-    return "new", None
+        if _conflicts(getattr(company, "domain", None)):
+            logger.info("import: %r domain %s conflicts with discovery %s — "
+                        "creating a separate account", name, domain,
+                        getattr(company, "company_key", key))
+            return "new", None, None
+        return "move", company, None
+    return "new", None, None
 
 
 # Upload caps: a CSV import is raw-bodied, so bound it to avoid an OOM body or a
@@ -766,7 +835,8 @@ def create_app() -> FastAPI:
         if not hasattr(repo, "news_items"):
             return {"items": [], **base}
         topics = (topic,) if topic in news.TOPICS else None
-        return {"items": repo.news_items(topics=topics, days=days, limit=limit), **base}
+        return {"items": repo.news_items(topics=topics, days=max(0, days),
+                                         limit=_clamp_limit(limit)), **base}
 
     @app.post("/api/news/refresh")
     def news_refresh(reenrich: bool = False):
@@ -795,7 +865,7 @@ def create_app() -> FastAPI:
                 op.finish()
                 app.state.news_running = False
 
-        _schedule_coro(app, _run())
+        _schedule_coro(app, _run(), busy_flag="news_running")
         return {"started": True}
 
     @app.post("/api/news/competitors/run")
@@ -818,7 +888,7 @@ def create_app() -> FastAPI:
             finally:
                 app.state.news_running = False
 
-        _schedule_coro(app, _run())
+        _schedule_coro(app, _run(), busy_flag="news_running")
         return {"started": True}
 
     # ── engagement (Reply.io heat) ──────────────────────────────────────────────
@@ -1064,7 +1134,7 @@ def create_app() -> FastAPI:
         all_contacts = repo.contacts()
         tier_by_contact = {c["external_id"]: c.get("match_tier") for c in all_contacts}
         events = []
-        for e in repo.recent_events(limit=limit):
+        for e in repo.recent_events(limit=_clamp_limit(limit)):
             aid = e.get("account_id")
             disp = scored.get(aid) or abm.get(aid) or {}
             events.append({
@@ -1328,7 +1398,7 @@ def create_app() -> FastAPI:
         return {"enabled": engagement_notify.live_routing(), "source": "env"}
 
     @app.post("/api/engagement/notify-changes")
-    def engagement_notify_changes(dry_run: bool = False, seed: bool = False, limit: int = 0,
+    def engagement_notify_changes(dry_run: bool = True, seed: bool = False, limit: int = 0,
                                   stage: str = "", allow_burst: bool = False):
         """Auto AE/SDR push. Posts a card when an account's tier ROSE above the last tier
         we notified it at (Some/Warm → SDR, Hot → AE) — OR when an already-Hot account gets
@@ -1336,6 +1406,12 @@ def create_app() -> FastAPI:
         new). Downward drift never re-sends. Respects the live-routing toggle (OFF → private
         test channel, plain names). Ledger = `notified_tiers` (account_id -> {tier, touch}).
           dry_run=true  → return what WOULD fire; no posts, no ledger change.
+                          THIS IS THE DEFAULT (COO QA 2026-07-27): a bare
+                          authenticated POST used to fire real cards at the
+                          AE/SDR routing, so one curl slip or script bug reached
+                          live sales channels. Sending is now an explicit act —
+                          pass dry_run=false. Every scheduled caller does
+                          (scripts/run_engagement_notify.py).
           seed=true     → baseline EVERY account to its CURRENT tier + latest touch WITHOUT
                           posting — the go-forward line. Nothing fires until a tier rise or
                           a NEW touch on a Hot account happens AFTER the seed. Run once when
@@ -1356,7 +1432,11 @@ def create_app() -> FastAPI:
         audit_rep = engagement_audit.run_invariants(
             repo, getattr(app.state, "scoring_repo", None), app.state.repo,
             rows=board)
-        if not audit_rep["ok"] and not dry_run:
+        # `seed or not dry_run` = "this call WRITES something" — seeding rewrites
+        # the whole baseline and has never honoured dry_run, so it must stay
+        # gated now that dry_run defaults to true (2026-07-27). Only a pure dry
+        # inspection passes through: it IS how a human looks at a red board.
+        if not audit_rep["ok"] and (seed or not dry_run):
             logger.error("notify HELD by audit: %s", audit_rep["violations"])
             if repo.get_setting("audit_alerts") == "1":
                 from auto_search.ops import alerts as ops_alerts
@@ -1384,6 +1464,12 @@ def create_app() -> FastAPI:
             # Baseline the TRIGGER clock (MAR2-44 #1, 2026-07-23): the gates
             # compare trigger_touch against this record — seeding the display
             # clock would bake a click-armed (newer) baseline into the ledger.
+            # Fresh-read before writing (review 2026-07-27): sends now persist
+            # per card, so a card recorded while this handler was computing must
+            # not be clobbered by our stale snapshot — merge the baseline INTO
+            # the latest ledger (record_notified is merge-strongest, so a fresh
+            # send entry survives a weaker seed row).
+            ledger = json.loads(repo.get_setting("notified_tiers") or "{}")
             for a in board:
                 engagement_notify.record_notified(
                     ledger, a, a.get("tier") or "Lower",
@@ -1472,6 +1558,36 @@ def create_app() -> FastAPI:
         live = (not staged) and _live_routing_state(repo)["enabled"]
         ids_override = None if live else {}   # None = env ids (ping); {} = plain @Name (test)
         app_base = os.getenv("ENGAGEMENT_APP_URL")   # deep-link back to the ABM console
+
+        def _persist_notified(target: dict, account: dict, tier: str, touch) -> None:
+            """Record ONE delivered card and flush it NOW (COO QA 2026-07-27).
+
+            Two failures this closes, both live-channel duplicate-ping class:
+              · partial state — the ledger used to be written once AFTER the
+                loop, so any mid-loop raise (a dropped psycopg connection in
+                events_for_account, a deploy/OOM restart) left every card
+                already delivered in that run unrecorded, and the next trigger
+                re-posted all of them.
+              · read-modify-write race — three triggers can overlap (daily
+                cron leg, the TOFU runner's event-driven push, a human in the
+                console). Re-reading the stored ledger immediately before the
+                write and merge-strongest-ing our entry onto it narrows the RMW
+                window from "the whole send loop" to this single upsert, so a
+                concurrent run's entries are no longer silently discarded.
+            Merge direction is the same merge-strongest used everywhere else:
+            identity churn can only ever SUPPRESS a duplicate, never invent one.
+            """
+            key = "notified_tiers_test" if staged else "notified_tiers"
+            engagement_notify.record_notified(target, account, tier, touch)
+            try:
+                fresh = json.loads(repo.get_setting(key) or "{}")
+            except (TypeError, ValueError):     # corrupt setting: ours still lands
+                fresh = {}
+            merged = engagement_notify.merge_ledgers(fresh, target)
+            target.clear()
+            target.update(merged)
+            repo.set_setting(key, json.dumps(merged))
+
         fired, posted = [], 0
         for d in due:
             a, tier, is_ae = d["account"], d["tier"], d["role"] == "ae"
@@ -1500,25 +1616,17 @@ def create_app() -> FastAPI:
                                                         test=staged, reason=d.get("reason"))
                 entry["posted"] = bool(ok)
                 if ok:
-                    if staged:
-                        # TEST memory only — real ledger untouched, so the live
-                        # push still sees this account as due after verification.
-                        engagement_notify.record_notified(test_ledger, a, tier,
-                                                          d.get("touch"))
-                    else:
-                        # Record BOTH tier and the touch we just notified on, so the
-                        # same activity can't re-fire but a genuinely newer touch can.
-                        # Company-keyed + merge-strongest (MAR2-31): survives
-                        # account-id re-keys, and a weaker twin can never
-                        # downgrade the company's recorded state.
-                        engagement_notify.record_notified(ledger, a, tier, d.get("touch"))
+                    # Persisted per card, the instant it lands (see
+                    # _persist_notified). staged → TEST memory only, so the real
+                    # ledger stays untouched and the live push still sees this
+                    # account as due after verification; live → record BOTH tier
+                    # and the touch we just notified on, so the same activity
+                    # can't re-fire but a genuinely newer touch can
+                    # (company-keyed + merge-strongest, MAR2-31).
+                    _persist_notified(test_ledger if staged else ledger, a, tier,
+                                      d.get("touch"))
                     posted += 1
             fired.append(entry)
-        if not dry_run and posted:
-            if staged:
-                repo.set_setting("notified_tiers_test", json.dumps(test_ledger))
-            else:
-                repo.set_setting("notified_tiers", json.dumps(ledger))
         return {"due": len(due), "posted": posted, "live": live,
                 "stage": "test" if staged else "live",
                 "dry_run": dry_run, "detail": fired[:60]}
@@ -1555,7 +1663,11 @@ def create_app() -> FastAPI:
         if not repo:
             raise HTTPException(status_code=503, detail="store not available")
         entries = json.loads(repo.get_setting("automation_changelog") or "[]")
-        return {"entries": entries[-max(1, limit):][::-1], "total": len(entries)}
+        n = _clamp_limit(limit)
+        # entries[-0:] is the WHOLE list, so limit=0 needs its own branch (the
+        # old max(1, limit) turned it into "the newest one" instead).
+        page = entries[-n:] if n else []
+        return {"entries": page[::-1], "total": len(entries)}
 
     @app.post("/api/ops/changelog")
     async def ops_changelog_add(request: Request):
@@ -1786,7 +1898,7 @@ def create_app() -> FastAPI:
             finally:
                 app.state.engagement_running = False
 
-        _schedule_coro(app, _run())
+        _schedule_coro(app, _run(), busy_flag="engagement_running")
         return {"started": True}
 
     @app.post("/api/engagement/sfdc/sync")
@@ -1814,7 +1926,7 @@ def create_app() -> FastAPI:
             finally:
                 app.state.engagement_running = False
 
-        _schedule_coro(app, _run())
+        _schedule_coro(app, _run(), busy_flag="engagement_running")
         return {"started": True}
 
     @app.post("/api/engagement/linkedin/run")
@@ -2130,7 +2242,8 @@ def create_app() -> FastAPI:
         now = time.time()
         if cache and (now - cache["at"] < 600):
             return cache["index"]
-        index = engagement_sync_mod.build_index(app.state.scoring_repo, app.state.repo)
+        index = engagement_sync_mod.build_index(app.state.scoring_repo, app.state.repo,
+                                                app.state.engagement_repo)
         app.state.cross_index_cache = {"at": now, "index": index}
         return index
 
@@ -2220,7 +2333,28 @@ def create_app() -> FastAPI:
         m = _cross_index_cached().match(company=company, email=lead.get("emailAddress"))
         if not m:
             return {"ok": True, "matched": False}       # untracked company — dropped
-        now_iso = datetime.now(UTC).isoformat()
+        # IDEMPOTENT REDELIVERY (COO QA 2026-07-27). HeyReach retries any
+        # non-2xx and duplicate registrations fan out per campaign, while
+        # add_event's ON CONFLICT overwrites occurred_at with EXCLUDED — so a
+        # redelivery of a July-18 accept used to restamp it as today,
+        # advancing last_real_touch and re-arming notify's hot_activity gate:
+        # a ghost "Hot again" card with zero real activity (the MAR2-44
+        # phantom-reactivation class, reintroduced via webhooks). Two guards:
+        #   1. take the event's OWN timestamp when HeyReach sends one, so a
+        #      replay is a byte-identical write;
+        #   2. drop the delivery outright when this external_id is stored —
+        #      covers payloads that carry no timestamp at all.
+        event_ext = f"linkedin:{kind}:{profile or company}"
+        payload_ts = campaigns_responses.heyreach_event_time(body)
+        # Guard 2 applies ONLY to timestamp-less payloads (review 2026-07-27):
+        # with a payload timestamp, a replay is a byte-identical write (guard 1)
+        # while a GENUINE second reply carries a NEW timestamp and must advance
+        # the touch — dropping every repeat external_id forever discarded exactly
+        # the repeat engagement the platform exists to catch. The id-scan also
+        # only runs on this rare branch (it reads every stored heyreach id).
+        if payload_ts is None and event_ext in erepo.external_ids_for_source("heyreach"):
+            return {"ok": True, "matched": True, "kind": kind, "duplicate": True}
+        now_iso = payload_ts or datetime.now(UTC).isoformat()
         erepo.upsert_contact({
             "source": "heyreach", "external_id": f"li:{profile or company}",
             "email": lead.get("emailAddress"), "company": company,
@@ -2229,7 +2363,7 @@ def create_app() -> FastAPI:
             "match_tier": m.tier, "matched_lists": list(m.lists)})
         erepo.add_event({
             "source": "heyreach",
-            "external_id": f"linkedin:{kind}:{profile or company}",
+            "external_id": event_ext,
             "channel": "linkedin", "kind": kind,
             "points": engagement_scoring.points_for(kind),
             "contact_ext": f"li:{profile or company}", "company": company,
@@ -2304,6 +2438,16 @@ def create_app() -> FastAPI:
                                        "before a live enrollment run")
         from auto_search.engagement.replyio_client import ReplyioClient
         client = ReplyioClient()                    # raises clearly if the key is absent
+        # CHECK-AND-CLAIM, atomically (COO QA 2026-07-27). The busy check at the
+        # top of the handler is separated from this claim by `await
+        # _json_body(request)` and the settings reads — the event loop yields in
+        # between, so a double-clicked Run (or a retrying UI) passed the check
+        # twice and started two live enrollment passes over the same accounts:
+        # the ledger double-records and HeyReach add_leads has no
+        # 409-on-existing softener. These two statements have no await between
+        # them, so nothing can slip through the door once it is claimed.
+        if getattr(app.state, "campaigns_running", False):
+            return {"started": False, "busy": True}
         app.state.campaigns_running = True
 
         async def _run() -> None:
@@ -2320,7 +2464,7 @@ def create_app() -> FastAPI:
             finally:
                 app.state.campaigns_running = False
 
-        _schedule_coro(app, _run())
+        _schedule_coro(app, _run(), busy_flag="campaigns_running")
         return {"started": True, "dry_run": False}
 
     @app.post("/api/campaigns/enroll")
@@ -2728,7 +2872,7 @@ def create_app() -> FastAPI:
                 app.state.social_running = False
                 app.state.run_phase = None
 
-        _schedule_coro(app, _run())
+        _schedule_coro(app, _run(), busy_flag="social_running")
         return {"started": True, "window": window,
                 "accounts": len(active) if do_accounts else 0,
                 "keywords": len(keywords) if do_events else 0}
@@ -2919,7 +3063,7 @@ def create_app() -> FastAPI:
             app.state.discovery_running = False
             app.state.run_phase = None
 
-        _schedule_coro(app, _run())
+        _schedule_coro(app, _run(), busy_flag="discovery_running")
         return {"started": True,
                 "sources": sources or list(discovery_runner.BROWSERLESS_SOURCES),
                 "limit": limit}
@@ -3356,15 +3500,22 @@ def create_app() -> FastAPI:
         svc_ = svc(app)
         scoring = app.state.scoring
         csv_fresh, moved, skipped = [], [], 0
+        srepo = getattr(app.state, "scoring_repo", None)
+        dom_by_id = {r.get("account_id"): r.get("domain")
+                     for r in (srepo.list_accounts()
+                               if hasattr(srepo, "list_accounts") else [])}
         for a in result.accounts:
-            action, company = _classify_import_row(
-                a.name, a.account_id, get_company=svc_.get_company, exists=scoring.exists)
+            action, company, new_id = _classify_import_row(
+                a.name, a.account_id, get_company=svc_.get_company,
+                exists=scoring.exists, domain=a.domain, domain_of=dom_by_id.get)
             if action == "skip":
                 skipped += 1
             elif action == "move":
                 svc_.promote(company.company_key)          # leaves the Discovery panel
                 moved.append(scoring.enqueue_discovery(company.model_dump(), state="queued"))
             else:
+                if new_id:   # domain-conflict row: distinct id, never an overwrite
+                    a = replace(a, account_id=new_id)
                 csv_fresh.append(a)
         csv_rows = scoring.enqueue_csv(csv_fresh, state="queued", import_label=label)
         # Report flags only for rows that actually imported this run — a
@@ -3559,7 +3710,7 @@ def create_app() -> FastAPI:
         op = spend_guard.Operation(app.state.scoring_repo, "score_batch",
                                    estimated_usd=estimate, accounts_planned=len(targets))
         app.state.batch_running = True
-        _schedule_coro(app, _run_batch(app, targets, op=op))
+        _schedule_coro(app, _run_batch(app, targets, op=op), busy_flag="batch_running")
         return {"started": len(targets), "busy": True,
                 "budget_capped": len(targets) < requested,
                 "estimated_usd": estimate, "operation_id": op.id, "budget": summary}

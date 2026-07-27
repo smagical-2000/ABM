@@ -111,6 +111,19 @@ class TestWarntrackerStaleTripwire:
             async for _ in c.pull(since=NOW - timedelta(days=365)):
                 pass
 
+    async def test_the_raised_message_carries_the_verdict(self, tmp_path, monkeypatch):
+        """UPSTREAM-DEAD (2026-07-27): warntracker.com itself froze in April, so
+        the alert must say REPLACE, not retry. run_discovery puts this string
+        straight into the ops card, and it must survive the per-source clip."""
+        c = _cached_connector(tmp_path, monkeypatch,
+                              [_warn_row(NOW - timedelta(days=90))])
+        with pytest.raises(RuntimeError) as ei:
+            async for _ in c.pull(since=NOW - timedelta(days=365)):
+                pass
+        msg = str(ei.value)
+        assert "REPLACE the source" in msg
+        assert len(f"RuntimeError: {msg}") <= 280
+
     async def test_fresh_feed_passes_and_yields(self, tmp_path, monkeypatch):
         rows = [_warn_row(NOW - timedelta(days=2))]
         c = _cached_connector(tmp_path, monkeypatch, rows)
@@ -141,14 +154,22 @@ class _FakeStateRepo:
         self._kv[key] = value
 
 
-def _fake_discovery_repo(last_by_source: dict[str, int]) -> object:
+def _fake_discovery_repo(last_by_source: dict[str, int],
+                         parked_days_ago: list[int] | None = None) -> object:
     """A JsonFileRepository-shaped fake: `_store` rows whose FIRST signal names
-    the producing source, first_seen_at = days-ago per the map."""
+    the producing source, first_seen_at = days-ago per the map. `parked_days_ago`
+    seeds the jobs watch ledger (first_parked_at per entry)."""
 
     class _Repo:
-        pass
+        def __init__(self, parked):
+            self._parked = parked
 
-    repo = _Repo()
+        def parked_companies(self):
+            return self._parked
+
+    repo = _Repo([{"company_key": f"parked_{i}",
+                   "first_parked_at": (NOW - timedelta(days=d)).isoformat()}
+                  for i, d in enumerate(parked_days_ago or [])])
     repo._store = {
         f"co_{src}": {
             "first_seen_at": (NOW - timedelta(days=days)).isoformat(),
@@ -214,6 +235,64 @@ class TestZeroStreak:
         assert calls == []
 
 
+# ── (f) jobs streak attribution: board sources collapse to 'jobs' ────
+# 2026-07-27: the digest said "jobs: NEVER produced a company" every single day
+# while jobs was the platform's TOP producer (393 companies attributed to
+# 'indeed', 446 to 'linkedin' in prod). JobPostingsConnector.source_name is
+# 'jobs', but the RawSignals it emits are tagged per BOARD, so the streak's
+# lookup of 'jobs' was None forever. A permanently-breaching tripwire trains
+# readers to ignore it — alarm fatigue on the one alert built to be trusted.
+
+
+class TestJobsSourceAliases:
+    def test_board_sources_collapse_into_jobs(self):
+        repo = _fake_discovery_repo({"indeed": 5, "linkedin": 1})
+        last = source_streaks.last_new_by_source(repo)
+        assert "jobs" in last                       # was absent → "NEVER produced"
+        # per-board keys are KEPT (review 2026-07-27): a dead board must stay
+        # visible alongside the collapsed aggregate
+        assert "indeed" in last and "linkedin" in last
+        # newest of the two boards wins (linkedin, 1 day ago)
+        assert (NOW - last["jobs"]).days == 1
+
+    def test_jobs_is_fresh_and_not_never(self):
+        repo = _fake_discovery_repo({"indeed": 1})
+        row = next(s for s in source_streaks.compute_streaks(repo, now=NOW)
+                   if s["source"] == "jobs")
+        assert row["days_silent"] is not None       # not "NEVER produced"
+        assert not row["breached"]
+
+    def test_digest_line_no_longer_names_jobs(self):
+        ages = {src: 1 for src in source_streaks.THRESHOLDS if src != "jobs"}
+        ages["indeed"] = 1
+        line = source_streaks.format_digest_line(
+            source_streaks.compute_streaks(_fake_discovery_repo(ages), now=NOW))
+        assert "jobs" not in line
+        assert "all 10 fresh" in line
+
+    def test_a_run_where_every_find_parks_still_counts_as_alive(self):
+        # The stacking gate parks lone standard hires: a legitimate run can find
+        # real companies and create ZERO discovery_companies rows. That is the
+        # source working, not dying — the streak reads the watch ledger's
+        # first_parked_at (a NEW park; re-parking an old company can't refresh it).
+        repo = _fake_discovery_repo({"indeed": 30}, parked_days_ago=[1])
+        row = next(s for s in source_streaks.compute_streaks(repo, now=NOW)
+                   if s["source"] == "jobs")
+        assert not row["breached"]
+
+    def test_stale_parks_do_not_mask_a_dead_jobs_source(self):
+        repo = _fake_discovery_repo({"indeed": 30}, parked_days_ago=[25])
+        row = next(s for s in source_streaks.compute_streaks(repo, now=NOW)
+                   if s["source"] == "jobs")
+        assert row["breached"]
+
+    def test_parked_ledger_only_helps_jobs(self):
+        repo = _fake_discovery_repo({"warntracker": 40}, parked_days_ago=[1])
+        row = next(s for s in source_streaks.compute_streaks(repo, now=NOW)
+                   if s["source"] == "warntracker")
+        assert row["breached"]
+
+
 # ── (e) leadership server-side params: seniorities, not positions ────
 
 
@@ -244,3 +323,31 @@ class TestLeadershipServerParams:
         assert fake.kwargs["seniorities"] == "c_level,vp,director"
         assert "positions" not in fake.kwargs       # dead feed no longer requested
         assert fake.kwargs["date_preset"] != "today"
+
+
+class TestPerBoardJobsStreaks:
+    """Review 2026-07-27: the 'jobs' collapse must not hide a single board
+    dying while its sibling produces — indeed/linkedin get their own rows."""
+
+    def test_dead_indeed_breaches_while_jobs_stays_fresh(self):
+        from datetime import UTC, datetime, timedelta
+
+        from auto_search.ops import source_streaks as ss
+        now = datetime(2026, 7, 27, 14, 0, tzinfo=UTC)
+        raw = {"indeed": now - timedelta(days=12),   # dead board
+               "linkedin": now - timedelta(days=1)}  # healthy sibling
+        collapsed = ss._collapse(raw)
+        assert collapsed["jobs"] == raw["linkedin"]   # aggregate fresh
+        assert collapsed["indeed"] == raw["indeed"]   # board row survives
+        assert "indeed" in ss.THRESHOLDS and "linkedin" in ss.THRESHOLDS
+
+    def test_both_boards_fresh_no_per_board_breach(self):
+        from datetime import UTC, datetime, timedelta
+
+        from auto_search.ops import source_streaks as ss
+        now = datetime(2026, 7, 27, 14, 0, tzinfo=UTC)
+        raw = {"indeed": now - timedelta(days=1),
+               "linkedin": now - timedelta(days=1)}
+        collapsed = ss._collapse(raw)
+        assert collapsed["indeed"] == raw["indeed"]
+        assert collapsed["jobs"] == raw["linkedin"] or collapsed["jobs"] == raw["indeed"]

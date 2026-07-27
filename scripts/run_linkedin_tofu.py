@@ -37,6 +37,8 @@ from auto_search.db import get_repository
 from auto_search.db.engagement_repository import get_engagement_repository
 from auto_search.db.scoring_repository import get_scoring_repository
 from auto_search.engagement import linkedin_ads, linkedin_ads_runner
+from auto_search.ops.logsetup import quiet_http_logs
+from auto_search.ops.shutdown import close_pools, run_entrypoint
 
 load_dotenv()   # no override: an operator-exported env (e.g. DATABASE_URL) must win
                 # (2026-07-08: override=True let a local .env silently redirect a
@@ -47,6 +49,17 @@ _DEFAULT_CSV = (Path(__file__).resolve().parent.parent
                 / "auto_search" / "engagement" / "linkedin_tofu_shares.csv")
 
 _SYNC_SOURCE = "linkedin_tofu"   # sync_state key for the cost-guard throttle
+
+# Every repository this run opened. Each one owns a psycopg ConnectionPool with
+# worker threads, and this leg opens three — main() closes them in a finally so
+# the process has nothing left to join on the way out (see ops/shutdown.py).
+_OPENED: list = []
+
+
+def _opened(repo):
+    """Register a repo for shutdown, and return it."""
+    _OPENED.append(repo)
+    return repo
 
 
 def _within_active_hours(now: datetime | None = None) -> bool:
@@ -100,6 +113,23 @@ def _recovery_alert(repo) -> None:
         logger.warning("ops recovery alert failed (continuing)")
 
 
+def _stamp_attempt(repo, status: str, *, dry_run: bool, stats: dict | None = None) -> None:
+    """Record that a REAL (spending) attempt happened, so the min-interval cost
+    throttle counts it. Both outcomes stamp: the throttle guards SPEND, and a
+    failed run has usually already paid Apify. `last_synced_at` is passed
+    explicitly because set_sync_state only auto-stamps on success/failed — a
+    future status string would silently leave it NULL (→ never throttles).
+    Dry runs never spend, so they never arm the throttle. Best-effort: a stamp
+    failure must not change the run's outcome."""
+    if dry_run:
+        return
+    try:
+        repo.set_sync_state(source=_SYNC_SOURCE, status=status, stats=stats,
+                            last_synced_at=datetime.now(UTC))
+    except Exception:  # noqa: BLE001
+        logger.warning("sync-state stamp failed (throttle may not apply next tick)")
+
+
 def _hours_since(ts) -> float | None:
     """Hours since an ISO/datetime timestamp, or None if unset/unparseable."""
     if not ts:
@@ -115,6 +145,15 @@ def _hours_since(ts) -> float | None:
 
 
 def main() -> int:
+    """Thin wrapper so every exit path closes the pools this run opened."""
+    try:
+        return _run()
+    finally:
+        close_pools(_OPENED)
+        _OPENED.clear()
+
+
+def _run() -> int:
     ap = argparse.ArgumentParser(description="LinkedIn TOFU ad-engagement run")
     ap.add_argument("--dry-run", action="store_true",
                     help="no writes; ignores the enable flag (for testing)")
@@ -130,6 +169,7 @@ def main() -> int:
                     help="bypass the min-interval cost throttle (manual immediate run)")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    quiet_http_logs()   # httpx INFO prints the full request URL (secret hygiene)
     # Deploy-verification stamp: every tick prints the code revision it runs, so
     # "is the fix actually live?" is answered by the logs, never by deploy status.
     # (A stale Docker layer cache once served old code under a SUCCESS deploy.)
@@ -145,55 +185,69 @@ def main() -> int:
               "live, or pass --dry-run. No-op.", flush=True)
         return 0
 
-    engagement_repo = get_engagement_repository()
-    engagement_repo.ensure_schema()
-    # Liveness stamp for the ops watchdog: EVERY tick (even a no-op) proves the
-    # 15-min cron is alive; the watchdog alerts when this goes stale in-window.
+    engagement_repo = _opened(get_engagement_repository())
+    # Setup leg: schema, cost gates, the shares CSV, Airtable/Reply construction
+    # (a rotated PAT or missing AIRTABLE_* env raises in the constructor). These
+    # used to die as bare tracebacks whose only signal was the Railway exit code
+    # — the "nobody was told" class ops/alerts.py exists to kill. Alert + rc 1,
+    # but no _stamp_attempt: nothing was spent yet, so the cost throttle stays
+    # disarmed and the next tick may retry immediately. (Failures after the paid
+    # scrape are the NEXT try/except, which does stamp.)
     try:
-        engagement_repo.set_setting("ops_tofu_last_tick", datetime.now(UTC).isoformat())
-    except Exception:  # noqa: BLE001 — liveness stamping must never block the run
-        logger.warning("ops tick stamp failed (continuing)")
+        engagement_repo.ensure_schema()
+        # Liveness stamp for the ops watchdog: EVERY tick (even a no-op) proves the
+        # 15-min cron is alive; the watchdog alerts when this goes stale in-window.
+        try:
+            engagement_repo.set_setting("ops_tofu_last_tick", datetime.now(UTC).isoformat())
+        except Exception:  # noqa: BLE001 — liveness stamping must never block the run
+            logger.warning("ops tick stamp failed (continuing)")
 
-    # Cost guard: the Railway cron ticks every 15 min, but ad reactions barely change and
-    # re-scraping + re-enriching every tick was ~$12/day of Apify. Do the real work only
-    # every LINKEDIN_TOFU_MIN_INTERVAL_HOURS (default 6); other ticks skip BEFORE any spend.
-    # --dry-run and --force bypass it.
-    if not (args.dry_run or args.force) and not _within_active_hours():
-        print("[run_linkedin_tofu] outside active hours — no-op. (--force to override)",
-              flush=True)
-        return 0
-    min_h = float(os.getenv("LINKEDIN_TOFU_MIN_INTERVAL_HOURS", "6"))
-    if not (args.dry_run or args.force) and min_h > 0:
-        last = (engagement_repo.get_sync_state(source=_SYNC_SOURCE) or {}).get("last_synced_at")
-        hrs = _hours_since(last)
-        if hrs is not None and hrs < min_h:
-            print(f"[run_linkedin_tofu] throttled: last run {hrs:.1f}h ago (< {min_h}h) "
-                  "— no-op. (--force to override)", flush=True)
+        # Cost guard: the Railway cron ticks every 15 min, but ad reactions barely change and
+        # re-scraping + re-enriching every tick was ~$12/day of Apify. Do the real work only
+        # every LINKEDIN_TOFU_MIN_INTERVAL_HOURS (default 6); other ticks skip BEFORE any spend.
+        # --dry-run and --force bypass it.
+        if not (args.dry_run or args.force) and not _within_active_hours():
+            print("[run_linkedin_tofu] outside active hours — no-op. (--force to override)",
+                  flush=True)
             return 0
+        min_h = float(os.getenv("LINKEDIN_TOFU_MIN_INTERVAL_HOURS", "6"))
+        if not (args.dry_run or args.force) and min_h > 0:
+            last = (engagement_repo.get_sync_state(source=_SYNC_SOURCE) or {}).get("last_synced_at")
+            hrs = _hours_since(last)
+            if hrs is not None and hrs < min_h:
+                print(f"[run_linkedin_tofu] throttled: last run {hrs:.1f}h ago (< {min_h}h) "
+                      "— no-op. (--force to override)", flush=True)
+                return 0
 
-    csv_path = args.csv or os.getenv("LINKEDIN_TOFU_CSV") or str(_DEFAULT_CSV)
-    share_categories = linkedin_ads.load_share_categories(Path(csv_path).read_text())
-    if not share_categories:
-        logger.error("no usable share_ids in %s", csv_path)
-        _crash_alert(engagement_repo, f"no usable share_ids in {csv_path}")
+        csv_path = args.csv or os.getenv("LINKEDIN_TOFU_CSV") or str(_DEFAULT_CSV)
+        share_categories = linkedin_ads.load_share_categories(Path(csv_path).read_text())
+        if not share_categories:
+            logger.error("no usable share_ids in %s", csv_path)
+            _crash_alert(engagement_repo, f"no usable share_ids in {csv_path}")
+            return 1
+
+        airtable = reply = mirror = None
+        if not args.dry_run:
+            from auto_search.engagement.airtable_client import AirtableClient
+            from auto_search.engagement.replyio_client import ReplyioClient
+            airtable = AirtableClient()
+            reply = ReplyioClient()
+            # Tracking mirror (Galyna, 2026-07-08): dual-write every lead to the
+            # "TOFU Leads by ABM" base. Unset env -> no mirror, primary unaffected.
+            if os.getenv("AIRTABLE_TOFU_MIRROR_BASE_ID"):
+                mirror = AirtableClient(
+                    base_id=os.environ["AIRTABLE_TOFU_MIRROR_BASE_ID"],
+                    table=os.getenv("AIRTABLE_TOFU_MIRROR_TABLE", "TOFU Leads by ABM"))
+    except Exception:  # noqa: BLE001 — cron leg: alert + rc 1, never a silent traceback
+        logger.exception("[run_linkedin_tofu] setup failed before any spend")
+        import traceback
+        _crash_alert(engagement_repo, traceback.format_exc())
         return 1
-
-    airtable = reply = mirror = None
-    if not args.dry_run:
-        from auto_search.engagement.airtable_client import AirtableClient
-        from auto_search.engagement.replyio_client import ReplyioClient
-        airtable = AirtableClient()
-        reply = ReplyioClient()
-        # Tracking mirror (Galyna, 2026-07-08): dual-write every lead to the
-        # "TOFU Leads by ABM" base. Unset env -> no mirror, primary unaffected.
-        if os.getenv("AIRTABLE_TOFU_MIRROR_BASE_ID"):
-            mirror = AirtableClient(
-                base_id=os.environ["AIRTABLE_TOFU_MIRROR_BASE_ID"],
-                table=os.getenv("AIRTABLE_TOFU_MIRROR_TABLE", "TOFU Leads by ABM"))
     try:
         summary = asyncio.run(linkedin_ads_runner.run(
             share_categories=share_categories, engagement_repo=engagement_repo,
-            scoring_repo=get_scoring_repository(), discovery_repo=get_repository(),
+            scoring_repo=_opened(get_scoring_repository()),
+            discovery_repo=_opened(get_repository()),
             airtable_client=airtable, replyio_client=reply, mirror_client=mirror,
             max_reactions=args.max_reactions,
             max_contacts=args.max_contacts, max_leads=args.max_leads, dry_run=args.dry_run,
@@ -202,6 +256,13 @@ def main() -> int:
         logger.exception("[run_linkedin_tofu] run failed")
         import traceback
         _crash_alert(engagement_repo, traceback.format_exc())
+        # Stamp the FAILED attempt so the 6h cost throttle still applies. A crash
+        # AFTER the paid Apify scrape (Airtable/Reply client construction, a DB
+        # flap inside cross_and_persist) used to leave sync_state untouched, so
+        # the next 15-min tick re-ran the whole paid scan — up to 4x/hour for the
+        # rest of the active window, and the crash alert is throttled to 3h, so
+        # the spend was quiet. --force is still the manual bypass.
+        _stamp_attempt(engagement_repo, "failed", dry_run=args.dry_run)
         return 1
     _recovery_alert(engagement_repo)           # posts once iff a crash alert was open
     # Mirror health: the tracking table's whole job is proving nothing is
@@ -228,11 +289,8 @@ def main() -> int:
                                       title="TOFU tracking mirror healthy again")
         except Exception:  # noqa: BLE001
             logger.warning("mirror recovery alert failed (continuing)")
-    if not args.dry_run:                       # stamp the last real run for the throttle
-        # pass last_synced_at explicitly: set_sync_state only auto-stamps on
-        # status success/failed, so "ok" alone would leave it NULL (→ never throttles).
-        engagement_repo.set_sync_state(source=_SYNC_SOURCE, status="success",
-                                       stats=summary["stats"], last_synced_at=datetime.now(UTC))
+    _stamp_attempt(engagement_repo, "success", dry_run=args.dry_run,
+                   stats=summary["stats"])
     print(f"[run_linkedin_tofu] {'dry-run ' if args.dry_run else ''}ok: {summary['stats']}",
           flush=True)
     # Event-driven handoff: this sync just WROTE new engagement events, so the
@@ -252,4 +310,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # run_entrypoint (os._exit), not sys.exit: interpreter finalization tries to
+    # join psycopg's pool threads and can raise PythonFinalizationError / hang
+    # forever, leaving a container Railway still counts as running — so the cron
+    # stops ticking. It hard-exits even if main() raises.
+    run_entrypoint(main)

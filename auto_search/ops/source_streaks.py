@@ -20,6 +20,12 @@ new cron; the digest card also carries the one-line summary.
 Accepts either discovery repo (Postgres via its pool, JSON via its store) or a
 raw psycopg connection — there is no public repo query for this, and adding
 one to the protocol for a single ops consumer wasn't worth the surface.
+
+ATTRIBUTION (2026-07-27): a connector's declared `source_name` is not always the
+`source` its signals persist under, and the streak must speak the CONNECTOR's
+name — the one in THRESHOLDS, connector_runs and the digest. SOURCE_ALIASES
+collapses the difference (jobs → 'indeed'/'linkedin'); add an entry whenever a
+new connector tags signals per sub-feed, or its streak silently reads "NEVER".
 """
 
 from __future__ import annotations
@@ -45,8 +51,18 @@ RUNBOOK = ("per-source triage lives in the 2026-07-23 live source audit "
 #     qualifying US-healthcare events per week → 10 calendar days;
 #   • own posts follow OUR posting cadence and events follow conference
 #     season — both legitimately sparse → 14 calendar days.
+#
+# The keys here are CONNECTOR names (what an operator reads in the digest and in
+# connector_runs), which is not always what a signal is tagged with in the DB —
+# see SOURCE_ALIASES below.
 THRESHOLDS: dict[str, int] = {
     "jobs": 3,
+    # Per-board jobs rows (review 2026-07-27): the 'jobs' collapse alone hides
+    # a single board dying while its sibling produces (indeed was ~47% of all
+    # jobs discoveries). Wider than the aggregate so one slow board doesn't
+    # double-page, but a dead one names itself within a week.
+    "indeed": 5,
+    "linkedin": 5,
     "social_competitor_post": 3,
     "warntracker": 10,
     "signalbase_leadership": 10,
@@ -55,7 +71,25 @@ THRESHOLDS: dict[str, int] = {
     "social_magical_post": 14,
     "social_event": 14,
 }
-_WEEKDAY_SOURCES = frozenset({"jobs", "social_competitor_post"})
+_WEEKDAY_SOURCES = frozenset({"jobs", "indeed", "linkedin",
+                              "social_competitor_post"})
+
+# Persisted discovery_signals.source -> the THRESHOLDS key it belongs to.
+# JobPostingsConnector declares source_name='jobs' (that is what connector_runs
+# and the digest show), but the RawSignals it emits are tagged per BOARD —
+# source='indeed' / 'linkedin'. So last_by_source['jobs'] was None FOREVER and
+# the digest read "jobs: NEVER produced a company" every single day, while jobs
+# was the platform's top producer (prod 2026-07-27: 393 companies first
+# attributed to 'indeed', 446 to 'linkedin'; newest Jul-24). A tripwire that
+# always fires is a tripwire nobody reads — that is what this collapse fixes.
+SOURCE_ALIASES: dict[str, str] = {"indeed": "jobs", "linkedin": "jobs"}
+
+# The jobs stacking gate parks lone STANDARD hires on the watch ledger instead
+# of creating a discovery_companies row, so a healthy run can legitimately
+# qualify nobody. `first_parked_at` (a NEW park — re-parking an existing company
+# only bumps last_seen_at) is that run's proof of productivity, so it floors the
+# jobs streak. Jobs only: no other source parks.
+_PARK_FLOOR_SOURCE = "jobs"
 
 # A company's first signal (earliest ingested) names the source that DISCOVERED
 # it; per source, the newest such company is the end of its streak. dict_row
@@ -71,15 +105,61 @@ _SQL_LAST_NEW = """
 """
 
 
+_SQL_LAST_PARK = "SELECT MAX(first_parked_at) FROM parked_companies"
+
+
+def _collapse(raw: dict[str, datetime]) -> dict[str, datetime]:
+    """Fold per-board source keys onto their connector key (newest wins), so the
+    streak reads the same names THRESHOLDS and the digest do. The per-board
+    keys are KEPT alongside the collapsed one (review 2026-07-27): a single
+    board dying while its sibling produces would otherwise be invisible —
+    'jobs' would stay fresh forever while half the pipeline is dark. The
+    per-board rows have their own (wider) THRESHOLDS entries."""
+    out: dict[str, datetime] = dict(raw)
+    for src, t in raw.items():
+        key = SOURCE_ALIASES.get(src, src)
+        if key != src and (key not in out or t > out[key]):
+            out[key] = t
+    return out
+
+
+def last_park(repo_or_conn) -> datetime | None:
+    """When the jobs gate last parked a NEW company (aware UTC), or None.
+
+    Best-effort: a repo/connection without a watch ledger simply has no floor —
+    the streak then falls back to discovery_companies alone."""
+    fn = getattr(repo_or_conn, "parked_companies", None)
+    if callable(fn):
+        try:
+            times = [parse_iso_datetime(r.get("first_parked_at"))
+                     for r in fn()]
+        except Exception:  # noqa: BLE001 — the floor is a bonus, never a failure
+            logger.debug("parked_companies unavailable for streak floor", exc_info=True)
+            return None
+        times = [t for t in times if t]
+        return max(times) if times else None
+
+    if hasattr(repo_or_conn, "execute"):          # raw psycopg connection
+        try:
+            row = repo_or_conn.execute(_SQL_LAST_PARK).fetchone()
+        except Exception:  # noqa: BLE001
+            logger.debug("parked_companies query failed", exc_info=True)
+            return None
+        val = (row.get("max") if isinstance(row, dict) else row[0]) if row else None
+        return _as_utc(val) if val else None
+    return None
+
+
 def last_new_by_source(repo_or_conn) -> dict[str, datetime]:
     """When each source last produced a NEW company (aware UTC), keyed by the
-    discovery_signals source value. Sources that never produced are absent."""
+    CONNECTOR name (board sources collapsed via SOURCE_ALIASES). Sources that
+    never produced are absent."""
     pool = getattr(repo_or_conn, "_pool", None)
     if pool is not None:                          # PostgresRepository
         with pool.connection() as conn:
             rows = conn.execute(_SQL_LAST_NEW).fetchall()
-        return {r["source"]: _as_utc(r["last_new"]) for r in rows
-                if r.get("last_new") is not None}
+        return _collapse({r["source"]: _as_utc(r["last_new"]) for r in rows
+                          if r.get("last_new") is not None})
 
     store = getattr(repo_or_conn, "_store", None)
     if store is not None:                         # JsonFileRepository
@@ -92,11 +172,11 @@ def last_new_by_source(repo_or_conn) -> dict[str, datetime]:
             t = parse_iso_datetime(row.get("first_seen_at"))
             if src and t and (src not in out or t > out[src]):
                 out[src] = t
-        return out
+        return _collapse(out)
 
     if hasattr(repo_or_conn, "execute"):          # raw psycopg connection
         rows = repo_or_conn.execute(_SQL_LAST_NEW).fetchall()
-        return {r[0]: _as_utc(r[1]) for r in rows if r[1] is not None}
+        return _collapse({r[0]: _as_utc(r[1]) for r in rows if r[1] is not None})
 
     raise TypeError(
         f"unsupported repo/connection for streak check: {type(repo_or_conn)!r}")
@@ -127,6 +207,11 @@ def compute_streaks(repo_or_conn, *, now: datetime | None = None) -> list[dict]:
     produced a company — the worst streak there is, so it always breaches."""
     now = now or datetime.now(UTC)
     last_by_source = last_new_by_source(repo_or_conn)
+    parked_at = last_park(repo_or_conn)
+    if parked_at is not None:
+        prev = last_by_source.get(_PARK_FLOOR_SOURCE)
+        if prev is None or parked_at > prev:
+            last_by_source[_PARK_FLOOR_SOURCE] = parked_at
     out: list[dict] = []
     for source, threshold in THRESHOLDS.items():
         last = last_by_source.get(source)

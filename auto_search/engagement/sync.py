@@ -41,7 +41,7 @@ def cross_and_persist(*, engagement_repo, scoring_repo, discovery_repo,
     those — unmatched engagement is dropped, not queued. The matched count is still
     returned in full either way. Pass `persist_unmatched=True` to also keep the
     unmatched (e.g. a future net-new-in-market view)."""
-    index = build_index(scoring_repo, discovery_repo)
+    index = build_index(scoring_repo, discovery_repo, engagement_repo)
     matched = 0
     for c in contact_rows:
         m = index.match(company=c.get("company"), domain=c.get("email_domain"),
@@ -69,9 +69,60 @@ def cross_and_persist(*, engagement_repo, scoring_repo, discovery_repo,
             engagement_repo, scoring_repo, discovery_repo)
         if healed.get("merged"):
             logger.info("identity heal after ingest: %s", healed["merged"])
+        # Site-lookup verification (2026-07-27): each domain-conflict pair the
+        # heal queued gets ONE bounded look at the actual sites. Deterministic
+        # 'same' verdicts (redirect convergence, kp.org class) self-resolve the
+        # queue on the next heal; everything else stays for a human. Bounded +
+        # best-effort — verification must never fail a sync.
+        # Feed BOTH conflict classes to the verifier: the heal's twin queue
+        # AND the cross veto's contact-vs-account pairs (review 2026-07-27 —
+        # without the latter, a second-corporate-domain system's contacts
+        # stay unresolved forever; with it, a verified-same verdict relaxes
+        # the veto on the next sync and they attach).
+        vetoed = [{"company": nm, "domains": [a, b]}
+                  for (a, b, nm) in sorted(getattr(index, "vetoed_pairs", set()))
+                  if a and b]
+        _verify_conflict_pairs(engagement_repo,
+                               (healed.get("manual") or []) + vetoed)
     except Exception:  # noqa: BLE001
         logger.exception("identity heal failed (ingest already persisted)")
     return matched, new_events
+
+
+_VERIFY_PAIRS_PER_RUN = 10
+
+
+def _verify_conflict_pairs(engagement_repo, manual: list[dict]) -> None:
+    """Fetch-and-cache verdicts for uncached domain-conflict pairs (max
+    _VERIFY_PAIRS_PER_RUN per sync, 8s per fetch).
+
+    Runs ONLY off the event loop (review 2026-07-27): the API's async sync
+    legs call cross_and_persist directly on the loop, and up to 20 serial
+    8s homepage fetches would freeze every webhook and healthcheck. The
+    daily cron legs run in plain subprocesses — verification happens there,
+    daily, which is all the queue needs."""
+    import asyncio
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass                    # no loop — cron/CLI context, safe to fetch
+    else:
+        logger.debug("site-verify deferred (event-loop context)")
+        return
+    from auto_search.engagement import site_verify
+    checked = 0
+    for entry in manual:
+        doms = entry.get("domains") or []
+        if len(doms) != 2 or checked >= _VERIFY_PAIRS_PER_RUN:
+            continue
+        if site_verify.cached_verdict(engagement_repo, doms[0], doms[1]):
+            continue
+        v = site_verify.verify_same_company(
+            entry.get("company") or "", doms[0], entry.get("company") or "", doms[1])
+        site_verify.store_verdict(engagement_repo, doms[0], doms[1], v)
+        checked += 1
+        logger.info("site-verify %s|%s -> %s/%s via %s",
+                    doms[0], doms[1], v.verdict, v.confidence, v.method)
 
 
 async def run_sync(*, engagement_repo, scoring_repo, discovery_repo,

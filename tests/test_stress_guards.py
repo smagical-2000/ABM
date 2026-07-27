@@ -93,7 +93,7 @@ def test_ceiling_zero_declares_hold_all_and_names_accounts(client, monkeypatch):
     _seed_hot(repo)
     repo.set_setting("notify_sane_max", "0")
     sent = _capture_alerts(monkeypatch)
-    out = client.post("/api/engagement/notify-changes?stage=live").json()
+    out = client.post("/api/engagement/notify-changes?stage=live&dry_run=false").json()
     assert out["held"] is True and out["posted"] == 0
     assert out["sane_max"] == 0 and out["ceiling_source"] == "setting"
     assert "hold-all engaged" in sent[0]["title"]
@@ -105,7 +105,7 @@ def test_ceiling_env_zero_reports_env_source(client, monkeypatch):
     _seed_hot(repo)
     monkeypatch.setenv("ENGAGEMENT_NOTIFY_SANE_MAX", "0")
     _capture_alerts(monkeypatch)
-    out = client.post("/api/engagement/notify-changes?stage=live").json()
+    out = client.post("/api/engagement/notify-changes?stage=live&dry_run=false").json()
     assert out["held"] is True and out["ceiling_source"] == "env"
 
 
@@ -116,7 +116,7 @@ def test_ceiling_garbage_falls_back_to_default_25(client, monkeypatch):
     calls = []
     monkeypatch.setattr(notify_mod, "activate_account",
                         lambda a, e, **kw: calls.append(1) or True)
-    out = client.post("/api/engagement/notify-changes?stage=live").json()
+    out = client.post("/api/engagement/notify-changes?stage=live&dry_run=false").json()
     assert out.get("held") is None and out["posted"] == 1   # 1 due ≤ 25
 
 
@@ -125,7 +125,7 @@ def test_ceiling_negative_is_hold_all(client, monkeypatch):
     _seed_hot(repo)
     repo.set_setting("notify_sane_max", "-5")
     sent = _capture_alerts(monkeypatch)
-    out = client.post("/api/engagement/notify-changes?stage=live").json()
+    out = client.post("/api/engagement/notify-changes?stage=live&dry_run=false").json()
     assert out["held"] is True
     assert "hold-all engaged" in sent[0]["title"]
 
@@ -136,7 +136,7 @@ def test_small_hold_names_accounts_not_volume_language(client, monkeypatch):
     _seed_hot(repo, "abm_b", "Beta Co")
     repo.set_setting("notify_sane_max", "1")
     sent = _capture_alerts(monkeypatch)
-    out = client.post("/api/engagement/notify-changes?stage=live").json()
+    out = client.post("/api/engagement/notify-changes?stage=live&dry_run=false").json()
     assert out["held"] is True
     assert "Abnormal" not in sent[0]["detail"]
     # names fall back to account ids here (no scored/abm registration in the
@@ -160,7 +160,7 @@ def test_audit_hold_wins_over_allow_burst(client, monkeypatch):
     monkeypatch.setattr(notify_mod, "activate_account",
                         lambda a, e, **kw: calls.append(1) or True)
     out = client.post(
-        "/api/engagement/notify-changes?stage=live&allow_burst=true").json()
+        "/api/engagement/notify-changes?stage=live&allow_burst=true&dry_run=false").json()
     assert out.get("stage") == "audit" and out["posted"] == 0 and calls == []
 
 
@@ -314,7 +314,8 @@ def test_negative_limit_posts_nothing_no_crash(client, monkeypatch):
     calls = []
     monkeypatch.setattr(notify_mod, "activate_account",
                         lambda a, e, **kw: calls.append(1) or True)
-    out = client.post("/api/engagement/notify-changes?stage=live&limit=-1").json()
+    out = client.post(
+        "/api/engagement/notify-changes?stage=live&limit=-1&dry_run=false").json()
     assert out["posted"] == 0 and calls == []
 
 

@@ -39,6 +39,7 @@ import os
 from collections import Counter
 from datetime import UTC, datetime
 
+from auto_search.clients.upstream import UpstreamQuotaError
 from auto_search.engagement import linkedin_ads as la
 from auto_search.engagement import notify, phone_waterfall, scoring
 from auto_search.engagement.cross import build_index
@@ -86,6 +87,12 @@ async def _scrape(share_categories: dict[str, str], *, max_reactions: int) -> li
         try:
             rs = await social_apify.fetch_post_reactions(
                 la.post_url(share_id), max_items=max_reactions)
+        except UpstreamQuotaError:
+            # Account-wide Apify cap: every remaining post fails identically, so
+            # swallowing it drops live selling-hours leads under a green run
+            # (2026-07-27 — 403s at WARNING only, every 15 minutes).
+            logger.error("apify account capped — aborting TOFU scrape")
+            raise
         except Exception as e:  # noqa: BLE001 — one bad post mustn't sink the run
             logger.warning("reactions fetch failed for %s: %s", share_id, e)
             continue
@@ -109,7 +116,7 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
     one failure is counted and skipped so the batch always completes. `max_leads` stops
     after that many leads are created/would-be-created (e.g. 1 for the live spot-check)."""
     now = now or datetime.now(UTC).isoformat()
-    index = build_index(scoring_repo, discovery_repo)        # ABM / scored cross
+    index = build_index(scoring_repo, discovery_repo, engagement_repo)  # ABM / scored cross
 
     # Durable per-person dedup: contact external_ids we've already persisted.
     processed: set[str] = set()
@@ -251,20 +258,6 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
                 break
             continue
 
-        # Slack heads-up BEFORE the lead is written to Airtable (Airtable then creates
-        # the Salesforce lead via its own automation). EVERY captured reactor posts to
-        # the LinkedIn-ads-engagement channel (Sunny 2026-07-22): that channel is the
-        # raw "who engaged with our ads" feed, ABM or not. The ABM rule governs the
-        # ACTIVATION channel, not this one — a non-ABM engager (IntelePeer/Joe
-        # Galinanes, 2026-07-22) still belongs here, tagged so nobody mistakes an
-        # engagement heads-up for a sales handoff.
-        # Best-effort + off-loop (the poster is sync) so a Slack hiccup never blocks.
-        if await asyncio.to_thread(notify.notify_lead, {
-                "name": display, "title": title, "company": company, "email": email,
-                "phone": phone, "linkedin": enriched_url, "abm": abm_match,
-                "segment": la.segment_for(r["category"])}):
-            stats["slack_notified"] += 1
-
         # ── writes: Airtable first (the sink). Heat + Reply.io only if it lands, so a
         #    failed push never zombie-scores an account or pushes outreach. Upsert
         #    merges on Email when we have one, else LinkedIn URL (phone-only leads),
@@ -283,6 +276,25 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
             stats["airtable_failed"] += 1
             results.append(outcome)
             continue
+
+        # Slack heads-up AFTER the row lands in Airtable (Airtable then creates the
+        # Salesforce lead via its own automation, so this is still the heads-up
+        # "before Salesforce"). It used to post BEFORE the upsert: on an Airtable
+        # failure the loop continues WITHOUT persisting the contact row, so the
+        # person was absent from the dedup set and the identical card re-posted
+        # every 15-minute tick until Airtable recovered. Announce only what landed.
+        # EVERY captured reactor posts to the LinkedIn-ads-engagement channel
+        # (Sunny 2026-07-22): that channel is the raw "who engaged with our ads"
+        # feed, ABM or not. The ABM rule governs the ACTIVATION channel, not this
+        # one — a non-ABM engager (IntelePeer/Joe Galinanes, 2026-07-22) still
+        # belongs here, tagged so nobody mistakes an engagement heads-up for a
+        # sales handoff.
+        # Best-effort + off-loop (the poster is sync) so a Slack hiccup never blocks.
+        if await asyncio.to_thread(notify.notify_lead, {
+                "name": display, "title": title, "company": company, "email": email,
+                "phone": phone, "linkedin": enriched_url, "abm": abm_match,
+                "segment": la.segment_for(r["category"])}):
+            stats["slack_notified"] += 1
 
         # Tracking mirror (Galyna, 2026-07-08): the same row is ALSO written to
         # the "TOFU Leads by ABM" base, stamped Synced At, so the team can audit

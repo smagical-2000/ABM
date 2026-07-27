@@ -124,6 +124,70 @@ def test_resolve_ae_falls_back_to_default(monkeypatch):
     assert notify.resolve_ae({}, ids={}, by_specialty={}) == "@Alykhan"
 
 
+# ── dual coverage: two people taggable per segment (sales, 2026-07-27) ──────
+# Interim shared coverage — Payers: Matt Royalty & Aidan Noonan; Health Systems:
+# Justin Gernot & Colin Moynihan; Physician Groups: Justin Pride (still one).
+# The routing value carries both names, comma-separated; env values are unchanged
+# in shape ("payer=Matt Royalty,Aidan Noonan").
+
+
+def test_resolve_ae_tags_two_people_from_one_segment():
+    ae = notify.resolve_ae(_acct(framework="payer"),
+                           ids={"Matt Royalty": "U01", "Aidan Noonan": "U02"},
+                           by_specialty={"payer": "Matt Royalty,Aidan Noonan"})
+    assert ae == "<@U01> & <@U02>"
+
+
+def test_resolve_ae_single_name_is_unchanged():
+    """The byte-identical guarantee: one name renders exactly as before."""
+    assert notify.resolve_ae(_acct(framework="specialty"), ids={"Justin Pride": "U03"},
+                             by_specialty={"specialty": "Justin Pride"}) == "<@U03>"
+    assert notify.resolve_ae(_acct(framework="specialty"), ids={},
+                             by_specialty={"specialty": "Justin Pride"}) == "@Justin Pride"
+
+
+def test_resolve_ae_mixed_when_only_one_has_a_slack_id():
+    """Each name resolves independently — a colleague without an id is still
+    NAMED next to a real ping, instead of the pair silently degrading."""
+    ae = notify.resolve_ae(_acct(framework="health_system"),
+                           ids={"Justin Gernot": "U04"},
+                           by_specialty={"health_system": "Justin Gernot,Colin Moynihan"})
+    assert ae == "<@U04> & @Colin Moynihan"
+
+
+def test_resolve_ae_tolerates_whitespace_and_trailing_commas():
+    ae = notify.resolve_ae(_acct(framework="payer"),
+                           ids={"Matt Royalty": "U01", "Aidan Noonan": "U02"},
+                           by_specialty={"payer": " Matt Royalty ,  Aidan Noonan , "})
+    assert ae == "<@U01> & <@U02>"
+
+
+def test_resolve_sdr_tags_two_people_and_keeps_single_name_shape():
+    pair = notify.resolve_sdr(_acct(framework_key="health_system"),
+                              ids={"Ben Davies": "U10"},
+                              by_specialty={"health_system": "Ben Davies,Gabriel"})
+    assert pair == "<@U10> & @Gabriel"
+    solo = notify.resolve_sdr(_acct(framework_key="health_system"),
+                              ids={"Ben Davies": "U10"},
+                              by_specialty={"health_system": "Ben Davies"})
+    assert solo == "<@U10>"
+
+
+def test_dual_default_ae_still_falls_back(monkeypatch):
+    """The DEFAULT_AE catch-all keeps working, single or paired."""
+    monkeypatch.setenv("DEFAULT_AE", "Alykhan")
+    assert notify.resolve_ae({}, ids={}, by_specialty={}) == "@Alykhan"
+    monkeypatch.setenv("DEFAULT_AE", "Alykhan,Manu")
+    assert notify.resolve_ae({}, ids={"Manu": "U9"}, by_specialty={}) == "@Alykhan & <@U9>"
+
+
+def test_dual_owners_render_in_the_card_lead_line():
+    card = notify.build_card(_acct(name="Baptist Health", tier="Hot"), _events(),
+                             ae="<@U01> & <@U02>")
+    blob = json.dumps(card, ensure_ascii=False)
+    assert "<@U01> & <@U02> your account *Baptist Health*" in blob
+
+
 def test_resolve_ae_uses_raw_framework_key_not_label():
     # The engaged-account dict carries the human label in `framework` ("Health System")
     # and the raw key in `framework_key` — SPECIALTY_AE is keyed by the raw key. Resolve
@@ -435,3 +499,14 @@ def test_accounts_to_notify_upward_only_and_hot_terminal():
     got = {d["account"]["account_id"]: d["role"]
            for d in notify.accounts_to_notify(accounts, ledger)}
     assert got == {"new_some": "sdr", "up_warm": "sdr", "up_hot": "ae"}
+
+
+def test_sfdc_owner_with_comma_is_one_person_not_two():
+    """Review 2026-07-27: comma-splitting is for ENV routing values only —
+    an SFDC owner stored 'Davies, Ben' is one human, not a dual tag."""
+    from auto_search.engagement.notify import resolve_ae
+    got = resolve_ae({}, owner_name="Davies, Ben",
+                     ids={"Davies, Ben": "U0A3LE8KGEA"}, by_specialty={})
+    assert got == "<@U0A3LE8KGEA>"
+    got2 = resolve_ae({}, owner_name="Aly Jina, MBA", ids={}, by_specialty={})
+    assert got2 == "@Aly Jina, MBA"

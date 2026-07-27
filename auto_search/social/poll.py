@@ -190,6 +190,11 @@ async def poll_targets(
                                       max_reactions=MAX_REACTIONS_PER_POST,
                                       max_comments=MAX_COMMENTS_PER_POST,
                                       posted_limit_date=limit_date)
+        except apify.ApifyQuotaExceeded:
+            # Account-wide cap: every remaining kind/target would fail too, and a
+            # swallowed 403 is exactly how 2026-07-27's outage stamped green.
+            logger.error("apify account capped — aborting social poll")
+            raise
         except apify.ApifyError:
             logger.exception("apify post scrape failed for %s targets", kind)
             continue
@@ -356,6 +361,9 @@ async def poll_events(
         return summary
     try:
         posts = await search_fn(kws, max_posts=max_posts, date_filter=date_filter)
+    except apify.ApifyQuotaExceeded:
+        logger.error("apify account capped — aborting event poll")
+        raise
     except apify.ApifyError:
         logger.exception("apify event search failed")
         return summary
@@ -440,6 +448,9 @@ async def _enrich_and_record(enrich_fn, url: str, op, summary: dict, budget: int
         return None
     try:
         enriched = await enrich_fn(url) or {}
+    except apify.ApifyQuotaExceeded:
+        logger.error("apify account capped — aborting enrichment")
+        raise
     except apify.ApifyError:
         logger.exception("apify enrich failed for %s", url)
         _tally_skip(summary, "enrich_error")

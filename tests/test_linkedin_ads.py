@@ -166,7 +166,7 @@ def patched(monkeypatch):
     # Always patched: the email-or-phone rule reaches FullEnrich for no-email
     # leads, and a test must NEVER hit the real (billable) API.
     monkeypatch.setattr(runner.phone_waterfall.enrichment, "enrich_contact", fake_fe_none)
-    monkeypatch.setattr(runner, "build_index", lambda s, d: _FakeIndex())
+    monkeypatch.setattr(runner, "build_index", lambda s, d, e=None: _FakeIndex())
 
 
 async def test_dry_run_makes_no_writes(patched, monkeypatch):
@@ -300,6 +300,51 @@ async def test_failed_airtable_upsert_records_no_heat(patched, monkeypatch):
     # Dana's dead-end contact row (dedup) is all that persists — no events, so
     # no heat could be recorded for pushes that failed
     assert all(c["event_rows"] == [] for c in crossed)
+
+
+async def test_no_slack_card_when_the_durable_write_fails(patched, monkeypatch):
+    """The card used to post BEFORE the Airtable upsert. On an Airtable failure
+    the loop continues without persisting the contact row, so the person is
+    absent from the dedup set next run — and the identical lead card was
+    re-posted to the leads-ads channel every 15 minutes until Airtable
+    recovered. The durable write goes first now."""
+    monkeypatch.setattr(runner, "cross_and_persist", lambda **kw: (1, 1))
+    cards: list[dict] = []
+    monkeypatch.setattr(runner.notify, "notify_lead",
+                        lambda lead, **kw: cards.append(lead) or True)
+
+    out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=object(),
+                           scoring_repo=None, discovery_repo=None,
+                           airtable_client=_FakeAirtable(fail=True),
+                           replyio_client=_FakeReply(), dry_run=False,
+                           allow_empty_store=True)
+    assert out["stats"].get("airtable_failed") == 3
+    assert cards == []                       # nothing announced that didn't land
+    assert not out["stats"].get("slack_notified")
+
+
+async def test_slack_card_follows_the_airtable_upsert(patched, monkeypatch):
+    """Ordering, not just counts: every card is preceded by its own row landing
+    in Airtable (the Airtable automation is what creates the Salesforce lead,
+    so the card is still the heads-up 'before Salesforce')."""
+    monkeypatch.setattr(runner, "cross_and_persist", lambda **kw: (3, 3))
+    order: list[str] = []
+
+    class _OrderedAirtable(_FakeAirtable):
+        async def upsert(self, fields, *, merge_on):
+            order.append("airtable")
+            return await super().upsert(fields, merge_on=merge_on)
+
+    monkeypatch.setattr(runner.notify, "notify_lead",
+                        lambda lead, **kw: order.append("slack") or True)
+
+    out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=object(),
+                           scoring_repo=None, discovery_repo=None,
+                           airtable_client=_OrderedAirtable(),
+                           replyio_client=_FakeReply(), dry_run=False,
+                           allow_empty_store=True)
+    assert out["stats"]["slack_notified"] == 3
+    assert order == ["airtable", "slack"] * 3
 
 
 async def test_already_processed_profile_skipped_before_spend(patched, monkeypatch):
@@ -483,7 +528,7 @@ async def test_capture_all_persists_non_abm_contacts_for_dedup(patched, monkeypa
     key; without it every scan re-bills Apollo/FullEnrich for him — while
     heat events stay ABM-only."""
     from auto_search.engagement import sync as sync_mod
-    monkeypatch.setattr(sync_mod, "build_index", lambda s, d: _FakeIndex())
+    monkeypatch.setattr(sync_mod, "build_index", lambda s, d, e=None: _FakeIndex())
     repo = _FakeEngRepo()
     out = await runner.run(share_categories={"111": "Ortho"}, engagement_repo=repo,
                            scoring_repo=None, discovery_repo=None,

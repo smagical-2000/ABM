@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from collections.abc import Iterator
 
 import httpx
@@ -27,10 +28,34 @@ logger = logging.getLogger(__name__)
 
 _API_VERSION = "v60.0"
 _PAGE_CAP = 500          # hard stop so a bad nextRecordsUrl can't loop forever
+_MAX_RETRIES = 2         # per page, on 429/5xx — plus at most ONE 401 re-auth
+_BACKOFF_CAP_SECONDS = 30.0
 # Floor for the high-intent lead pull — leads older than this are stale; we only
 # track the 2026-onward cohort (per the user). Open-ended (since -> now).
 SINCE_DEFAULT = "2026-01-01"
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def soql_quote(value) -> str:
+    """Escape a value for use INSIDE a SOQL string literal ('...').
+
+    The ONE place SOQL escaping is defined. NEVER interpolate a dynamic value
+    into a query without it — `lead_exists` takes its email straight from
+    LinkedIn lead-gen form payloads (external, attacker-supplied) and runs it
+    against the production org. SOQL has no stacked statements, so the blast
+    radius of a missed escape is a broken/over-broad query rather than a write,
+    but the escape being bespoke and inline is how the next WHERE clause ends up
+    with none at all.
+
+    Backslash FIRST, then the single quote — the other order leaves the
+    backslash we just introduced unescaped and re-opens the literal. Control
+    characters (newline, NUL) are dropped: never legitimate inside a literal.
+    """
+    if value is None:
+        return ""
+    s = _CTRL_RE.sub("", str(value))
+    return s.replace("\\", "\\\\").replace("'", "\\'")
 
 
 class SalesforceClient:
@@ -77,13 +102,16 @@ class SalesforceClient:
 
     def query(self, soql: str) -> Iterator[dict]:
         """Yield every record for a SOQL SELECT, following nextRecordsUrl paging.
-        READ ONLY — callers must pass a SELECT."""
+        READ ONLY — callers must pass a SELECT.
+
+        Any dynamic value in `soql` MUST be wrapped in `soql_quote()` (or, for
+        dates, validated against _DATE_RE). Raw f-string interpolation of
+        external data is banned."""
         self._ensure_auth()
         path = f"/services/data/{self._api}/query"
         params: dict | None = {"q": soql}
         for _ in range(_PAGE_CAP):
-            resp = self._send("GET", f"{self._instance}{path}", params=params,
-                              headers={"Authorization": f"Bearer {self._token}"})
+            resp = self._get_with_retry(f"{self._instance}{path}", params=params)
             resp.raise_for_status()
             data = resp.json()
             yield from data.get("records", [])
@@ -106,8 +134,7 @@ class SalesforceClient:
         (LeadSource in the high-intent set)."""
         if not _DATE_RE.match(since):       # interpolated into SOQL — keep it a bare date
             raise ValueError(f"since must be YYYY-MM-DD, got {since!r}")
-        sources = ", ".join("'" + s.replace("'", r"\'") + "'"
-                            for s in self.HIGH_INTENT_SOURCES)
+        sources = ", ".join(f"'{soql_quote(s)}'" for s in self.HIGH_INTENT_SOURCES)
         yield from self.query(
             "SELECT Id, FirstName, LastName, Company, Email, BN_Email_Domain__c, "
             "Website, Title, LeadSource, Status, Rating, MQL__c, Seats_Requested__c, "
@@ -182,9 +209,9 @@ class SalesforceClient:
         e = (email or "").strip()
         if not e:
             return False
-        safe = e.replace("\\", r"\\").replace("'", r"\'")
         return next(self.query(
-            f"SELECT Id FROM Lead WHERE Email = '{safe}' LIMIT 1"), None) is not None
+            f"SELECT Id FROM Lead WHERE Email = '{soql_quote(e)}' LIMIT 1"),
+            None) is not None
 
     def create_lead(self, fields: dict, *, assignment_rules: bool = True) -> dict:
         """Create a Salesforce Lead. WRITE. Returns the API result {id, success, errors}.
@@ -204,6 +231,41 @@ class SalesforceClient:
 
     # ── transport ───────────────────────────────────────────────────────
 
+    def _get_with_retry(self, url: str, *, params: dict | None) -> httpx.Response:
+        """One READ request with a bounded retry. GET-class only — writes
+        (create_lead) are never retried, since a replayed POST duplicates a Lead.
+
+        Unlike the Reply.io / HeyReach / Airtable clients, this one used to
+        raise_for_status() on the first non-2xx with zero retries, and the
+        client-credentials token cached in _authenticate was never refreshed.
+        So a 2-minute instance maintenance 503, or a token expiring partway
+        through the daily pull (high-intent + tradeshow + TOFU + meetings),
+        failed the whole SFDC leg: BOFU heat lands a day late and the daily-cron
+        FAILED alert pages for a transient.
+
+        429/5xx back off (honouring Retry-After) up to _MAX_RETRIES; a 401
+        clears the cached token and re-authenticates ONCE, then replays the
+        page. Both budgets are bounded, so this always terminates.
+        """
+        attempt, reauthed = 0, False
+        while True:
+            resp = self._send("GET", url, params=params,
+                              headers={"Authorization": f"Bearer {self._token}"})
+            if resp.status_code == 401 and not reauthed:
+                logger.info("salesforce 401 — refreshing the access token and retrying")
+                reauthed = True
+                self._token = None
+                self._ensure_auth()
+                continue
+            if (resp.status_code == 429 or resp.status_code >= 500) and attempt < _MAX_RETRIES:
+                attempt += 1
+                delay = _retry_after(resp, attempt)
+                logger.warning("salesforce %s — retry %d/%d in %.1fs",
+                               resp.status_code, attempt, _MAX_RETRIES, delay)
+                time.sleep(delay)
+                continue
+            return resp
+
     def _send(self, method: str, url: str, *, params: dict | None = None,
               data: dict | None = None, json: dict | None = None,
               headers: dict | None = None) -> httpx.Response:
@@ -213,3 +275,15 @@ class SalesforceClient:
         with httpx.Client(timeout=self._timeout) as client:
             return client.request(method, url, params=params, data=data,
                                   json=json, headers=headers)
+
+
+def _retry_after(resp: httpx.Response, attempt: int) -> float:
+    """The server's Retry-After when it sends one, else capped exponential
+    backoff. Mirrors replyio_client._retry_after."""
+    header = resp.headers.get("Retry-After")
+    if header:
+        try:
+            return min(float(header), _BACKOFF_CAP_SECONDS)
+        except ValueError:
+            pass
+    return min(2.0 ** attempt, _BACKOFF_CAP_SECONDS)

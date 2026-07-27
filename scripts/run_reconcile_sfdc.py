@@ -42,7 +42,7 @@ def main() -> int:
     since = (datetime.now(UTC).date() - timedelta(days=WINDOW_DAYS)).isoformat()
     now = datetime.now(UTC).isoformat()
     erepo = get_engagement_repository()
-    index = build_index(get_scoring_repository(), get_repository())
+    index = build_index(get_scoring_repository(), get_repository(), erepo)
 
     contact_rows, event_rows, counts = collect_sfdc_rows(
         SalesforceClient(), erepo, since=since, now=now)
@@ -76,4 +76,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # os._exit via run_entrypoint, not sys.exit: psycopg pool threads can hang
+    # interpreter finalization forever (the Jul 24-27 cron freeze class).
+    from auto_search.ops.shutdown import run_entrypoint
+    run_entrypoint(main)

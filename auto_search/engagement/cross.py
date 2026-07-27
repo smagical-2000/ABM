@@ -53,6 +53,11 @@ class CrossIndex:
                  same_pairs: set[str] | None = None) -> None:
         self.same_pairs = same_pairs or set()
         self.collisions: list[str] = []
+        # (contact_domain, account_domain, company) per veto — the sync feeds
+        # these to site_verify so a legitimate second-corporate-domain pair
+        # (adventhealth.com staff mailing from @ah.org) self-resolves instead
+        # of staying unresolved forever (review 2026-07-27).
+        self.vetoed_pairs: set[tuple[str, str, str]] = set()
         self._s_domain: dict[str, dict] = {}
         self._s_key: dict[str, dict] = {}
         for a in scored:
@@ -147,11 +152,15 @@ class CrossIndex:
                 dom, scored.get("domain"), self.same_pairs):
             logger.info("cross: name-match veto %s (contact %s vs account %s)",
                         scored["account_id"], dom, scored.get("domain"))
+            self.vetoed_pairs.add((dom, scored.get("domain") or "",
+                                   scored.get("name") or ""))
             scored = None
         if abm and a_tier == "name" and not _domains_compatible(
                 dom, abm.get("domain"), self.same_pairs):
             logger.info("cross: name-match veto %s (contact %s vs target %s)",
                         abm["account_id"], dom, abm.get("domain"))
+            self.vetoed_pairs.add((dom, abm.get("domain") or "",
+                                   abm.get("name") or ""))
             abm = None
         if scored:
             lists = ("scored", "abm") if abm else ("scored",)
@@ -172,6 +181,8 @@ class CrossIndex:
                 logger.info("cross: sibling-hop veto %s -/-> %s (contact %s "
                             "vs sibling %s)", abm["account_id"],
                             sib["account_id"], dom, sib.get("domain"))
+                self.vetoed_pairs.add((dom, sib.get("domain") or "",
+                                       sib.get("name") or ""))
                 sib = None
             if sib:
                 return AccountMatch(sib["account_id"], sib["name"], a_tier,

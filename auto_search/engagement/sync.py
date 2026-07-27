@@ -74,7 +74,16 @@ def cross_and_persist(*, engagement_repo, scoring_repo, discovery_repo,
         # 'same' verdicts (redirect convergence, kp.org class) self-resolve the
         # queue on the next heal; everything else stays for a human. Bounded +
         # best-effort — verification must never fail a sync.
-        _verify_conflict_pairs(engagement_repo, healed.get("manual") or [])
+        # Feed BOTH conflict classes to the verifier: the heal's twin queue
+        # AND the cross veto's contact-vs-account pairs (review 2026-07-27 —
+        # without the latter, a second-corporate-domain system's contacts
+        # stay unresolved forever; with it, a verified-same verdict relaxes
+        # the veto on the next sync and they attach).
+        vetoed = [{"company": nm, "domains": [a, b]}
+                  for (a, b, nm) in sorted(getattr(index, "vetoed_pairs", set()))
+                  if a and b]
+        _verify_conflict_pairs(engagement_repo,
+                               (healed.get("manual") or []) + vetoed)
     except Exception:  # noqa: BLE001
         logger.exception("identity heal failed (ingest already persisted)")
     return matched, new_events

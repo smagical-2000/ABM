@@ -366,3 +366,24 @@ def test_exact_host_outranks_registrable_collapse():
     assert m is not None and m.account_id == "acc_stjoes"
     m2 = idx.match(email="b@mercy.trinityhealth.org")
     assert m2 is not None and m2.account_id == "acc_mercy"
+
+
+def test_vetoed_pairs_are_recorded_for_verification():
+    """Review 2026-07-27: every veto records its (contact, account) domain pair
+    so the sync's site-verify pass can rule same/different — a legitimate
+    second-corporate-domain system self-resolves instead of staying
+    unresolved forever."""
+    from auto_search.engagement.cross import CrossIndex
+    idx = CrossIndex(
+        scored=[{"account_id": "acc_advent", "name": "AdventHealth",
+                 "domain": "adventhealth.com"}],
+        abm_targets=[])
+    assert idx.match(company="AdventHealth", email="x@ah.org") is None
+    assert ("ah.org", "adventhealth.com", "AdventHealth") in idx.vetoed_pairs
+    # and once the pair is verified-same, the SAME shape of index attaches it
+    idx2 = CrossIndex(
+        scored=[{"account_id": "acc_advent", "name": "AdventHealth",
+                 "domain": "adventhealth.com"}],
+        abm_targets=[], same_pairs={"adventhealth.com|ah.org"})
+    m = idx2.match(company="AdventHealth", email="x@ah.org")
+    assert m is not None and m.account_id == "acc_advent"

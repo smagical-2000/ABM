@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 
+from auto_search.healthcare import is_healthcare_provider
 from auto_search.models import CompanyCandidate, QualificationResult, RawSignal
 from auto_search.normalize import normalize_company_name
 from auto_search.qualifier import qualify
@@ -115,6 +116,24 @@ async def ingest_engager(
                     company, engager.source)
         return IngestResult(accepted=True, action="qualified", reason="qualified",
                             company_key=key, company_name=company)
+
+    # ICP gate BEFORE the paid qualifier (2026-07-27). Competitor-post
+    # engagement is dominated by other vendors, consultants and job seekers —
+    # of 53 companies surfaced this way in July, 1 qualified (1.9%), and we
+    # paid the LLM to disqualify the other 52. The jobs connector has always
+    # applied this same check upstream (its "vendor_not_provider" drops); the
+    # social path never did.
+    #
+    # Fails OPEN on purpose: only a KNOWN, non-provider industry is dropped.
+    # A missing/blank industry still gets the paid qualifier, so an engager
+    # whose enrichment came back thin is never silently lost — matching the
+    # enrich-first philosophy in filters.py. ABM targets are already accepted
+    # above, so this can never suppress a company we deliberately chose.
+    industry = (engager.industry or "").strip()
+    if industry and not is_healthcare_provider(industry):
+        logger.info("social ingest: skipping %s — industry %r is not a provider",
+                    company, industry)
+        return _skip("not_healthcare_provider")
 
     # New company → a PAID qualification. Let the caller veto first (budget/cap).
     if can_qualify is not None and (blocked := can_qualify()):

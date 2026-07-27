@@ -113,5 +113,30 @@ async def test_dry_run_releases_the_flag(client, monkeypatch):
     assert app.state.campaigns_running is False
 
 
+def test_dropped_background_work_never_wedges_the_endpoint(client):
+    """_schedule_coro's drop path (no captured loop) closes the coroutine, so
+    the finally that clears the flag never runs — every later sync answered
+    {busy: true} until the container restarted. The flag is cleared here now."""
+    app = client.app
+    app.state.loop = None                     # the drop path: nothing to schedule onto
+
+    first = client.post("/api/engagement/sync")
+    assert first.json() == {"started": True}
+    assert app.state.engagement_running is False       # not stuck True
+    # ...and the endpoint still accepts work instead of reporting busy forever
+    assert client.post("/api/engagement/sync").json() == {"started": True}
+
+
+def test_schedule_coro_reports_whether_it_scheduled(client):
+    app = client.app
+    app.state.loop = None
+
+    async def _noop():
+        return None
+
+    assert _app._schedule_coro(app, _noop(), busy_flag="news_running") is False
+    assert app.state.news_running is False
+
+
 async def _done(value):
     return value

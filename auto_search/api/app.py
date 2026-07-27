@@ -133,27 +133,44 @@ def _clamp_limit(value: int, maximum: int = _MAX_PAGE) -> int:
     return max(0, min(n, maximum))
 
 
-def _schedule_coro(app: FastAPI, coro) -> None:
+def _schedule_coro(app: FastAPI, coro, *, busy_flag: str | None = None) -> bool:
     """Run a coroutine in the background, callable from sync or async handlers.
 
     Sync handlers run in a threadpool with no running loop, so we hand the
     coroutine to the main loop captured at startup; async handlers schedule it
     on their own loop. Either way the HTTP response returns immediately.
+
+    Returns True when the coroutine was handed to a loop. `busy_flag` names the
+    app.state single-flight flag the CALLER set before scheduling: every such
+    coroutine clears its own flag in a finally, so if the coroutine never runs
+    that finally never fires and the flag stays True until the container
+    restarts — every later sync answering {busy: true} forever (COO QA
+    2026-07-27). Clearing it here, in a finally, is the one place that covers
+    both the no-loop drop path and any unexpected scheduling failure.
     """
+    scheduled = False
     try:
-        loop = asyncio.get_running_loop()
-        task = loop.create_task(coro)
-    except RuntimeError:
-        loop = getattr(app.state, "loop", None)
-        if loop is None:
-            # Should never happen once the app has started; loud so dropped paid
-            # work is never silent.
-            logger.error("no event loop to schedule background work — DROPPING it")
-            coro.close()
-            return
-        task = asyncio.run_coroutine_threadsafe(coro, loop)
-    app.state.scoring_tasks.add(task)
-    task.add_done_callback(lambda t: app.state.scoring_tasks.discard(t))
+        try:
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(coro)
+        except RuntimeError:
+            loop = getattr(app.state, "loop", None)
+            if loop is None:
+                # Should never happen once the app has started; loud so dropped paid
+                # work is never silent.
+                logger.error("no event loop to schedule background work — DROPPING it")
+                coro.close()
+                return False
+            task = asyncio.run_coroutine_threadsafe(coro, loop)
+        app.state.scoring_tasks.add(task)
+        task.add_done_callback(lambda t: app.state.scoring_tasks.discard(t))
+        scheduled = True
+        return True
+    finally:
+        if not scheduled and busy_flag:
+            logger.error("background work dropped — clearing %s so the endpoint "
+                         "does not stay busy until restart", busy_flag)
+            setattr(app.state, busy_flag, False)
 
 
 def _claim_scoring(app: FastAPI, account_id: str) -> bool:
@@ -818,7 +835,7 @@ def create_app() -> FastAPI:
                 op.finish()
                 app.state.news_running = False
 
-        _schedule_coro(app, _run())
+        _schedule_coro(app, _run(), busy_flag="news_running")
         return {"started": True}
 
     @app.post("/api/news/competitors/run")
@@ -841,7 +858,7 @@ def create_app() -> FastAPI:
             finally:
                 app.state.news_running = False
 
-        _schedule_coro(app, _run())
+        _schedule_coro(app, _run(), busy_flag="news_running")
         return {"started": True}
 
     # ── engagement (Reply.io heat) ──────────────────────────────────────────────
@@ -1845,7 +1862,7 @@ def create_app() -> FastAPI:
             finally:
                 app.state.engagement_running = False
 
-        _schedule_coro(app, _run())
+        _schedule_coro(app, _run(), busy_flag="engagement_running")
         return {"started": True}
 
     @app.post("/api/engagement/sfdc/sync")
@@ -1873,7 +1890,7 @@ def create_app() -> FastAPI:
             finally:
                 app.state.engagement_running = False
 
-        _schedule_coro(app, _run())
+        _schedule_coro(app, _run(), busy_flag="engagement_running")
         return {"started": True}
 
     @app.post("/api/engagement/linkedin/run")
@@ -2404,7 +2421,7 @@ def create_app() -> FastAPI:
             finally:
                 app.state.campaigns_running = False
 
-        _schedule_coro(app, _run())
+        _schedule_coro(app, _run(), busy_flag="campaigns_running")
         return {"started": True, "dry_run": False}
 
     @app.post("/api/campaigns/enroll")
@@ -2812,7 +2829,7 @@ def create_app() -> FastAPI:
                 app.state.social_running = False
                 app.state.run_phase = None
 
-        _schedule_coro(app, _run())
+        _schedule_coro(app, _run(), busy_flag="social_running")
         return {"started": True, "window": window,
                 "accounts": len(active) if do_accounts else 0,
                 "keywords": len(keywords) if do_events else 0}
@@ -3003,7 +3020,7 @@ def create_app() -> FastAPI:
             app.state.discovery_running = False
             app.state.run_phase = None
 
-        _schedule_coro(app, _run())
+        _schedule_coro(app, _run(), busy_flag="discovery_running")
         return {"started": True,
                 "sources": sources or list(discovery_runner.BROWSERLESS_SOURCES),
                 "limit": limit}
@@ -3643,7 +3660,7 @@ def create_app() -> FastAPI:
         op = spend_guard.Operation(app.state.scoring_repo, "score_batch",
                                    estimated_usd=estimate, accounts_planned=len(targets))
         app.state.batch_running = True
-        _schedule_coro(app, _run_batch(app, targets, op=op))
+        _schedule_coro(app, _run_batch(app, targets, op=op), busy_flag="batch_running")
         return {"started": len(targets), "busy": True,
                 "budget_capped": len(targets) < requested,
                 "estimated_usd": estimate, "operation_id": op.id, "budget": summary}

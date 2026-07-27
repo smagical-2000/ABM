@@ -1328,7 +1328,7 @@ def create_app() -> FastAPI:
         return {"enabled": engagement_notify.live_routing(), "source": "env"}
 
     @app.post("/api/engagement/notify-changes")
-    def engagement_notify_changes(dry_run: bool = False, seed: bool = False, limit: int = 0,
+    def engagement_notify_changes(dry_run: bool = True, seed: bool = False, limit: int = 0,
                                   stage: str = "", allow_burst: bool = False):
         """Auto AE/SDR push. Posts a card when an account's tier ROSE above the last tier
         we notified it at (Some/Warm → SDR, Hot → AE) — OR when an already-Hot account gets
@@ -1336,6 +1336,12 @@ def create_app() -> FastAPI:
         new). Downward drift never re-sends. Respects the live-routing toggle (OFF → private
         test channel, plain names). Ledger = `notified_tiers` (account_id -> {tier, touch}).
           dry_run=true  → return what WOULD fire; no posts, no ledger change.
+                          THIS IS THE DEFAULT (COO QA 2026-07-27): a bare
+                          authenticated POST used to fire real cards at the
+                          AE/SDR routing, so one curl slip or script bug reached
+                          live sales channels. Sending is now an explicit act —
+                          pass dry_run=false. Every scheduled caller does
+                          (scripts/run_engagement_notify.py).
           seed=true     → baseline EVERY account to its CURRENT tier + latest touch WITHOUT
                           posting — the go-forward line. Nothing fires until a tier rise or
                           a NEW touch on a Hot account happens AFTER the seed. Run once when
@@ -1356,7 +1362,11 @@ def create_app() -> FastAPI:
         audit_rep = engagement_audit.run_invariants(
             repo, getattr(app.state, "scoring_repo", None), app.state.repo,
             rows=board)
-        if not audit_rep["ok"] and not dry_run:
+        # `seed or not dry_run` = "this call WRITES something" — seeding rewrites
+        # the whole baseline and has never honoured dry_run, so it must stay
+        # gated now that dry_run defaults to true (2026-07-27). Only a pure dry
+        # inspection passes through: it IS how a human looks at a red board.
+        if not audit_rep["ok"] and (seed or not dry_run):
             logger.error("notify HELD by audit: %s", audit_rep["violations"])
             if repo.get_setting("audit_alerts") == "1":
                 from auto_search.ops import alerts as ops_alerts

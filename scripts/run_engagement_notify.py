@@ -41,7 +41,11 @@ def main() -> int:
     cap = int(os.getenv("ENGAGEMENT_NOTIFY_MAX", "20"))
     user, pw = os.getenv("ENGAGEMENT_API_USER"), os.getenv("ENGAGEMENT_API_PASS")
     auth = (user, pw) if user and pw else None
-    params = {"dry_run": "true"} if args.dry_run else {"limit": str(cap)}
+    # dry_run is ALWAYS explicit: the endpoint defaults to dry_run=true (safe by
+    # default, 2026-07-27), so the live daily leg must opt in or it silently
+    # becomes a preview that posts nothing.
+    params = ({"dry_run": "true"} if args.dry_run
+              else {"limit": str(cap), "dry_run": "false"})
     try:
         r = httpx.post(f"{base}/api/engagement/notify-changes", params=params,
                        auth=auth, timeout=120)

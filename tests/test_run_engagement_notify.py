@@ -54,7 +54,10 @@ def test_dry_run_works_while_disabled_and_sends_nothing(monkeypatch):
 
 
 def test_send_passes_the_cap_as_limit(monkeypatch):
-    """Enabled live send caps the endpoint at ENGAGEMENT_NOTIFY_MAX (circuit breaker)."""
+    """Enabled live send caps the endpoint at ENGAGEMENT_NOTIFY_MAX (circuit
+    breaker) AND asks for a live send explicitly — the endpoint now defaults to
+    dry_run=true (COO QA 2026-07-27), so omitting it would silently turn the
+    daily notify leg into a preview that posts nothing."""
     monkeypatch.setenv("ENGAGEMENT_NOTIFY_ENABLED", "1")
     monkeypatch.setenv("ENGAGEMENT_APP_URL", "https://x")
     monkeypatch.setenv("ENGAGEMENT_NOTIFY_MAX", "7")
@@ -67,7 +70,7 @@ def test_send_passes_the_cap_as_limit(monkeypatch):
 
     monkeypatch.setattr(ren.httpx, "post", spy)
     assert ren.main() == 0
-    assert seen == {"limit": "7"}
+    assert seen == {"limit": "7", "dry_run": "false"}
 
 
 def test_request_failure_is_non_fatal_returns_1(monkeypatch):

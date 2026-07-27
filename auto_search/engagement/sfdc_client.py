@@ -31,6 +31,28 @@ _PAGE_CAP = 500          # hard stop so a bad nextRecordsUrl can't loop forever
 # track the 2026-onward cohort (per the user). Open-ended (since -> now).
 SINCE_DEFAULT = "2026-01-01"
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def soql_quote(value) -> str:
+    """Escape a value for use INSIDE a SOQL string literal ('...').
+
+    The ONE place SOQL escaping is defined. NEVER interpolate a dynamic value
+    into a query without it — `lead_exists` takes its email straight from
+    LinkedIn lead-gen form payloads (external, attacker-supplied) and runs it
+    against the production org. SOQL has no stacked statements, so the blast
+    radius of a missed escape is a broken/over-broad query rather than a write,
+    but the escape being bespoke and inline is how the next WHERE clause ends up
+    with none at all.
+
+    Backslash FIRST, then the single quote — the other order leaves the
+    backslash we just introduced unescaped and re-opens the literal. Control
+    characters (newline, NUL) are dropped: never legitimate inside a literal.
+    """
+    if value is None:
+        return ""
+    s = _CTRL_RE.sub("", str(value))
+    return s.replace("\\", "\\\\").replace("'", "\\'")
 
 
 class SalesforceClient:
@@ -77,7 +99,11 @@ class SalesforceClient:
 
     def query(self, soql: str) -> Iterator[dict]:
         """Yield every record for a SOQL SELECT, following nextRecordsUrl paging.
-        READ ONLY — callers must pass a SELECT."""
+        READ ONLY — callers must pass a SELECT.
+
+        Any dynamic value in `soql` MUST be wrapped in `soql_quote()` (or, for
+        dates, validated against _DATE_RE). Raw f-string interpolation of
+        external data is banned."""
         self._ensure_auth()
         path = f"/services/data/{self._api}/query"
         params: dict | None = {"q": soql}
@@ -106,8 +132,7 @@ class SalesforceClient:
         (LeadSource in the high-intent set)."""
         if not _DATE_RE.match(since):       # interpolated into SOQL — keep it a bare date
             raise ValueError(f"since must be YYYY-MM-DD, got {since!r}")
-        sources = ", ".join("'" + s.replace("'", r"\'") + "'"
-                            for s in self.HIGH_INTENT_SOURCES)
+        sources = ", ".join(f"'{soql_quote(s)}'" for s in self.HIGH_INTENT_SOURCES)
         yield from self.query(
             "SELECT Id, FirstName, LastName, Company, Email, BN_Email_Domain__c, "
             "Website, Title, LeadSource, Status, Rating, MQL__c, Seats_Requested__c, "
@@ -182,9 +207,9 @@ class SalesforceClient:
         e = (email or "").strip()
         if not e:
             return False
-        safe = e.replace("\\", r"\\").replace("'", r"\'")
         return next(self.query(
-            f"SELECT Id FROM Lead WHERE Email = '{safe}' LIMIT 1"), None) is not None
+            f"SELECT Id FROM Lead WHERE Email = '{soql_quote(e)}' LIMIT 1"),
+            None) is not None
 
     def create_lead(self, fields: dict, *, assignment_rules: bool = True) -> dict:
         """Create a Salesforce Lead. WRITE. Returns the API result {id, success, errors}.

@@ -8,43 +8,43 @@ before a mass layoff. Because they're a legal obligation rather than
 voluntary PR, the data is more complete and less noisy than self-reported
 trackers like layoffs.fyi.
 
-How we get the data
--------------------
-warntracker.com renders its table client-side: the browser calls
-`/api/sample_warn_listings` after page load, and that endpoint only answers
-requests carrying the session cookies set during that load. A plain HTTP GET
-returns 404. So we drive a headless browser (Playwright):
+How we get the data (2026-07-27: SOURCE SWAPPED, feed is live again)
+-------------------------------------------------------------------
+warntracker.com's own `/api/sample_warn_listings` froze on 2026-04-27 and
+served that same snapshot for three months. The publisher now maintains the
+live dataset in a PUBLIC Airtable grid view, so we read that instead —
+~79k notices, newest 3 days old at swap time. Mechanically it is the same
+trick as before (headless browser, intercept the one data XHR), factored out
+into connectors/airtable_share.py so the browser plumbing is reusable and the
+payload decode is a pure, unit-tested function.
 
-    1. Navigate to the homepage (sets cookies, fires the XHR)
-    2. Intercept the /api/sample_warn_listings response
-    3. Read the JSON straight off the wire — no HTML parsing needed
+Which date defines "new" — measured, not assumed
+------------------------------------------------
+Notice Date is the FILING date; Layoff date is when the cuts take effect,
+typically 60+ days LATER (WARN gives statutory notice). Windowing on the
+layoff date therefore re-admits ancient filings whose effective date merely
+lies ahead: over the live table, a 3-day layoff-date window matched 563 rows,
+508 of which had notices older than the window — including a 2017 Cempra
+Pharmaceuticals filing and a 2024 Campbell Soup one. The same window on
+Notice Date matched 1. So the window is Notice Date (what was newly filed);
+the layoff date rides along on every signal's payload and is only a fallback
+when a row has no notice date.
 
-Results are cached to disk so tests and offline runs don't need a browser
-(set WARN_USE_CACHE=true).
-
-Source field schema (observed May 2026):
-    "Company Name", "# Laid off", "Layoff date", "Notice Date",
-    "State", "Year", "companyId", "📍 City/Jurisdiction"
+Source field schema (Airtable share, observed 2026-07-27):
+    "Company Name", "State", "Notice Date", "Layoff date",
+    "# Laid off range" ("101 - 250" — parsed to its LOWER bound),
+    "Layoff Type", "Layoff office address & city", "Year", "Company Id"
 
 Env
 ---
-    (none required — the site is public)
+    (none required — the share is public)
+    WARN_SHARE_URL=https://airtable.com/...   override the source view
     WARN_USE_CACHE=true            read the cached JSON instead of scraping
     WARN_CACHE_PATH=./data/...     cache location (default ./data/warn_cache.json)
 
-STATUS: UPSTREAM DEAD (verified 2026-07-27)
--------------------------------------------
-warntracker.com itself stopped updating around 2026-04-27. Loading the site
-fresh and reading its OWN /api/sample_warn_listings response returns 200 rows
-whose newest Notice Date is 2026-04-27 — the identical frozen snapshot we get;
-it is the only data API the homepage calls, and the state pages 404. WARN
-filings are statutory and continuous, so a three-month-old newest notice means
-the SITE is dead, not the market. Our last new company from this source was
-2026-06-09.
-
-So the stale-feed tripwire below fires on EVERY run, by design and correctly.
-Do not "fix" it by widening _STALE_FEED_DAYS or by retrying — this source needs
-REPLACING (state WARN portal aggregation, DOL data, or layoffs.fyi).
+The stale-feed tripwire below stays exactly as it is. It is what caught the
+original death, it is cheap, and if this publisher ever freezes too we want
+the same loud failure on the first run rather than three silent months.
 """
 
 from __future__ import annotations
@@ -63,9 +63,14 @@ from auto_search.normalize import parse_int_loose, slugify
 
 logger = logging.getLogger(__name__)
 
-_WARN_API_PATH = "/api/sample_warn_listings"
-_WARN_BASE_URL = "https://www.warntracker.com"
-_PAGE_TIMEOUT_MS = 20_000
+_WARN_SHARE_URL = (
+    "https://airtable.com/appgEFzJfcBqdpM7F/shr28XJ6olggYjPe5/tblP732bg4BNVJOVh")
+_PAGE_TIMEOUT_MS = 90_000        # ~79k rows: the payload is tens of MB
+
+# The publisher seeds the free view with an advert row ("✨ Want historical
+# data or alerts? 👉 warntracker.com/get-data") and redacts some cells the
+# same way. Those are marketing, not notices.
+_PROMO_MARKERS = ("warntracker.com/get-data", "✨")
 
 # Freshness tripwire (2026-07-23 audit): the sample_warn_listings endpoint
 # served a FROZEN April snapshot through Jun–Jul 2026 — every daily run
@@ -77,14 +82,17 @@ _STALE_FEED_DAYS = 30
 # Field-name aliases — the site occasionally renames columns, so we look up
 # each logical field through a list of candidates rather than one hard key.
 _F_COMPANY = ("Company Name", "company", "Company")
-_F_LAID_OFF = ("# Laid off", "# Laid Off", "numLayoffs", "laid_off")
+_F_LAID_OFF = ("# Laid off range", "# Laid off", "# Laid Off", "numLayoffs",
+               "laid_off")
 _F_LAYOFF_DATE = ("Layoff date", "Layoff Date", "layoffDate")
 _F_NOTICE_DATE = ("Notice Date", "noticeDate")
 _F_STATE = ("State", "state")
 _F_YEAR = ("Year", "year")
-_F_COMPANY_ID = ("companyId", "company_id")
-_F_CITY = ("📍 City/Jurisdiction", "City/Jurisdiction", "city")
-_F_COMPANY_URL = ("_warntracker.com_link_for_company_view",)
+_F_COMPANY_ID = ("Company Id", "companyId", "company_id")
+_F_CITY = ("Layoff office address & city", "📍 City/Jurisdiction",
+           "City/Jurisdiction", "city")
+_F_LAYOFF_TYPE = ("Layoff Type", "layoffType")
+_F_COMPANY_URL = ("Open Company Page", "_warntracker.com_link_for_company_view")
 
 
 class WarnTrackerConnector:
@@ -102,6 +110,7 @@ class WarnTrackerConnector:
     def __init__(self) -> None:
         self._use_cache = os.getenv("WARN_USE_CACHE", "").lower() in ("1", "true")
         self._cache_path = Path(os.getenv("WARN_CACHE_PATH", "./data/warn_cache.json"))
+        self._share_url = os.getenv("WARN_SHARE_URL", _WARN_SHARE_URL)
 
     # ── public API ────────────────────────────────────────────────────
 
@@ -127,11 +136,14 @@ class WarnTrackerConnector:
         newest = _newest_notice_date(rows)
         if rows and newest is not None and \
                 newest < datetime.now(UTC) - timedelta(days=_STALE_FEED_DAYS):
+            # Keep this under the 280-char per-source clip in run_discovery's
+            # ops card (tested) — a truncated verdict is a useless alert.
             raise RuntimeError(
-                f"warntracker feed stale: newest notice {newest.date().isoformat()} "
-                "— endpoint serving frozen sample. warntracker.com stopped updating "
-                "~2026-04-27 (verified 2026-07-27): REPLACE the source, do not "
-                "retry or widen the window.")
+                f"warntracker feed stale: newest notice {newest.date().isoformat()}, "
+                f"over {_STALE_FEED_DAYS}d old — the Airtable share is serving a "
+                "frozen sample. WARN filings are statutory and continuous, so this "
+                "is the FEED, not the market: REPLACE the source, do not widen the "
+                "window.")
 
         drops: Counter[str] = Counter()
         yielded = 0
@@ -174,50 +186,23 @@ class WarnTrackerConnector:
         return json.loads(self._cache_path.read_text())
 
     async def _scrape_rows(self) -> list[dict[str, Any]]:
-        """Drive a headless browser to capture the WARN data API response.
+        """Read the public Airtable share and drop the publisher's advert rows.
 
-        `page.expect_response(...)` is a context manager: we open it BEFORE
-        navigating so the listener is armed when the XHR fires, then read
-        `.value` (the Response) once inside the block. goto() may raise on
-        slow loads even though the XHR already fired — that's non-fatal.
+        Fetch failures RAISE (airtable_share's contract) rather than returning
+        [] — an empty list from a broken fetch is indistinguishable from a
+        genuinely empty table, which is precisely how the frozen feed and the
+        Apify quota outage both hid for weeks.
         """
-        from playwright.async_api import async_playwright
+        from auto_search.connectors import airtable_share
 
-        logger.info("launching headless browser to scrape warntracker…")
-        rows: list[dict[str, Any]] = []
-
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=True)
-            page = await browser.new_page()
-            try:
-                async with page.expect_response(
-                    lambda r: _WARN_API_PATH in r.url and r.status == 200,
-                    timeout=_PAGE_TIMEOUT_MS,
-                ) as response_info:
-                    try:
-                        await page.goto(
-                            _WARN_BASE_URL,
-                            wait_until="domcontentloaded",
-                            timeout=_PAGE_TIMEOUT_MS,
-                        )
-                    except Exception as nav_err:  # noqa: BLE001
-                        logger.debug("goto raised (non-fatal): %s", nav_err)
-
-                response = await response_info.value
-                rows = await response.json()
-                logger.info("intercepted %d rows from %s", len(rows), _WARN_API_PATH)
-            except Exception as err:  # noqa: BLE001 — surface, don't crash
-                logger.error(
-                    "failed to intercept WARN API: %s — re-run, or set "
-                    "WARN_USE_CACHE=true once data/warn_cache.json exists",
-                    err,
-                )
-            finally:
-                await browser.close()
-
-        if rows:
-            self._write_cache(rows)
-        return rows
+        rows = await airtable_share.fetch_shared_view_rows(
+            self._share_url, timeout_ms=_PAGE_TIMEOUT_MS)
+        real = [r for r in rows if not _is_promo(r)]
+        logger.info("warntracker: %d rows from the share (%d advert rows dropped)",
+                    len(real), len(rows) - len(real))
+        if real:
+            self._write_cache(real)
+        return real
 
     def _write_cache(self, rows: list[dict[str, Any]]) -> None:
         self._cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -239,9 +224,14 @@ class WarnTrackerConnector:
         if not company:
             return None, "missing_company"
 
-        # Prefer the actual layoff date; fall back to the notice date.
+        # Window on the NOTICE date — when the filing appeared, i.e. what is
+        # actually new today. The layoff date is 60+ days out by statute, so
+        # windowing on it re-admits years-old filings whose effective date
+        # merely lies ahead (measured on the live table: 563 matches vs 1,
+        # 508 of them with notices older than the window). Layoff date is the
+        # fallback only for rows filed without one.
         observed_at = _parse_date(
-            _first(row, _F_LAYOFF_DATE) or _first(row, _F_NOTICE_DATE) or ""
+            _first(row, _F_NOTICE_DATE) or _first(row, _F_LAYOFF_DATE) or ""
         )
         if observed_at is None:
             return None, "unparseable_date"
@@ -277,6 +267,7 @@ class WarnTrackerConnector:
                     "city": city,
                     "notice_date": _first(row, _F_NOTICE_DATE),
                     "layoff_date": _first(row, _F_LAYOFF_DATE),
+                    "layoff_type": _first(row, _F_LAYOFF_TYPE),
                     "year": _first(row, _F_YEAR),
                     "company_id": _first(row, _F_COMPANY_ID),
                     "company_url": _first(row, _F_COMPANY_URL),
@@ -343,10 +334,23 @@ def _external_id(
     return "::".join(parts)
 
 
+def _is_promo(row: dict[str, Any]) -> bool:
+    """True for the publisher's advert rows seeded into the free view."""
+    company = str(_first(row, _F_COMPANY) or "")
+    return any(m in company for m in _PROMO_MARKERS)
+
+
 def _parse_date(s: str) -> datetime | None:
-    s = (s or "").strip()
+    """Parse a WARN date. Airtable serves full ISO instants
+    ("2026-07-24T00:00:00.000Z"); the legacy feed served bare dates."""
+    s = str(s or "").strip()
     if not s:
         return None
+    try:
+        parsed = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    except ValueError:
+        pass
     for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y"):
         try:
             return datetime.strptime(s, fmt).replace(tzinfo=UTC)

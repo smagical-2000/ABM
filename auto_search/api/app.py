@@ -1472,6 +1472,36 @@ def create_app() -> FastAPI:
         live = (not staged) and _live_routing_state(repo)["enabled"]
         ids_override = None if live else {}   # None = env ids (ping); {} = plain @Name (test)
         app_base = os.getenv("ENGAGEMENT_APP_URL")   # deep-link back to the ABM console
+
+        def _persist_notified(target: dict, account: dict, tier: str, touch) -> None:
+            """Record ONE delivered card and flush it NOW (COO QA 2026-07-27).
+
+            Two failures this closes, both live-channel duplicate-ping class:
+              · partial state — the ledger used to be written once AFTER the
+                loop, so any mid-loop raise (a dropped psycopg connection in
+                events_for_account, a deploy/OOM restart) left every card
+                already delivered in that run unrecorded, and the next trigger
+                re-posted all of them.
+              · read-modify-write race — three triggers can overlap (daily
+                cron leg, the TOFU runner's event-driven push, a human in the
+                console). Re-reading the stored ledger immediately before the
+                write and merge-strongest-ing our entry onto it narrows the RMW
+                window from "the whole send loop" to this single upsert, so a
+                concurrent run's entries are no longer silently discarded.
+            Merge direction is the same merge-strongest used everywhere else:
+            identity churn can only ever SUPPRESS a duplicate, never invent one.
+            """
+            key = "notified_tiers_test" if staged else "notified_tiers"
+            engagement_notify.record_notified(target, account, tier, touch)
+            try:
+                fresh = json.loads(repo.get_setting(key) or "{}")
+            except (TypeError, ValueError):     # corrupt setting: ours still lands
+                fresh = {}
+            merged = engagement_notify.merge_ledgers(fresh, target)
+            target.clear()
+            target.update(merged)
+            repo.set_setting(key, json.dumps(merged))
+
         fired, posted = [], 0
         for d in due:
             a, tier, is_ae = d["account"], d["tier"], d["role"] == "ae"
@@ -1500,25 +1530,17 @@ def create_app() -> FastAPI:
                                                         test=staged, reason=d.get("reason"))
                 entry["posted"] = bool(ok)
                 if ok:
-                    if staged:
-                        # TEST memory only — real ledger untouched, so the live
-                        # push still sees this account as due after verification.
-                        engagement_notify.record_notified(test_ledger, a, tier,
-                                                          d.get("touch"))
-                    else:
-                        # Record BOTH tier and the touch we just notified on, so the
-                        # same activity can't re-fire but a genuinely newer touch can.
-                        # Company-keyed + merge-strongest (MAR2-31): survives
-                        # account-id re-keys, and a weaker twin can never
-                        # downgrade the company's recorded state.
-                        engagement_notify.record_notified(ledger, a, tier, d.get("touch"))
+                    # Persisted per card, the instant it lands (see
+                    # _persist_notified). staged → TEST memory only, so the real
+                    # ledger stays untouched and the live push still sees this
+                    # account as due after verification; live → record BOTH tier
+                    # and the touch we just notified on, so the same activity
+                    # can't re-fire but a genuinely newer touch can
+                    # (company-keyed + merge-strongest, MAR2-31).
+                    _persist_notified(test_ledger if staged else ledger, a, tier,
+                                      d.get("touch"))
                     posted += 1
             fired.append(entry)
-        if not dry_run and posted:
-            if staged:
-                repo.set_setting("notified_tiers_test", json.dumps(test_ledger))
-            else:
-                repo.set_setting("notified_tiers", json.dumps(ledger))
         return {"due": len(due), "posted": posted, "live": live,
                 "stage": "test" if staged else "live",
                 "dry_run": dry_run, "detail": fired[:60]}

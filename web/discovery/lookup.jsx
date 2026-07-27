@@ -56,7 +56,7 @@ function SegmentSelect({ value, onChange, disabled }) {
   );
 }
 
-function LookupBar({ pushToast, onOpenAccount, onStarted }) {
+function LookupBar({ pushToast, onOpenAccount, onStarted, accounts }) {
   const [name, setName] = useState('');
   const [website, setWebsite] = useState('');
   const [busy, setBusy] = useState(false);        // resolve in flight
@@ -74,7 +74,19 @@ function LookupBar({ pushToast, onOpenAccount, onStarted }) {
     if (!name.trim() || busy) return;
     setBusy(true); reset();
     try {
-      const r = await window.API.lookup(name.trim(), website.trim() || null);
+      let r = await window.API.lookup(name.trim(), website.trim() || null);
+      // Twin guard (AGT-1448 QA): a Discovery company whose domain already
+      // belongs to a scored account must route to that account — Promote &
+      // Score would mint a second acc_ for the same real-world company.
+      if (r.status === 'in_discovery' && r.company && r.company.key) {
+        try {
+          const c = await window.API.company(r.company.key);
+          const clean = (d) => String(d || '').toLowerCase().replace(/^www\./, '');
+          const dom = clean(c && c.domain);
+          const hit = dom && (accounts || []).find((a) => clean(a.domain) === dom);
+          if (hit) r = { status: 'already_scored', account_id: hit.account_id, account: hit, engagement: r.engagement };
+        } catch (_e) { /* fall through to the in_discovery card */ }
+      }
       setResult(r);
       const seg = r.resolved && r.resolved.segment;
       setSegment(LOOKUP_SEGMENTS.some(([k]) => k === seg) ? seg : '');

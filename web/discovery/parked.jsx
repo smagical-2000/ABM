@@ -63,8 +63,8 @@ function WatchRow({ c }) {
       </div>
       {c.sample_title && (
         <div className="mt-1 truncate text-[12px] text-zinc-400">
-          {c.sample_url
-            ? <a href={c.sample_url} target="_blank" rel="noopener noreferrer"
+          {safeHref(c.sample_url)
+            ? <a href={safeHref(c.sample_url)} target="_blank" rel="noopener noreferrer"
                 className="hover:text-indigo-600 hover:underline">{c.sample_title}</a>
             : c.sample_title}
         </div>
@@ -94,7 +94,7 @@ function WatchView({ pushToast }) {
     setLoading(true);
     Promise.all([window.API.watchlistLeads(), window.API.parked()])
       .then(([l, p]) => { if (alive) { setLeads(l || []); setParked(p || { companies: [] }); } })
-      .catch(() => { if (alive && pushToast) pushToast('Could not load the watch list'); })
+      .catch(() => { if (alive && pushToast) pushToast('Could not load the watch list', 'danger'); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, []);

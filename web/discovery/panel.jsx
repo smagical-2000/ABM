@@ -285,6 +285,11 @@ function RejectReasonModal({ company, onCancel, onConfirm }) {
   const [selected, setSelected] = useState(null);
   const [text, setText] = useState('');
   const reason = text.trim() || selected;
+  React.useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onCancel(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onCancel]);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-zinc-900/30 backdrop-blur-[2px] animate-fade" onClick={onCancel} />

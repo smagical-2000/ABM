@@ -118,6 +118,12 @@ function PeopleEngagingBlock({ signals }) {
 
 function CompanyDrawer({ company, onClose, onPromote, onDefer, onReject, onRestore }) {
   const open = !!company;
+  React.useEffect(() => {
+    if (!open) return;
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
   return (
     <div className={`fixed inset-0 z-40 ${open ? '' : 'pointer-events-none'}`}>
       {/* Scrim */}

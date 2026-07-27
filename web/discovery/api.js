@@ -91,6 +91,9 @@ window.API = {
   setLiveRouting: (enabled) => http('/api/engagement/settings/live-routing', {
     method: 'POST', body: JSON.stringify({ enabled }),
   }),
+  // Staging gate: while stage='test' EVERY activation is coerced to a [TEST] post
+  // on the private channel, regardless of the live-routing toggle. → { stage }.
+  notifyStage: () => http('/api/engagement/settings/notify-stage'),
   // Send cutoff (YYYY-MM-DD or null): only accounts with activity on/after it are
   // handed off; the older already-processed backlog is suppressed. Pass '' to clear.
   sendCutoff: () => http('/api/engagement/settings/send-cutoff'),
@@ -132,7 +135,7 @@ window.API = {
   outreachStats: (refresh = false) => http(`/api/outreach/stats${refresh ? '?refresh=1' : ''}`),
 
   // ── watch list: lone-standard-hire leads kept out of Discovery ──────────────
-  parked: () => http('/api/discovery/parked'),                       // not yet qualified
+  // (parked, defined above, is the not-yet-qualified half of this view)
   watchlistLeads: () => http('/api/panel?status=qualified&watchlist=only'),  // qualified, low intent
 
   // ── social: monitored LinkedIn accounts (Apify post-engagement) ─────────────

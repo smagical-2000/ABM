@@ -39,6 +39,7 @@ import os
 from collections import Counter
 from datetime import UTC, datetime
 
+from auto_search.clients.upstream import UpstreamQuotaError
 from auto_search.engagement import linkedin_ads as la
 from auto_search.engagement import notify, phone_waterfall, scoring
 from auto_search.engagement.cross import build_index
@@ -86,6 +87,12 @@ async def _scrape(share_categories: dict[str, str], *, max_reactions: int) -> li
         try:
             rs = await social_apify.fetch_post_reactions(
                 la.post_url(share_id), max_items=max_reactions)
+        except UpstreamQuotaError:
+            # Account-wide Apify cap: every remaining post fails identically, so
+            # swallowing it drops live selling-hours leads under a green run
+            # (2026-07-27 — 403s at WARNING only, every 15 minutes).
+            logger.error("apify account capped — aborting TOFU scrape")
+            raise
         except Exception as e:  # noqa: BLE001 — one bad post mustn't sink the run
             logger.warning("reactions fetch failed for %s: %s", share_id, e)
             continue

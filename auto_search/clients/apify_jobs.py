@@ -26,6 +26,8 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, ConfigDict
 
+from auto_search.clients.upstream import UpstreamError, raise_for_upstream
+
 logger = logging.getLogger(__name__)
 
 INDEED_ACTOR = "borderline~indeed-scraper"
@@ -169,29 +171,47 @@ class ApifyJobsClient:
     # ── transport ─────────────────────────────────────────────────────
 
     async def _run(self, actor: str, body: dict) -> list[dict]:
-        """POST input, wait for the run, return dataset rows (a JSON array)."""
-        url = _RUN_ITEMS.format(actor=actor)
-        params = {"token": self._token}
-        rows = await self._post_json(url, params, body)
+        """POST input, wait for the run, return dataset rows (a JSON array).
+
+        A refusal (quota cap, bad token, actor error) RAISES — it used to log
+        'unexpected non-list response' at WARNING and return [], which is how a
+        hard-limited account (2026-07-27) reported three days of green runs.
+        """
+        short = actor.split("~")[-1]
+        status, payload = await self._post_json(_RUN_ITEMS.format(actor=actor), body)
+        raise_for_upstream(f"apify[{short}]", status, payload)
+        rows = payload
+        if isinstance(rows, dict):                 # tolerated shape drift
+            rows = rows.get("items")
         if not isinstance(rows, list):
-            logger.warning("apify[%s] unexpected non-list response: %.180s",
-                           actor.split("~")[-1], rows)
-            return []
-        logger.info("apify[%s] query=%r → %d rows",
-                    actor.split("~")[-1], body.get("query") or body.get("title"),
-                    len(rows))
+            raise UpstreamError(
+                f"apify[{short}] unexpected non-list response: {str(payload)[:180]}")
+        logger.info("apify[%s] query=%r → %d rows", short,
+                    body.get("query") or body.get("title"), len(rows))
         return rows
 
-    async def _post_json(self, url: str, params: dict, body: dict) -> Any:
+    async def _post_json(self, url: str, body: dict) -> tuple[int, Any]:
+        """POST and return (status_code, parsed body). The status is half the
+        signal — a 403 body parses fine and looks like data-shaped JSON."""
+        params = {"token": self._token}
         if self._http is not None:
             resp = await self._http.post(url, params=params, json=body)
-            return resp.json()
+            return resp.status_code, _parse(resp)
         async with httpx.AsyncClient(timeout=self._timeout) as c:
             resp = await c.post(url, params=params, json=body)
-            return resp.json()
+            return resp.status_code, _parse(resp)
 
 
 # ── helpers ───────────────────────────────────────────────────────────
+
+
+def _parse(resp: httpx.Response) -> Any:
+    """Parsed JSON, or the raw text when the body isn't JSON (a proxy error page
+    is still evidence — it must reach raise_for_upstream, not vanish)."""
+    try:
+        return resp.json()
+    except ValueError:
+        return resp.text
 
 
 def _cap_rows(n: int) -> int:

@@ -25,6 +25,8 @@ from typing import Any
 import httpx
 from pydantic import BaseModel
 
+from auto_search.clients.upstream import UpstreamError, UpstreamQuotaError, is_quota
+
 logger = logging.getLogger(__name__)
 
 _BASE = "https://api.apify.com/v2/acts"
@@ -37,8 +39,16 @@ _ACTOR_ENRICH = "freshdata~fresh-linkedin-profile-data"
 _TIMEOUT_S = 300.0
 
 
-class ApifyError(RuntimeError):
+class ApifyError(UpstreamError):
     """An Apify actor run failed or timed out."""
+
+
+class ApifyQuotaExceeded(ApifyError, UpstreamQuotaError):
+    """The Apify ACCOUNT is capped (monthly usage hard limit / out of credits).
+
+    Deliberately distinct from ApifyError: a per-target `except ApifyError:
+    continue` is right for one bad profile and catastrophic for an account-wide
+    cap — on 2026-07-27 that swallow turned a total outage into a green run."""
 
 
 class RawEngager(BaseModel):
@@ -155,11 +165,17 @@ async def _run_actor(actor: str, payload: dict, *, client: httpx.AsyncClient | N
     try:
         resp = await client.post(url, params=params, json=payload)
         if resp.status_code >= 400:
-            raise ApifyError(f"{actor} → HTTP {resp.status_code}: {resp.text[:300]}")
+            # A capped account gets its OWN class so per-target handlers can't
+            # swallow it as "one bad profile" (2026-07-27 hard-limit outage).
+            cls = ApifyQuotaExceeded if is_quota(resp.status_code, resp.text) else ApifyError
+            raise cls(f"{actor} → HTTP {resp.status_code}: {resp.text[:300]}")
         try:
             data = resp.json()
         except ValueError as e:  # 200 with a non-JSON/truncated body
             raise ApifyError(f"{actor} returned non-JSON: {resp.text[:200]}") from e
+        if isinstance(data, dict) and data.get("error"):
+            cls = ApifyQuotaExceeded if is_quota(200, data) else ApifyError
+            raise cls(f"{actor} → error body: {str(data['error'])[:300]}")
         if isinstance(data, list):
             return data
         return data.get("items", []) if isinstance(data, dict) else []

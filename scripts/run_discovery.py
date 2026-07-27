@@ -45,12 +45,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dotenv import load_dotenv
 
 from auto_search import job_qualifier, job_stacking, lifecycle, pipeline
+from auto_search.clients.upstream import UpstreamQuotaError
 from auto_search.connectors.acquisitions import AcquisitionsConnector
 from auto_search.connectors.funding import FundingConnector
 from auto_search.connectors.job_postings import JobPostingsConnector
 from auto_search.connectors.leadership_changes import LeadershipChangesConnector
 from auto_search.connectors.warntracker import WarnTrackerConnector
 from auto_search.db import get_repository
+from auto_search.ops.alerts import post_ops_alert, should_alert
 from auto_search.scoring import spend_guard
 
 load_dotenv()   # no override: operator env (e.g. DATABASE_URL) must win
@@ -233,6 +235,62 @@ def _finish_run(repo, run_id, status: str, error: str | None = None) -> None:
             logging.getLogger(__name__).debug("finish_run failed: %s", e)
 
 
+# ── connector-failure alerting ────────────────────────────────────────
+# A source that RAISES must page. Before 2026-07-27 the only loud path for a
+# dead source was run_digest's 24h source-silence WARNING (lumped with every
+# other quiet source), because the 1-of-N policy below keeps the run at exit 0
+# when other sources survive — so warntracker's stale-feed tripwire and a
+# total Apify quota outage both read as "green run, quiet market".
+
+_QUOTA_KIND = "upstream-quota"
+_QUOTA_RUNBOOK = (
+    "The Apify account is capped or blocked — this is billing, not code, and it "
+    "is account-wide: jobs discovery, ALL SignalBase feeds, social listening and "
+    "LinkedIn TOFU capture are down until it clears. Check usage/limits in the "
+    "Apify console (raise the monthly hard limit or wait for the cycle reset), "
+    "then re-run scripts/run_discovery.py --days 1 --no-limit.")
+_FAIL_KIND = "connector-failure"
+_FAIL_RUNBOOK = (
+    "One or more discovery connectors raised. Per-source triage lives in the "
+    "2026-07-23 live source audit (MAR2-45); a stale/frozen upstream feed needs "
+    "a source swap, not a retry.")
+
+
+def alert_failed_sources(failures: dict[str, str], *, state_repo=None) -> bool:
+    """ONE consolidated ops alert naming every source that failed this run.
+
+    Quota failures get their own kind + runbook (one incident, one fix, every
+    source). Throttled via alerts.should_alert so a multi-day outage doesn't
+    post a card per run. Best-effort by contract — alerting can never break the
+    run it reports on. Returns True iff an alert was posted."""
+    if not failures:
+        return False
+    quota = {s for s, err in failures.items() if "UpstreamQuotaError" in err}
+    kind = _QUOTA_KIND if quota else _FAIL_KIND
+    try:
+        if state_repo is None:
+            from auto_search.db.engagement_repository import (
+                get_engagement_repository,
+            )
+            state_repo = get_engagement_repository()
+    except Exception:  # noqa: BLE001 — throttle state is optional, alerting is not
+        logging.getLogger(__name__).warning(
+            "alert throttle state unavailable — alerting unthrottled")
+        state_repo = None
+    try:
+        if state_repo is not None and not should_alert(state_repo, kind, min_gap_hours=6.0):
+            return False
+        title = (f"Upstream QUOTA exceeded — {len(failures)} discovery source(s) DEAD"
+                 if quota else f"{len(failures)} discovery source(s) FAILED")
+        return post_ops_alert(
+            kind=kind, severity="failure", service="discovery-cron", title=title,
+            detail="\n".join(f"{src}: {err[:200]}" for src, err in sorted(failures.items())),
+            runbook=_QUOTA_RUNBOOK if quota else _FAIL_RUNBOOK)
+    except Exception:  # noqa: BLE001 — best-effort by contract
+        logging.getLogger(__name__).exception("connector-failure alert failed")
+        return False
+
+
 def show_panel(repo) -> None:
     banner("REVIEW PANEL — qualified companies")
     rows = repo.panel(statuses=("qualified",))
@@ -291,7 +349,8 @@ async def main(args: argparse.Namespace) -> int:
               f"per new company{RESET}")
 
     totals: dict[str, int] = {}
-    ran = failed = 0
+    failures: dict[str, str] = {}   # source -> error, for the consolidated alert
+    ran = 0
     spend_op = None
     scoring_repo = None
     if not args.no_qualify:
@@ -333,10 +392,18 @@ async def main(args: argparse.Namespace) -> int:
                 prefilter=prefilter, spend_op=spend_op,
             )
         except Exception as e:  # noqa: BLE001 — one source must not kill the cron
-            failed += 1
+            failures[name] = f"{type(e).__name__}: {e}"
             logging.getLogger(__name__).error(
                 "connector %s failed: %s", name, e, exc_info=args.debug)
             print(f"  {RED}⚠️  {name} failed: {type(e).__name__}: {e}{RESET}")
+            if isinstance(e, UpstreamQuotaError):
+                # Account-wide cap — the remaining sources share the key and
+                # would each burn a timeout proving the same thing.
+                print(f"  {RED}upstream account capped — skipping remaining "
+                      f"source(s){RESET}")
+                for skipped in selected[selected.index(name) + 1:]:
+                    failures[skipped] = f"{type(e).__name__}: skipped (account capped)"
+                break
             continue
         ran += 1
         for k, v in counts.items():
@@ -376,14 +443,20 @@ async def main(args: argparse.Namespace) -> int:
             if res["scored"]:
                 print(f"  {DIM}auto-scored {len(res['scored'])} promoted lead(s){RESET}")
 
+    # A failing source is now TOLD, not just logged — one consolidated card per
+    # run (throttled), so a dead connector pages instead of waiting for the
+    # digest's 24h silence warning.
+    alert_failed_sources(failures)
+
     # Production exit code: a single source failing keeps exit 0 (resilient), but
     # a TOTAL failure (every selected source errored) exits non-zero so the
     # scheduler marks the run failed and can alert.
     if selected and ran == 0:
-        print(f"\n  {RED}all {failed} source(s) failed — exiting non-zero{RESET}")
+        print(f"\n  {RED}all {len(failures)} source(s) failed — exiting non-zero{RESET}")
         return 1
-    if failed:
-        print(f"  {YELLOW}{failed} of {len(selected)} source(s) failed (others ran){RESET}")
+    if failures:
+        print(f"  {YELLOW}{len(failures)} of {len(selected)} source(s) failed "
+              f"(others ran){RESET}")
     return 0
 
 

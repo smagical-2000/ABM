@@ -32,7 +32,12 @@ from auto_search import llm
 from auto_search.models import MIN_LAID_OFF, QualificationResult, RawSignal
 from auto_search.normalize import slugify
 
-load_dotenv(override=True)
+# NO override (2026-07-27): this is a library module, and override=True let a
+# stray .env silently REPLACE the operator's environment at import time —
+# three catch-up discovery runs wrote to a local Postgres instead of prod
+# because .env carries DATABASE_URL=postgresql://localhost/abm_discovery.
+# The process env must always win; every entrypoint already loads .env itself.
+load_dotenv()
 logger = logging.getLogger(__name__)
 
 _MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")

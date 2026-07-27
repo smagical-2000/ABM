@@ -405,6 +405,76 @@
    "fix": "last_real_touch column (newest scored NON-click touch) in the SQL view + JSON rollup, and ONE shared notify.trigger_touch helper read by the gates, the twin-dedup ranking, the seed baseline, the /activate cutoff clock, and the audit I4 rebuild.",
    "guard": "tests/test_ship_batch.py::test_click_never_rearms_hot_reactivation + ::test_cutoff_reads_real_clock + ::test_legacy_rows_without_key_keep_old_clock + ::test_json_rollup_exposes_last_real_touch (the 4 replays) + ::test_twin_dedup_uses_trigger_clock + ::test_abm_gate_is_company_level (twin shadowing) + ::test_schema_click_literals_lockstep + tests/test_tofu_trigger_and_hot_rule.py::test_seed_baselines_to_now_then_nothing_fires",
    "lesson": "A rule has dimensions — points AND clocks. Capping the score fixed one surface while the clock kept lying on the others; fix + test each surface, and make every touch-reader share ONE selection helper so the next surface cannot quietly diverge."
+  },
+  {
+   "id": "apify-quota-swallowed-as-empty-2026-07-27",
+   "date": "2026-07-27",
+   "area": "clients/apify_jobs, clients/signalbase, social/apify + poll, connectors/job_postings, linkedin_ads_runner, scripts/run_discovery",
+   "symptom": "The Apify account hit its monthly usage hard limit on Jul 24 and every discovery pull, social poll and TOFU capture returned zero for three days, while connector_runs stamped 'success', run_discovery exited 0 and run_daily printed 'all legs OK'. The digest only said the sources were 'silent'.",
+   "root_cause": "Every Apify/SignalBase call path converted a refusal into an empty result: apify_jobs._run logged 'unexpected non-list response' at WARNING and returned []; signalbase._run_sync returned resp.json() unchecked so a 403 body with no 'data' key read as '0 records'; job_postings._gather, social/poll.py and linkedin_ads_runner._scrape all caught-and-continued per target. An empty page and a refused request were the same value.",
+   "fix": "clients/upstream.py: UpstreamError / UpstreamQuotaError + raise_for_upstream (HTTP>=400 or a 200 carrying an {'error':...} envelope raises; 402/429 and quota-flavoured messages classify as quota). social.ApifyQuotaExceeded so per-target handlers cannot swallow an account-wide cap. run_discovery collects failures, stops early on quota, and posts ONE consolidated failure-severity ops alert with a billing runbook.",
+   "guard": "tests/test_upstream_quota.py",
+   "lesson": "Never let an error response become an empty collection. If a caller's tolerance ('one bad target must not sink the run') is right for local faults, give account-wide faults their own exception class so that tolerance cannot apply to them."
+  },
+  {
+   "id": "jobs-streak-never-produced-2026-07-27",
+   "date": "2026-07-27",
+   "area": "ops/source_streaks",
+   "symptom": "The daily digest read 'discovery sources SILENT (4/8): jobs never, ...' every single day, while jobs was the platform's top producer (393 companies attributed to 'indeed', 446 to 'linkedin').",
+   "root_cause": "JobPostingsConnector declares source_name='jobs' (what connector_runs and the digest show) but tags the RawSignals it emits per BOARD, so discovery_signals holds source='indeed'/'linkedin' and THRESHOLDS' lookup of 'jobs' was None forever -> days_silent=None -> 'NEVER produced'.",
+   "fix": "SOURCE_ALIASES {indeed,linkedin} -> jobs, applied in all three last_new_by_source branches; the jobs streak also floors on the watch ledger's max(first_parked_at), since the stacking gate can legitimately park every find instead of creating a discovery_companies row.",
+   "guard": "tests/test_source_fixes.py::TestJobsSourceAliases",
+   "lesson": "A connector's declared source_name is not necessarily the `source` its rows persist under. A tripwire that always fires is worse than no tripwire — it trains readers to ignore the one alert built to be trusted."
+  },
+  {
+   "id": "replyio-cursor-advances-on-failure-2026-07-27",
+   "date": "2026-07-27",
+   "area": "scripts/run_engagement_replyio (_default_since)",
+   "symptom": "An outage longer than the 10-day overlap permanently loses Reply.io activity: heat/tier for the affected accounts stays low forever with no error to show for it.",
+   "root_cause": "set_sync_state stamps last_synced_at on BOTH success and failure, and run_sync records status='failed' with a fresh stamp on every exception. _default_since resumed from last_synced_at without checking status, so failing runs walked the cursor forward while ingesting nothing.",
+   "fix": "Anchor on window_to, which only a successful sync writes (both repos COALESCE it, so a failure preserves the last good value); legacy rows fall back to last_synced_at only when status=='success'; no trustworthy cursor re-pulls the 2026 cohort.",
+   "guard": "tests/test_run_engagement_replyio.py",
+   "lesson": "A resume cursor must be written by the thing that succeeded, never by the thing that ran. If one field records both, pick the field only success can touch."
+  },
+  {
+   "id": "tofu-failure-disarms-throttle-2026-07-27",
+   "date": "2026-07-27",
+   "area": "scripts/run_linkedin_tofu",
+   "symptom": "A broken TOFU run re-scraped (re-billed) Apify every 15 minutes for the whole active window, with at most one Slack alert per 3 hours.",
+   "root_cause": "The 6-hour min-interval cost throttle reads last_synced_at, but only the success path wrote it. A crash after the paid scrape left sync_state untouched, so the next tick saw a stale cursor and re-ran the full paid scan.",
+   "fix": "One _stamp_attempt() helper stamps both outcomes (status recorded honestly as 'failed'); --dry-run never arms the throttle; --force is still the manual bypass.",
+   "guard": "tests/test_run_linkedin_tofu.py::test_failed_run_stamps_sync_state_so_the_throttle_still_applies",
+   "lesson": "A throttle that guards SPEND must count attempts, not successes — the money is gone either way."
+  },
+  {
+   "id": "apify-token-in-cron-logs-2026-07-27",
+   "date": "2026-07-27",
+   "area": "clients/apify_jobs, clients/signalbase, social/apify, cron entrypoints",
+   "symptom": "The live Apify API key appeared in cleartext dozens of times per run in the Railway logs for discovery-cron and the social/TOFU legs.",
+   "root_cause": "Every Apify endpoint carried the key as `?token=<APIFY_API_KEY>`, and httpx logs one INFO line per request containing the full URL. run_discovery silenced httpx; run_social and run_linkedin_tofu did not.",
+   "fix": "clients/upstream.apify_auth() -> Authorization: Bearer header on all three Apify call paths (no token in any URL), plus ops/logsetup.quiet_http_logs() called by run_discovery, run_social and run_linkedin_tofu. The key still needs rotating — historical logs contain it.",
+   "guard": "tests/test_apify_auth.py",
+   "lesson": "Secrets never go in a URL: request loggers print URLs by default, and log stores are forever. Silencing the logger is the second layer, not the fix."
+  },
+  {
+   "id": "cron-hangs-at-interpreter-shutdown-2026-07-27",
+   "date": "2026-07-27",
+   "area": "scripts/run_linkedin_tofu, scripts/run_daily, ops/shutdown",
+   "symptom": "PythonFinalizationError: cannot join thread at interpreter shutdown on every local run of run_linkedin_tofu; in production the container can stay alive after its work is done, and Railway will not start the next tick of a service whose previous invocation is still 'running' (the most plausible cause of the Jul 24-27 cron silence).",
+   "root_cause": "Each repository opens its own psycopg ConnectionPool with worker threads (this leg opens three). sys.exit() finalizes the interpreter, which tries to join them.",
+   "fix": "ops/shutdown.py: close_pools() + hard_exit() (close, flush stdout/stderr by hand since os._exit skips atexit, then os._exit). main() closes every repo it opened in a finally; the entrypoint is hard_exit(main()).",
+   "guard": "tests/test_cron_shutdown.py",
+   "lesson": "A batch process with background threads must exit deliberately. Work being committed is not the same as the process being finished — and a hung container looks exactly like a cron that stopped firing."
+  },
+  {
+   "id": "warntracker-tripwire-too-quiet-2026-07-27",
+   "date": "2026-07-27",
+   "area": "connectors/warntracker, scripts/run_discovery",
+   "symptom": "warntracker's stale-feed tripwire fired correctly on every run, but nobody was paged: run_daily reported 'all legs OK' and the only loud path was run_digest's throttled 24h source-silence WARNING, lumped in with three other quiet sources.",
+   "root_cause": "The connector's comment claimed 'a raised error = connector marked failed = ops alert'. The last link did not exist — run_discovery's 1-of-N resilience policy caught the exception, printed a warning and exited 0.",
+   "fix": "run_discovery.alert_failed_sources posts one consolidated FAILURE-severity ops alert naming every source that raised (throttled 6h); the warntracker comment now describes the real chain, and the module records the verdict UPSTREAM DEAD (warntracker.com itself stopped updating ~2026-04-27) so the raised message tells the reader to REPLACE the source rather than retry.",
+   "guard": "tests/test_upstream_quota.py::TestDeadSourcePagesAsAFailure, tests/test_source_fixes.py::TestWarntrackerStaleTripwire::test_the_raised_message_carries_the_verdict",
+   "lesson": "A comment describing an alerting chain is not the chain. Resilience policies ('one source must not kill the run') silently downgrade every per-source failure — if a source can die, something must page at failure severity by name."
   }
  ]
 }

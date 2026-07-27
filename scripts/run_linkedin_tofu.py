@@ -38,6 +38,7 @@ from auto_search.db.engagement_repository import get_engagement_repository
 from auto_search.db.scoring_repository import get_scoring_repository
 from auto_search.engagement import linkedin_ads, linkedin_ads_runner
 from auto_search.ops.logsetup import quiet_http_logs
+from auto_search.ops.shutdown import close_pools, hard_exit
 
 load_dotenv()   # no override: an operator-exported env (e.g. DATABASE_URL) must win
                 # (2026-07-08: override=True let a local .env silently redirect a
@@ -48,6 +49,17 @@ _DEFAULT_CSV = (Path(__file__).resolve().parent.parent
                 / "auto_search" / "engagement" / "linkedin_tofu_shares.csv")
 
 _SYNC_SOURCE = "linkedin_tofu"   # sync_state key for the cost-guard throttle
+
+# Every repository this run opened. Each one owns a psycopg ConnectionPool with
+# worker threads, and this leg opens three — main() closes them in a finally so
+# the process has nothing left to join on the way out (see ops/shutdown.py).
+_OPENED: list = []
+
+
+def _opened(repo):
+    """Register a repo for shutdown, and return it."""
+    _OPENED.append(repo)
+    return repo
 
 
 def _within_active_hours(now: datetime | None = None) -> bool:
@@ -133,6 +145,15 @@ def _hours_since(ts) -> float | None:
 
 
 def main() -> int:
+    """Thin wrapper so every exit path closes the pools this run opened."""
+    try:
+        return _run()
+    finally:
+        close_pools(_OPENED)
+        _OPENED.clear()
+
+
+def _run() -> int:
     ap = argparse.ArgumentParser(description="LinkedIn TOFU ad-engagement run")
     ap.add_argument("--dry-run", action="store_true",
                     help="no writes; ignores the enable flag (for testing)")
@@ -164,7 +185,7 @@ def main() -> int:
               "live, or pass --dry-run. No-op.", flush=True)
         return 0
 
-    engagement_repo = get_engagement_repository()
+    engagement_repo = _opened(get_engagement_repository())
     engagement_repo.ensure_schema()
     # Liveness stamp for the ops watchdog: EVERY tick (even a no-op) proves the
     # 15-min cron is alive; the watchdog alerts when this goes stale in-window.
@@ -212,7 +233,8 @@ def main() -> int:
     try:
         summary = asyncio.run(linkedin_ads_runner.run(
             share_categories=share_categories, engagement_repo=engagement_repo,
-            scoring_repo=get_scoring_repository(), discovery_repo=get_repository(),
+            scoring_repo=_opened(get_scoring_repository()),
+            discovery_repo=_opened(get_repository()),
             airtable_client=airtable, replyio_client=reply, mirror_client=mirror,
             max_reactions=args.max_reactions,
             max_contacts=args.max_contacts, max_leads=args.max_leads, dry_run=args.dry_run,
@@ -275,4 +297,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # hard_exit, not sys.exit: interpreter finalization tries to join psycopg's
+    # pool threads and can raise PythonFinalizationError / hang forever, leaving
+    # a container Railway still counts as running — so the cron stops ticking.
+    hard_exit(main())

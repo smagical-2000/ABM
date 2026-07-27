@@ -387,3 +387,24 @@ def test_vetoed_pairs_are_recorded_for_verification():
         abm_targets=[], same_pairs={"adventhealth.com|ah.org"})
     m = idx2.match(company="AdventHealth", email="x@ah.org")
     assert m is not None and m.account_id == "acc_advent"
+
+
+def test_build_time_sibling_refusal_is_also_queued_for_verification():
+    """Live 2026-07-27: the first two production refusals (den.health vs
+    denverhealth.org, scanhealthplan.com vs thescangroup.org) are both
+    plausibly the SAME org — the build-time gate must queue them for
+    site verification, not just refuse them silently forever."""
+    from auto_search.engagement.cross import CrossIndex
+    idx = CrossIndex(
+        scored=[{"account_id": "acc_denverhealth", "name": "Denver Health",
+                 "domain": "denverhealth.org"}],
+        abm_targets=[{"name": "Denver Health", "domain": "den.health"}])
+    assert ("den.health", "denverhealth.org", "Denver Health") in idx.vetoed_pairs
+    # once verified same, the sibling link is established normally
+    idx2 = CrossIndex(
+        scored=[{"account_id": "acc_denverhealth", "name": "Denver Health",
+                 "domain": "denverhealth.org"}],
+        abm_targets=[{"name": "Denver Health", "domain": "den.health"}],
+        same_pairs={"den.health|denverhealth.org"})
+    m = idx2.match(company="Denver Health", email="x@den.health")
+    assert m is not None and m.account_id == "acc_denverhealth"

@@ -1,0 +1,621 @@
+<title>Campaign Automation</title>
+<style>
+  .ca *{box-sizing:border-box}
+  .ca{
+    --bg:#fafafa; --surface:#ffffff; --soft:#f4f4f5; --soft2:#fafafa;
+    --line:#e4e4e7; --line-strong:#d4d4d8;
+    --ink:#18181b; --body:#3f3f46; --muted:#71717a; --faint:#a1a1aa;
+    --indigo:#4f46e5; --indigo-strong:#4338ca; --indigo-soft:#e0e7ff; --indigo-faint:#eef2ff;
+    --green:#047857; --green-soft:#d1fae5;
+    --rose:#be123c; --rose-soft:#ffe4e6;
+    --sky:#0369a1; --sky-soft:#e0f2fe;
+    --amber:#b45309; --amber-soft:#fef3c7;
+    font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    color:var(--ink); font-size:13px; line-height:1.5; -webkit-font-smoothing:antialiased;
+  }
+  html,body{margin:0;background:var(--bg)}
+  .num{font-variant-numeric:tabular-nums}
+  .wrap{max-width:none;margin:0;padding:6px 2px 48px}
+
+  .pagehead{display:flex;align-items:flex-start;gap:16px;margin:2px 0 6px;flex-wrap:wrap}
+  h1{font-size:24px;font-weight:700;letter-spacing:-0.02em;margin:0}
+  .pagesub{color:var(--muted);margin:4px 0 0;max-width:64ch}
+  .actions{margin-left:auto;display:flex;align-items:center;gap:8px}
+  .gear{border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:7px 12px;
+        display:inline-flex;align-items:center;gap:7px;color:var(--muted);font-size:13px}
+  .gear i{width:6px;height:6px;border-radius:999px;background:#d4d4d8;display:inline-block}
+  .btn{font:inherit;font-size:13px;font-weight:600;border-radius:10px;padding:8px 16px;cursor:pointer;
+       border:1px solid var(--line-strong);background:var(--surface);color:var(--ink)}
+  .btn:focus-visible{outline:2px solid var(--indigo);outline-offset:1px}
+  .btn.primary{background:var(--indigo);border-color:transparent;color:#fff}
+  .btn.small{font-size:12px;padding:5px 12px;border-radius:8px}
+  .btn.ghost{border-color:transparent;background:transparent;color:var(--muted);font-weight:500}
+  .btn.tiny{font-size:11.5px;padding:3px 10px;border-radius:7px;font-weight:500}
+
+  .subtabs{display:flex;gap:22px;border-bottom:1px solid var(--line);margin:18px 0 0}
+  .subtab{font:inherit;font-size:13.5px;font-weight:500;color:var(--muted);background:none;border:none;
+          padding:9px 2px 11px;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+  .subtab:focus-visible{outline:2px solid var(--indigo);outline-offset:1px}
+  .subtab.on{color:var(--ink);font-weight:600;border-bottom-color:var(--ink)}
+  .view{display:none}
+  .view.on{display:block}
+
+  .modebar{display:flex;align-items:center;gap:12px;margin:18px 0 4px;flex-wrap:wrap}
+  .modelabel{font-size:12px;font-weight:600;color:var(--muted)}
+  .modes{display:inline-flex;background:var(--soft);border:1px solid var(--line);border-radius:10px;padding:2px;gap:2px}
+  .modes button{font:inherit;font-size:12.5px;font-weight:500;border:0;background:transparent;color:var(--muted);
+                padding:5px 13px;border-radius:8px;cursor:pointer}
+  .modes button:focus-visible{outline:2px solid var(--indigo);outline-offset:1px}
+  .modes button[aria-pressed="true"]{background:var(--surface);color:var(--ink);
+                box-shadow:0 1px 2px rgba(0,0,0,.06);border:1px solid rgba(228,228,231,.8)}
+  .modehint{font-size:12.5px;color:var(--muted);margin:0 0 14px;min-height:19px}
+
+  .console{display:grid;grid-template-columns:minmax(0,1.12fr) minmax(0,1fr);gap:14px}
+  @media (max-width:800px){.console{grid-template-columns:1fr}}
+  .panel{background:var(--surface);border:1px solid var(--line);border-radius:16px;overflow:hidden;
+         box-shadow:0 1px 2px rgba(24,24,27,.02)}
+  .panel-h{display:flex;align-items:center;gap:8px;padding:11px 16px;border-bottom:1px solid var(--line);
+           font-size:12px;font-weight:600;color:var(--body);text-transform:uppercase;letter-spacing:.04em}
+  .panel-h .count{background:var(--soft);border-radius:999px;padding:1px 8px;font-size:11px;color:var(--muted);
+                  text-transform:none;letter-spacing:0}
+
+  .card{padding:13px 16px;border-bottom:1px solid var(--line)}
+  .card:last-of-type{border-bottom:0}
+  .row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .name{font-weight:600;font-size:14px}
+  .pill{font-size:10.5px;font-weight:600;padding:2.5px 9px;border-radius:999px;background:var(--soft);
+        color:var(--muted);white-space:nowrap}
+  .pill.hot{background:var(--rose-soft);color:var(--rose)}
+  .pill.warm{background:var(--green-soft);color:var(--green)}
+  .pill.tier{background:var(--soft);color:var(--muted)}
+  .pill.vert{background:var(--sky-soft);color:var(--sky)}
+  .pill.vert::before{content:"\25CF";font-size:7px;margin-right:5px;vertical-align:1px}
+  .pill.auto{background:var(--indigo-soft);color:var(--indigo-strong)}
+  .pill.good{background:var(--green-soft);color:var(--green)}
+  .pill.paused{background:var(--soft);color:var(--muted)}
+  .why{font-size:12px;color:var(--muted);margin:5px 0 8px}
+  .contacts{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:10px}
+  .contact{font-size:11.5px;background:var(--soft);border-radius:7px;padding:3px 9px;color:var(--body)}
+  .contact .v{color:var(--green);font-weight:700}
+  .contact .q{color:var(--amber);font-weight:700}
+  .cadence{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .selectbox{font:inherit;font-size:12px;border:1px solid var(--line-strong);background:var(--surface);color:var(--body);
+          border-radius:8px;padding:5px 9px}
+  .more{padding:10px 16px;font-size:12px;color:var(--faint)}
+  .warnrow{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--amber);
+           background:var(--amber-soft);border-radius:8px;padding:4px 10px;margin:7px 0 10px}
+
+  .rails .rail{display:flex;align-items:center;gap:12px;padding:11px 16px;border-bottom:1px solid var(--line);font-size:12.5px}
+  .rails .rail:last-child{border-bottom:0}
+  .rail .k{color:var(--muted);width:140px;flex:none}
+  .rail .v{color:var(--body)}
+  .meter{flex:1;height:6px;border-radius:999px;background:var(--soft);overflow:hidden;min-width:60px;max-width:180px}
+  .meter i{display:block;height:100%;background:var(--indigo);border-radius:999px}
+  .kill{color:var(--rose);font-weight:600}
+
+  .feed-row{display:flex;align-items:baseline;gap:8px;padding:10px 16px;border-bottom:1px solid var(--line);
+            font-size:12.5px;flex-wrap:wrap}
+  .feed-row:last-of-type{border-bottom:0}
+  .t{font-size:11px;color:var(--faint);width:64px;flex:none}
+  .acct{font-weight:600}
+  .arrow{color:var(--faint)}
+  .dest{color:var(--muted)}
+  .undo{margin-left:auto;font-size:12px;color:var(--indigo);cursor:pointer;background:none;border:none;
+        font-family:inherit;font-weight:500;padding:0}
+  .skipline{padding:10px 16px;font-size:12px;color:var(--muted);background:var(--soft2);border-top:1px solid var(--line)}
+  .skipline b{color:var(--body);font-weight:600}
+
+  #cg[data-mode="auto"] .only-manual,#cg[data-mode="auto"] .only-flows{display:none}
+  #cg[data-mode="manual"] .only-auto,#cg[data-mode="manual"] .only-flows{display:none}
+  #cg[data-mode="flows"] .only-auto,#cg[data-mode="flows"] .only-manual{display:none}
+
+  .toolbar{display:flex;gap:8px;margin:18px 0 12px;flex-wrap:wrap;align-items:center}
+  .search{flex:1;min-width:220px;display:flex;align-items:center;gap:8px;border:1px solid var(--line-strong);
+          background:var(--surface);border-radius:10px;padding:7px 12px}
+  .search input{border:0;outline:0;font:inherit;font-size:13px;width:100%;background:transparent;color:var(--ink)}
+  .search input::placeholder{color:var(--faint)}
+  .tablewrap{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:16px;
+             box-shadow:0 1px 2px rgba(24,24,27,.02)}
+  table{border-collapse:collapse;width:100%;min-width:820px}
+  thead th{font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;
+           text-align:left;padding:11px 14px;border-bottom:1px solid var(--line);background:var(--soft2);white-space:nowrap}
+  tbody td{padding:10px 14px;border-bottom:1px solid var(--line);font-size:12.5px;color:var(--body);white-space:nowrap}
+  tbody tr:last-child td{border-bottom:0}
+  tbody tr.click{cursor:pointer}
+  tbody tr.click:hover td{background:var(--soft2)}
+  td .name{font-size:13px}
+  td .sub{font-size:11px;color:var(--faint)}
+  .pager{display:flex;align-items:center;gap:10px;padding:10px 16px;font-size:12px;color:var(--muted)}
+  .pager .spacer{flex:1}
+  .empty{padding:28px 16px;text-align:center;color:var(--faint);font-size:13px}
+
+  .scrim{position:fixed;inset:0;background:rgba(24,24,27,.25);z-index:40;display:none}
+  .drawer{position:fixed;top:0;right:0;bottom:0;width:min(440px,92vw);background:var(--surface);
+          border-left:1px solid var(--line);box-shadow:-8px 0 30px rgba(24,24,27,.08);z-index:50;
+          display:none;flex-direction:column}
+  .scrim.open{display:block}
+  .drawer.open{display:flex}
+  .dhead{padding:16px 18px 12px;border-bottom:1px solid var(--line);position:relative}
+  .dclose{position:absolute;top:12px;right:14px;border:0;background:var(--soft);color:var(--muted);
+          border-radius:8px;width:26px;height:26px;cursor:pointer;font-size:14px;line-height:1}
+  .dmeta{font-size:12px;color:var(--muted);margin-top:6px}
+  .dbody{overflow-y:auto;flex:1;padding:6px 0 18px}
+  .lead{padding:12px 18px;border-bottom:1px solid var(--line)}
+  .lead:last-child{border-bottom:0}
+  .lrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .lname{font-weight:600;font-size:13px}
+  .lemail{font-size:11.5px;color:var(--faint)}
+  .ltl{margin:8px 0 8px;border-left:2px solid var(--line);padding-left:12px;display:grid;gap:3px}
+  .lev{font-size:11.5px;color:var(--muted)}
+  .lev b{color:var(--body);font-weight:600}
+  .lev .d{color:var(--faint)}
+  .lacts{display:flex;gap:6px;flex-wrap:wrap}
+  .dfoot{padding:12px 18px;border-top:1px solid var(--line);display:flex;gap:8px}
+
+  .integ{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:18px 0 14px}
+  @media (max-width:780px){.integ{grid-template-columns:1fr}}
+  .icard{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:13px 16px;
+         box-shadow:0 1px 2px rgba(24,24,27,.02)}
+  .icard .top{display:flex;align-items:center;gap:8px}
+  .icard .iname{font-weight:600;font-size:13.5px}
+  .dot{width:7px;height:7px;border-radius:999px;background:#10b981;display:inline-block}
+  .icard .sub{font-size:12px;color:var(--muted);margin-top:3px}
+  .syncline{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--muted);margin:0 0 10px}
+  .routewrap{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:16px;
+             box-shadow:0 1px 2px rgba(24,24,27,.02)}
+  .routewrap table{min-width:640px}
+  .routewrap .note{padding:10px 16px;font-size:12px;color:var(--muted);background:var(--soft2);border-top:1px solid var(--line)}
+
+  .tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0 14px}
+  @media (max-width:780px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  .tile{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:14px 16px;
+        box-shadow:0 1px 2px rgba(24,24,27,.02)}
+  .tile .n{font-size:24px;font-weight:700;letter-spacing:-0.02em}
+  .tile .n small{font-size:13px;font-weight:500;color:var(--muted)}
+  .tile .l{font-size:12px;color:var(--muted);margin-top:2px}
+  .split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;margin-bottom:14px}
+  @media (max-width:780px){.split{grid-template-columns:1fr}}
+  .pad{padding:14px 16px}
+  .frow{display:grid;grid-template-columns:140px 1fr 64px;align-items:center;gap:12px;padding:4.5px 0;font-size:12.5px}
+  @media (max-width:560px){.frow{grid-template-columns:104px 1fr 56px}}
+  .fl{color:var(--muted)}
+  .fbar{height:15px;border-radius:5px;background:var(--indigo)}
+  .f2 .fbar{opacity:.78}.f3 .fbar{opacity:.6}
+  .f4 .fbar{background:#0d9488}.f5 .fbar{background:#059669}.f6 .fbar{background:#be123c}
+  .fn{text-align:right;color:var(--body);font-weight:600}
+  .jhead{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:13px 16px;border-bottom:1px solid var(--line)}
+  .src-badge{display:inline-flex;align-items:center;background:var(--indigo-faint);color:var(--indigo-strong);
+             font-size:11px;font-weight:600;border-radius:999px;padding:2.5px 10px}
+  .src-badge::before{content:"\25C8";margin-right:5px}
+  .jbodywrap{padding:12px 16px 6px}
+  .jstep{display:grid;grid-template-columns:56px 14px 1fr;gap:10px;align-items:baseline}
+  .jdate{font-size:11px;color:var(--faint);text-align:right;padding-top:2px}
+  .jdotcol{position:relative;display:flex;justify-content:center}
+  .jdot{width:8px;height:8px;border-radius:999px;background:var(--line-strong);margin-top:6px;z-index:1}
+  .jstep.live .jdot{background:var(--indigo)}
+  .jstep.good .jdot{background:#059669}
+  .jstep.hot .jdot{background:var(--rose)}
+  .jdotcol::after{content:"";position:absolute;top:14px;bottom:-8px;width:2px;background:var(--line)}
+  .jstep:last-child .jdotcol::after{display:none}
+  .jbody{font-size:12.5px;padding-bottom:11px;color:var(--body)}
+  .jbody b{color:var(--ink);font-weight:600}
+  .jbody .meta{color:var(--muted)}
+  .statuschip{margin-left:auto;font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+              border-radius:999px;padding:2.5px 9px}
+  .statuschip.live{background:var(--green-soft);color:var(--green)}
+  .statuschip.soon{background:var(--soft);color:var(--muted)}
+</style>
+
+<div class="ca wrap" id="ca">
+
+  <div class="pagehead">
+    <div>
+      <h1>Campaigns</h1>
+      <p class="pagesub">Scored, in-market accounts are enrolled into existing sequences on SmartLead and Outreach.io.
+        The sequencers do the sending; this decides who and when.</p>
+    </div>
+    <div class="actions">
+      <span class="gear">&#9881;<i></i></span>
+      <button class="btn primary">&#9655;&nbsp; Preview run</button>
+    </div>
+  </div>
+
+  <div class="subtabs" role="tablist">
+    <button class="subtab on" data-tab="autopilot" role="tab" aria-selected="true">Autopilot</button>
+    <button class="subtab" data-tab="accounts" role="tab" aria-selected="false">Accounts</button>
+    <button class="subtab" data-tab="routing" role="tab" aria-selected="false">Connections</button>
+    <button class="subtab" data-tab="attribution" role="tab" aria-selected="false">Attribution</button>
+  </div>
+
+  <!-- AUTOPILOT -->
+  <div id="view-autopilot" class="view on">
+    <div class="modebar">
+      <span class="modelabel">Enrollment mode</span>
+      <div class="modes" role="group" aria-label="Enrollment mode">
+        <button id="m-auto" aria-pressed="true">Auto &middot; Discovery</button>
+        <button id="m-manual" aria-pressed="false">Manual</button>
+        <button id="m-flows" aria-pressed="false">Workflows</button>
+      </div>
+    </div>
+    <p class="modehint" id="mode-hint">Discovery accounts enroll automatically within guardrails. Only discovery-sourced accounts are eligible.</p>
+
+    <div class="console" id="cg" data-mode="auto">
+      <div>
+        <!-- manual -->
+        <div class="panel only-manual">
+          <div class="panel-h">Manual enroll</div>
+          <div class="card">
+            <div class="row"><span class="name">Add any account</span></div>
+            <div class="why">Enroll an account that is not in the platform. Leads are resolved by target title.</div>
+            <div class="cadence" style="margin-bottom:9px">
+              <input class="selectbox" style="min-width:190px" value="sutterhealth.org" aria-label="Company domain">
+              <button class="btn small">Find leads</button>
+            </div>
+            <div class="contacts">
+              <span class="contact">M. Chen &middot; COO <span class="v">&#10003;</span></span>
+              <span class="contact">J. Brooks &middot; VP RevCycle <span class="v">&#10003;</span></span>
+              <span class="contact">R. Patel &middot; CFO <span class="q">?</span></span>
+            </div>
+            <div class="cadence">
+              <select class="selectbox"><option>HS Journey &mdash; SmartLead</option><option>Ben &mdash; AE cadence &mdash; Outreach.io</option></select>
+              <button class="btn small primary">Enroll 3 leads</button>
+            </div>
+          </div>
+          <div class="card">
+            <div class="row"><span class="name">From the platform</span></div>
+            <div class="why">Pick any scored or engaged account and push it to a sequence.</div>
+            <div class="cadence" style="margin-bottom:9px">
+              <select class="selectbox" style="min-width:230px"><option>Rayus Radiology &middot; Hot 25 &middot; Engagement</option><option>Summa Health &middot; Warm 41 &middot; Scored</option></select>
+            </div>
+            <div class="contacts"><span class="contact">2 contacts on file</span><button class="btn tiny">Find more</button></div>
+            <div class="cadence">
+              <select class="selectbox"><option>Radiology &mdash; SmartLead</option><option>Ben &mdash; AE cadence &mdash; Outreach.io</option></select>
+              <button class="btn small primary">Enroll</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- workflows -->
+        <div class="panel only-flows">
+          <div class="panel-h">Workflows <span class="count num">2</span></div>
+          <div class="card">
+            <div class="row"><span class="name">Hot discovery &rarr; HS Journey</span><span class="pill good">Active</span></div>
+            <div class="why">Source Discovery &middot; Fit High or Medium &middot; Heat Warm+ or Intent Hot</div>
+            <div class="row"><span class="pill auto">&rarr; HS Journey &middot; SmartLead</span><span class="pill tier num">Cap 25/day</span>
+              <button class="btn tiny" style="margin-left:auto">Edit</button><button class="btn tiny">Pause</button></div>
+          </div>
+          <div class="card">
+            <div class="row"><span class="name">Engaged payers &rarr; Payer UM</span><span class="pill paused">Paused</span></div>
+            <div class="why">Vertical Payer &middot; Heat Warm+</div>
+            <div class="row"><span class="pill auto">&rarr; Payer &mdash; UM &middot; SmartLead</span><span class="pill tier num">Cap 10/day</span>
+              <button class="btn tiny" style="margin-left:auto">Edit</button><button class="btn tiny">Resume</button></div>
+          </div>
+          <div class="card" style="background:var(--soft2)">
+            <div class="row"><span class="name" style="font-size:13px">New workflow</span></div>
+            <div class="cadence" style="margin:8px 0">
+              <select class="selectbox"><option>Source &middot; Any</option><option>Discovery</option></select>
+              <select class="selectbox"><option>Fit &middot; Tier 2+</option><option>Tier 1 only</option></select>
+              <select class="selectbox"><option>Heat &middot; Warm+</option><option>Hot only</option></select>
+              <select class="selectbox"><option>Vertical &middot; Any</option><option>Payer</option><option>Ortho</option></select>
+            </div>
+            <div class="cadence"><span class="arrow">&rarr;</span>
+              <select class="selectbox"><option>Payer &mdash; COO &mdash; SmartLead</option><option>HS Journey &mdash; SmartLead</option></select>
+              <input class="selectbox num" style="width:82px" value="25/day" aria-label="Daily cap">
+              <button class="btn small primary">Create</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- auto guardrails -->
+        <div class="panel only-auto">
+          <div class="panel-h">Guardrails</div>
+          <div class="rails">
+            <div class="rail"><span class="k">Scope</span><span class="v">Discovery-sourced accounts only, manual and imported accounts never auto-enroll</span></div>
+            <div class="rail"><span class="k">Daily cap</span><span class="meter"><i style="width:72%"></i></span><span class="v num">18 / 25</span></div>
+            <div class="rail"><span class="k">Exclusion list</span><span class="v num">51 domains, customers and open opportunities</span></div>
+            <div class="rail"><span class="k">Dedup</span><span class="v">Never enrolled twice, matched across tools by email</span></div>
+            <div class="rail"><span class="k">Undo window</span><span class="v">24 hours on every enrollment</span></div>
+            <div class="rail"><span class="k">Kill switch</span><span class="v kill">Pause all enrollment</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div class="panel">
+          <div class="panel-h">Activity</div>
+          <div class="feed-row"><span class="t num">10:42</span><span class="acct">Twin Cities Orthopedics</span>
+            <span class="arrow">&rarr;</span><span class="dest">SmartLead &middot; Ortho COO &middot; 3 contacts</span>
+            <span class="pill auto">auto</span><button class="undo">Undo</button></div>
+          <div class="feed-row"><span class="t num">09:58</span><span class="acct">Phoenix Children's</span>
+            <span class="arrow">&rarr;</span><span class="dest">SmartLead &middot; HS Journey &middot; 2 contacts</span>
+            <span class="pill auto">auto</span><button class="undo">Undo</button></div>
+          <div class="feed-row"><span class="t num">09:12</span><span class="acct">Boulder Care</span>
+            <span class="arrow">&rarr;</span><span class="dest">SmartLead &middot; BH COO &middot; 3 contacts</span>
+            <span class="pill auto">auto</span></div>
+          <div class="feed-row"><span class="t">Yesterday</span><span class="acct">Albany Med</span>
+            <span class="arrow">&rarr;</span><span class="dest">Outreach.io &middot; pushed by Ben</span>
+            <span class="pill good num">Replied &middot; +6</span></div>
+          <div class="feed-row"><span class="t">Yesterday</span><span class="acct">Dayton Children's</span>
+            <span class="arrow">&rarr;</span><span class="dest">SmartLead &middot; HS Journey</span>
+            <span class="pill hot num">Meeting booked &middot; +10</span></div>
+          <div class="skipline num"><b>Skipped 12</b> &middot; excluded 5 &middot; no contacts 4 &middot; cap 3</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ACCOUNTS -->
+  <div id="view-accounts" class="view">
+    <div class="toolbar">
+      <label class="search">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#a1a1aa" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.8-3.8"></path></svg>
+        <input id="q" type="text" placeholder="Search accounts, leads, emails" aria-label="Search">
+      </label>
+      <select class="selectbox" id="f-status" aria-label="Status">
+        <option value="">All statuses</option><option>In sequence</option><option>Replied</option>
+        <option>Meeting booked</option><option>Paused</option></select>
+      <select class="selectbox" id="f-vert" aria-label="Vertical">
+        <option value="">All verticals</option><option>Health System</option><option>Payer</option>
+        <option>Ortho</option><option>Behavioral Health</option><option>Radiology</option></select>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Account</th><th>Heat</th><th>Campaign</th><th>Step</th><th>Leads</th><th>Last activity</th><th>Status</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div class="empty" id="empty" style="display:none">No accounts match.</div>
+      <div class="pager num"><span id="pageinfo"></span><span class="spacer"></span>
+        <button class="btn tiny" id="prev">Prev</button><button class="btn tiny" id="next">Next</button></div>
+    </div>
+  </div>
+
+  <!-- CONNECTIONS -->
+  <div id="view-routing" class="view">
+    <div class="integ">
+      <div class="icard"><div class="top"><span class="dot"></span><span class="iname">SmartLead</span>
+        <span class="pill" style="margin-left:auto">Email</span></div><div class="sub num">Connected &middot; 12 campaigns &middot; API</div></div>
+      <div class="icard"><div class="top"><span class="dot"></span><span class="iname">Outreach.io</span>
+        <span class="pill" style="margin-left:auto">Email &middot; AE</span></div><div class="sub num">Connected &middot; 8 sequences &middot; API</div></div>
+      <div class="icard"><div class="top"><span class="dot"></span><span class="iname">HeyReach</span>
+        <span class="pill" style="margin-left:auto">LinkedIn</span></div><div class="sub num">Connected &middot; 5 campaigns &middot; API</div></div>
+    </div>
+    <div class="syncline num">Campaign lists pulled from each tool's API &middot; last synced 2 min ago
+      <button class="btn tiny" style="margin-left:6px">Refresh</button></div>
+    <div class="routewrap">
+      <table>
+        <thead><tr><th>Campaign</th><th>Tool</th><th>Channel</th><th>Steps</th><th>Status</th></tr></thead>
+        <tbody id="route-rows"></tbody>
+      </table>
+      <div class="note">Campaigns are authored in the sequencer and pulled from its API. Enrollment targets are picked in Autopilot; this is the inventory they come from.</div>
+    </div>
+  </div>
+
+  <!-- ATTRIBUTION -->
+  <div id="view-attribution" class="view">
+    <div class="tiles num">
+      <div class="tile"><div class="n">4</div><div class="l">Discovery-sourced opportunities</div></div>
+      <div class="tile"><div class="n">9</div><div class="l">Meetings booked</div></div>
+      <div class="tile"><div class="n">$610k</div><div class="l">Pipeline influenced</div></div>
+      <div class="tile"><div class="n">42 <small>days</small></div><div class="l">Median discovery to opportunity</div></div>
+    </div>
+    <div class="split">
+      <div class="panel">
+        <div class="panel-h">Discovery to pipeline</div>
+        <div class="pad num">
+          <div class="frow f1"><span class="fl">Discovered</span><span class="fbar" style="width:100%"></span><span class="fn">1,240</span></div>
+          <div class="frow f2"><span class="fl">Scored ICP fit</span><span class="fbar" style="width:63%"></span><span class="fn">486</span></div>
+          <div class="frow f3"><span class="fl">Enrolled</span><span class="fbar" style="width:41%"></span><span class="fn">214</span></div>
+          <div class="frow f4"><span class="fl">Engaged</span><span class="fbar" style="width:21%"></span><span class="fn">57</span></div>
+          <div class="frow f5"><span class="fl">Meetings booked</span><span class="fbar" style="width:9%"></span><span class="fn">9</span></div>
+          <div class="frow f6"><span class="fl">Opportunities</span><span class="fbar" style="width:6%"></span><span class="fn">4</span></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-h">How attribution is tracked</div>
+        <div class="rails">
+          <div class="rail"><span class="k">Origin stamp</span><span class="v">Every account records its source and first-surfaced date</span><span class="statuschip live">Live</span></div>
+          <div class="rail"><span class="k">Engagement</span><span class="v">Outbound clicks, replies and meetings write to the account timeline</span><span class="statuschip live">Live</span></div>
+          <div class="rail"><span class="k">SFDC match</span><span class="v">Opportunities matched to accounts by domain, flagged discovery-sourced</span><span class="statuschip soon">Rolling out</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="jhead"><span class="name">Dayton Children's Hospital</span>
+        <span class="pill tier num">Tier 1 &middot; 26/30</span><span class="src-badge">Discovery-sourced</span>
+        <span class="pill num" style="margin-left:auto">Jun 03 &rarr; Jul 15</span></div>
+      <div class="jbodywrap num">
+        <div class="jstep live"><span class="jdate">Jun 03</span><span class="jdotcol"><span class="jdot"></span></span><span class="jbody"><b>Discovered</b> &middot; weekday discovery run</span></div>
+        <div class="jstep live"><span class="jdate">Jun 03</span><span class="jdotcol"><span class="jdot"></span></span><span class="jbody"><b>Scored</b> &middot; Tier 1 &middot; 26/30 fit &middot; Hot intent</span></div>
+        <div class="jstep live"><span class="jdate">Jun 20</span><span class="jdotcol"><span class="jdot"></span></span><span class="jbody"><b>Enrolled</b> &middot; HS Journey &middot; 3 contacts <span class="meta">(COO, VP RevCycle, CFO)</span></span></div>
+        <div class="jstep good"><span class="jdate">Jun 27</span><span class="jdotcol"><span class="jdot"></span></span><span class="jbody"><b>Clicked</b> &times;2 <span class="meta">&middot; +2</span></span></div>
+        <div class="jstep good"><span class="jdate">Jul 02</span><span class="jdotcol"><span class="jdot"></span></span><span class="jbody"><b>Positive reply</b> &middot; Interested <span class="meta">&middot; +6 &middot; routed to AE</span></span></div>
+        <div class="jstep hot"><span class="jdate">Jul 09</span><span class="jdotcol"><span class="jdot"></span></span><span class="jbody"><b>Meeting booked</b> <span class="meta">&middot; +10</span></span></div>
+        <div class="jstep hot"><span class="jdate">Jul 15</span><span class="jdotcol"><span class="jdot"></span></span><span class="jbody"><b>Opportunity created</b> &middot; Dayton New Business <span class="meta">&middot; surfaced by discovery 42 days earlier</span></span></div>
+      </div>
+    </div>
+  </div>
+
+  <footer style="margin-top:30px;font-size:11.5px;color:var(--faint)">Illustrative data.</footer>
+</div>
+
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" aria-label="Account detail">
+  <div class="dhead">
+    <button class="dclose" id="dclose" aria-label="Close">&times;</button>
+    <span class="name" id="d-name" style="font-size:15px">&nbsp;</span>
+    <div class="row" id="d-pills" style="margin-top:6px"></div>
+    <div class="dmeta" id="d-meta"></div>
+  </div>
+  <div class="dbody" id="d-leads"></div>
+  <div class="dfoot">
+    <button class="btn small">Open in Engagement</button>
+    <button class="btn small ghost">Pause account</button>
+    <button class="btn small ghost" style="color:var(--rose)">Remove</button>
+  </div>
+</aside>
+
+<script>
+(function(){
+  var tabs=document.querySelectorAll('.subtab');
+  function setView(v){
+    tabs.forEach(function(t){var on=t.getAttribute('data-tab')===v;
+      t.classList.toggle('on',on);t.setAttribute('aria-selected',String(on));});
+    ['autopilot','accounts','routing','attribution'].forEach(function(k){
+      document.getElementById('view-'+k).classList.toggle('on',k===v);});
+  }
+  tabs.forEach(function(t){t.addEventListener('click',function(){setView(t.getAttribute('data-tab'))});});
+
+  var cg=document.getElementById('cg'),hint=document.getElementById('mode-hint');
+  var mb={auto:'m-auto',manual:'m-manual',flows:'m-flows'};
+  var mh={auto:'Discovery accounts enroll automatically within guardrails. Only discovery-sourced accounts are eligible.',
+          manual:'SDRs enroll by hand. Add any account, or push one already in the platform.',
+          flows:'Criteria-based rules enroll matching accounts into a campaign, up to a cap. Runs after every sync.'};
+  Object.keys(mb).forEach(function(m){
+    document.getElementById(mb[m]).addEventListener('click',function(){
+      cg.setAttribute('data-mode',m);hint.textContent=mh[m];
+      Object.keys(mb).forEach(function(k){document.getElementById(mb[k]).setAttribute('aria-pressed',String(k===m));});
+    });
+  });
+
+  var CAMPS={hs:'HS Journey',pceo:'Payer - CEO',pum:'Payer - UM',pcoo:'Payer - COO',
+    oceo:'Ortho - CEO',ocoo:'Ortho - COO',ocfo:'Ortho - CFO',bceo:'BH - CEO',bcoo:'BH - COO',
+    rad:'Radiology',ae:'Ben - AE cadence'};
+  var CH={sl:'SmartLead',or:'Outreach.io'};
+  var A=[
+    ["Phoenix Children's",'Health System',2,38,'hs','sl',2,9,'In sequence','Opened','2h ago',2],
+    ['Summa Health','Health System',2,41,'hs','sl',4,9,'Replied','Replied - Interested','5h ago',3],
+    ["Dayton Children's Hospital",'Health System',1,52,'hs','sl',6,9,'Meeting booked','Meeting booked','Yesterday',3],
+    ['Albany Med Health System','Health System',1,47,'ae','or',2,5,'Replied','Replied - Interested','Yesterday',2],
+    ['Intermountain Health','Health System',1,12,'hs','sl',1,9,'In sequence','Sent - Step 1','3h ago',3],
+    ['Corewell Health','Health System',2,8,'hs','sl',1,9,'In sequence','Sent - Step 1','6h ago',2],
+    ['OhioHealth','Health System',2,0,'hs','sl',3,9,'In sequence','Opened x2','Yesterday',2],
+    ['UNC Health','Health System',1,15,'hs','sl',5,9,'In sequence','Clicked','2d ago',3],
+    ['Tampa General Hospital','Health System',2,0,'hs','sl',7,9,'Paused','Out of office','3d ago',2],
+    ['Oscar Health','Payer',1,82,'pceo','sl',0,9,'Paused','No verified contacts','1h ago',0],
+    ['CareSource','Payer',1,22,'pcoo','sl',3,9,'In sequence','Clicked','7h ago',4],
+    ['Devoted Health','Payer',1,18,'pum','sl',2,9,'In sequence','Opened x3','Yesterday',3],
+    ['IEHP','Payer',1,26,'pceo','sl',4,9,'Replied','Replied - Info request','2d ago',2],
+    ['Priority Health','Payer',2,7,'pcoo','sl',2,9,'In sequence','Delivered','2d ago',3],
+    ['MVP Health Care','Payer',2,11,'pum','sl',2,9,'In sequence','Opened','3d ago',3],
+    ['Twin Cities Orthopedics','Ortho',1,33,'ocoo','sl',1,9,'In sequence','Sent - Step 1','10m ago',3],
+    ['OrthoCarolina','Ortho',1,19,'oceo','sl',3,9,'In sequence','Opened x2','8h ago',2],
+    ['Resurgens Orthopaedics','Ortho',1,24,'ocfo','sl',4,9,'Replied','Replied - Interested','Yesterday',2],
+    ['EmergeOrtho','Ortho',2,6,'ocoo','sl',2,9,'In sequence','Delivered','2d ago',3],
+    ['Boulder Care','Behavioral Health',2,28,'bcoo','sl',1,9,'In sequence','Sent - Step 1','1h ago',3],
+    ['LifeStance Health','Behavioral Health',1,16,'bceo','sl',3,9,'In sequence','Clicked','9h ago',3],
+    ['Charlie Health','Behavioral Health',2,21,'bceo','sl',4,9,'Replied','Replied - Interested','2d ago',2],
+    ['RadNet','Radiology',1,14,'rad','sl',2,6,'In sequence','Opened x2','6h ago',3],
+    ['Rayus Radiology','Radiology',2,25,'rad','sl',3,6,'Meeting booked','Meeting booked','2d ago',2],
+    ['SimonMed Imaging','Radiology',2,10,'rad','sl',1,6,'In sequence','Sent - Step 1','Yesterday',2]
+  ];
+  var FIRST=['Sarah','Michael','Jennifer','David','Laura','James','Maria','Robert','Emily','John','Rachel','Thomas'];
+  var LAST=['Chen','Patel','Morgan','Kowalski','Rivera','Thompson','Nguyen','Brooks','Hassan','Delgado','Foster','Kim'];
+  var TIT={'Health System':['COO','VP Revenue Cycle','CFO','VP Patient Access'],
+    'Payer':['Chief Operating Officer','Director of Claims Operations','VP Utilization Management','Director of Network Operations'],
+    'Ortho':['CEO','Practice Administrator','Director of Revenue Cycle','COO'],
+    'Behavioral Health':['CEO','COO','CFO','VP Clinical Operations'],
+    'Radiology':['COO','Director of Operations','VP Revenue Cycle','Director of Imaging']};
+  function slug(n){return n.toLowerCase().replace(/[^a-z0-9]+/g,'').slice(0,14)}
+  function leadsFor(a,idx){
+    var out=[],n=a[11],v=a[1];
+    for(var i=0;i<n;i++){
+      var f=FIRST[(idx*3+i*5)%12],l=LAST[(idx*7+i*3)%12];
+      out.push({name:f+' '+l,title:TIT[v][(idx+i)%4],email:(f[0]+l).toLowerCase()+'@'+slug(a[0])+'.com',
+        status:i===0?a[8]:(a[8]==='Paused'?'Paused':'In sequence')});
+    }
+    return out;
+  }
+  function evFor(L,a){
+    var e=[{d:'Jul 03',t:'<b>Sent</b> - Step 1'}];
+    if(a[6]>=2)e.push({d:'Jul 06',t:'<b>Sent</b> - Step 2 - same thread'});
+    e.push({d:'Jul 08',t:'<b>Opened</b> x2'});
+    if(L.status==='Replied')e.push({d:'Jul 10',t:'<b>Replied</b> - Interested - +6'});
+    if(L.status==='Meeting booked')e.push({d:'Jul 11',t:'<b>Meeting booked</b> - +10'});
+    if(L.status==='Paused')e.push({d:'Jul 11',t:'<b>Paused</b>'});
+    return e;
+  }
+  function statusPill(s){var c={'In sequence':'auto','Replied':'good','Meeting booked':'hot','Paused':'paused'}[s]||'paused';
+    return '<span class="pill '+c+'">'+s+'</span>';}
+  function heatPill(p){if(p>=30)return '<span class="pill hot num">Hot - '+p+'</span>';
+    if(p>0)return '<span class="pill warm num">Warm - '+p+'</span>';return '<span class="pill tier">-</span>';}
+
+  var q=document.getElementById('q'),fS=document.getElementById('f-status'),fV=document.getElementById('f-vert');
+  var page=0,SIZE=10,view=[];
+  function match(a,idx){
+    var nd=q.value.trim().toLowerCase();
+    if(fS.value&&a[8]!==fS.value)return false;
+    if(fV.value&&a[1]!==fV.value)return false;
+    if(!nd)return true;
+    if(a[0].toLowerCase().indexOf(nd)>-1)return true;
+    return leadsFor(a,idx).some(function(L){return L.name.toLowerCase().indexOf(nd)>-1||L.email.indexOf(nd)>-1;});
+  }
+  function render(){
+    view=[];A.forEach(function(a,i){if(match(a,i))view.push(i);});
+    var pages=Math.max(1,Math.ceil(view.length/SIZE));if(page>=pages)page=pages-1;
+    var rows=document.getElementById('rows');rows.innerHTML='';
+    var tl=view.reduce(function(s,i){return s+A[i][11]},0);
+    view.slice(page*SIZE,(page+1)*SIZE).forEach(function(i){
+      var a=A[i],tr=document.createElement('tr');tr.className='click';
+      tr.innerHTML='<td><div class="name">'+a[0]+'</div><div class="sub">'+a[1]+' - Tier '+a[2]+'</div></td>'+
+        '<td>'+heatPill(a[3])+'</td>'+
+        '<td>'+CAMPS[a[4]]+'<div class="sub">'+CH[a[5]]+'</div></td>'+
+        '<td class="num">'+(a[6]>0?a[6]+' / '+a[7]:'-')+'</td>'+
+        '<td class="num">'+a[11]+'</td>'+
+        '<td>'+a[9]+'<div class="sub num">'+a[10]+'</div></td>'+
+        '<td>'+statusPill(a[8])+'</td>';
+      tr.addEventListener('click',function(){openDrawer(i)});rows.appendChild(tr);
+    });
+    document.getElementById('empty').style.display=view.length?'none':'block';
+    document.getElementById('pageinfo').textContent=view.length?
+      ('Showing '+(page*SIZE+1)+'-'+Math.min(view.length,(page+1)*SIZE)+' of '+view.length+' accounts - '+tl+' leads'):'';
+  }
+  [q,fS,fV].forEach(function(el){el.addEventListener('input',function(){page=0;render()});});
+  document.getElementById('prev').addEventListener('click',function(){if(page>0){page--;render()}});
+  document.getElementById('next').addEventListener('click',function(){if((page+1)*SIZE<view.length){page++;render()}});
+  render();
+
+  var scrim=document.getElementById('scrim'),drawer=document.getElementById('drawer');
+  function openDrawer(i){
+    var a=A[i];
+    document.getElementById('d-name').textContent=a[0];
+    document.getElementById('d-pills').innerHTML='<span class="pill vert">'+a[1]+'</span><span class="pill tier">Tier '+a[2]+'</span>'+heatPill(a[3])+statusPill(a[8]);
+    document.getElementById('d-meta').innerHTML=CAMPS[a[4]]+' - '+CH[a[5]]+(a[6]>0?' - Step '+a[6]+' of '+a[7]:'')+' - enrolled Jul 03';
+    var box=document.getElementById('d-leads');box.innerHTML='';
+    var Ls=leadsFor(a,i);
+    if(!Ls.length){box.innerHTML='<div class="empty">No contacts enrolled. Contact resolution pending.</div>';}
+    Ls.forEach(function(L){
+      var d=document.createElement('div');d.className='lead';
+      var tl=evFor(L,a).map(function(e){return '<span class="lev"><span class="d num">'+e.d+'</span> - '+e.t+'</span>'}).join('');
+      d.innerHTML='<div class="lrow"><span class="lname">'+L.name+'</span>'+statusPill(L.status)+
+        '<span class="lemail" style="margin-left:auto">'+L.email+'</span></div>'+
+        '<div class="sub" style="font-size:11.5px;color:var(--muted)">'+L.title+'</div>'+
+        '<div class="ltl">'+tl+'</div>'+
+        '<div class="lacts"><button class="btn tiny">Pause</button><button class="btn tiny">Remove</button><button class="btn tiny">Open in SmartLead</button></div>';
+      box.appendChild(d);
+    });
+    scrim.classList.add('open');drawer.classList.add('open');
+  }
+  function closeDrawer(){scrim.classList.remove('open');drawer.classList.remove('open');}
+  scrim.addEventListener('click',closeDrawer);
+  document.getElementById('dclose').addEventListener('click',closeDrawer);
+  document.addEventListener('keydown',function(e){if(e.key==='Escape')closeDrawer();});
+
+  var R=[
+    ['HS Journey','SmartLead','Email',9,'Active'],['Payer - CEO','SmartLead','Email',9,'Draft'],
+    ['Payer - UM','SmartLead','Email',9,'Draft'],['Payer - COO','SmartLead','Email',9,'Draft'],
+    ['Ortho - CEO','SmartLead','Email',9,'Active'],['Ortho - COO','SmartLead','Email',9,'Active'],
+    ['Ortho - CFO','SmartLead','Email',9,'Active'],['BH - CEO','SmartLead','Email',9,'Active'],
+    ['BH - COO','SmartLead','Email',9,'Active'],['Radiology','SmartLead','Email',6,'Active'],
+    ['Ben - AE cadence','Outreach.io','Email',5,'Active'],
+    ['Health Systems - LinkedIn','HeyReach','LinkedIn',2,'Active'],
+    ['Payer - LinkedIn','HeyReach','LinkedIn',2,'Active'],['Radiology - LinkedIn','HeyReach','LinkedIn',2,'Active']
+  ];
+  var rr=document.getElementById('route-rows');
+  R.forEach(function(r){
+    var tr=document.createElement('tr');
+    var st=r[4]==='Active'?'<span class="pill good">Active</span>':'<span class="pill paused">Draft</span>';
+    tr.innerHTML='<td><span class="name" style="font-size:12.5px">'+r[0]+'</span></td><td>'+r[1]+'</td><td>'+r[2]+'</td><td class="num">'+r[3]+'</td><td>'+st+'</td>';
+    rr.appendChild(tr);
+  });
+})();
+</script>

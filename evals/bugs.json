@@ -565,6 +565,16 @@
       "fix": "run_discovery.alert_failed_sources posts one consolidated FAILURE-severity ops alert naming every source that raised (throttled 6h); the warntracker comment now describes the real chain, and the module records the verdict UPSTREAM DEAD (warntracker.com itself stopped updating ~2026-04-27) so the raised message tells the reader to REPLACE the source rather than retry.",
       "guard": "tests/test_upstream_quota.py::TestDeadSourcePagesAsAFailure, tests/test_source_fixes.py::TestWarntrackerStaleTripwire::test_the_raised_message_carries_the_verdict",
       "lesson": "A comment describing an alerting chain is not the chain. Resilience policies ('one source must not kill the run') silently downgrade every per-source failure \u2014 if a source can die, something must page at failure severity by name."
+    },
+    {
+      "id": "notify-hold-was-silent-2026-07-28",
+      "date": "2026-07-28",
+      "area": "api/app.py notify-changes, ops/alerts, scripts/run_digest",
+      "symptom": "The daily notify leg evaluated 4 due accounts, sent nothing, and told nobody: no cards, no HELD alert, no digest trace. The accounts stayed due, silently.",
+      "root_cause": "Two independent silencers stacked: (1) the MAR2-32 audit interlock went red (most plausibly an identity split / stale-heal marker during-or-just-after the import heal) and held the send \u2014 a red the identity self-heal itself would have fixed; (2) the HELD ops alert sat behind should_alert, and a throttle stamp from a prior incident swallowed it, so the hold left zero artifacts anywhere.",
+      "fix": "notify-changes: a red audit on a write call now runs the identity self-heal ONCE, rebuilds the board, re-audits, and proceeds with the send in the same request when green (still-red holds as before). The audit-hold alert posts UNTHROTTLED (a hold is never routine); every hold stamps notify_last_hold ({at, violations}) and a clean write-mode pass stamps notify_last_send; run_digest renders '\u2022 notify: HELD at <time> (<codes>)' whenever the newest hold is newer than the newest send.",
+      "guard": "tests/test_notify_hold_visibility.py",
+      "lesson": "A fail-safe that can be tripped by a self-repairable condition needs the repair in its own loop, and a hold path must leave an unthrottled, persistent artifact \u2014 an alert that CAN be deduped away is not visibility."
     }
   ]
 }

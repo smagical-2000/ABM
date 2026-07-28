@@ -2280,6 +2280,23 @@ def create_app() -> FastAPI:
             "raw": touch.get("raw") or {"name": touch.get("name"), "kind": touch["kind"]}})
         return True
 
+    def _notify_after_ingest(source: str) -> None:
+        """Heat just landed -> evaluate NOW, not at the next cron (Sunny
+        2026-07-28: "we know when the data comes in... why are we waiting").
+        Safe to fire on every ingest because the evaluator is the single
+        gate: ledger-deduped, audit-held, stage-gated, capped — an extra
+        call is a cheap no-op. The daily cron leg stays as the sweep."""
+        async def _run():
+            try:
+                out = await asyncio.to_thread(lambda: None)  # yield first
+                out = engagement_notify_changes(dry_run=False)
+                sent = out.get("posted") if isinstance(out, dict) else None
+                if sent:
+                    logger.info("event-driven notify (%s): posted %s", source, sent)
+            except Exception:  # noqa: BLE001 — never break the ingest path
+                logger.exception("event-driven notify failed (%s)", source)
+        _schedule_coro(app, _run())
+
     @app.post("/api/outreach/webhooks/smartlead")
     async def outreach_webhook_smartlead(request: Request, secret: str = ""):
         """SmartLead event receiver, two independent jobs:
@@ -2296,6 +2313,8 @@ def create_app() -> FastAPI:
         sent = (await asyncio.to_thread(campaigns_responses.post_card, card)) if card else False
         touch = campaigns_responses.smartlead_event_to_engagement(payload)
         matched = (await asyncio.to_thread(_ingest_outbound_touch, touch)) if touch else False
+        if matched:
+            _notify_after_ingest("smartlead")
         return {"ok": True, "forwarded": bool(card and sent),
                 "engagement": {"kind": touch["kind"], "matched": matched} if touch else None}
 
@@ -2379,6 +2398,7 @@ def create_app() -> FastAPI:
                     **({"connectNote": connect_note[:280]} if connect_note else {})}})
         if kind == "linkedin_reply":                     # reply -> pause other channels
             _schedule_coro(app, _stop_sweep_after_sync())
+        _notify_after_ingest("heyreach")
         return {"ok": True, "matched": True, "kind": kind}
 
     @app.post("/api/campaigns/mapping")

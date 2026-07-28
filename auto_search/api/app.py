@@ -1442,6 +1442,23 @@ def create_app() -> FastAPI:
         # gated now that dry_run defaults to true (2026-07-27). Only a pure dry
         # inspection passes through: it IS how a human looks at a red board.
         if not audit_rep["ok"] and (seed or not dry_run):
+            # RETRY AFTER HEAL (2026-07-28 silent-hold incident): the daily leg
+            # evaluated 4 due accounts and sent ZERO — the audit most plausibly
+            # went red during/just after an identity heal, and the throttled
+            # HELD alert was swallowed, so nobody was told. The reds the audit
+            # flags most often (I1 splits, I5 stale-heal) are exactly what the
+            # identity self-heal fixes, so before holding: run the same heal
+            # every sync/import runs, rebuild the board, re-audit ONCE. Green
+            # -> proceed with the send in this very request (the one the hold
+            # would have eaten). Still red -> a real trust failure; hold below.
+            logger.warning("notify audit red on a write call — healing once and "
+                           "re-auditing: %s", audit_rep["violations"])
+            _heal_identities()
+            board = _engaged_view()
+            audit_rep = engagement_audit.run_invariants(
+                repo, getattr(app.state, "scoring_repo", None), app.state.repo,
+                rows=board)
+        if not audit_rep["ok"] and (seed or not dry_run):
             logger.error("notify HELD by audit: %s", audit_rep["violations"])
             if repo.get_setting("audit_alerts") == "1":
                 from auto_search.ops import alerts as ops_alerts

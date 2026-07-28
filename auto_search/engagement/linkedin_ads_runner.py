@@ -246,6 +246,11 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
             "campaign_id": campaign_id,
             "account_id": m.account_id if m else None, "abm_match": abm_match,
             "share_id": r["share_id"], "airtable_id": None,
+            # Person identity for downstream enrichment (Clay keys on these).
+            "first_name": r.get("first_name") or "",
+            "last_name": r.get("last_name") or "",
+            "linkedin_url": r.get("linkedin_url") or "",
+            "profile_id": r.get("profile_id") or "",
         }
         if not abm_match:      # counted HERE so the stat means captured leads,
             stats["non_abm_captured"] += 1   # not merely non-ABM reactors seen
@@ -353,9 +358,81 @@ async def run(*, share_categories: dict[str, str], engagement_repo, scoring_repo
         stats["heat_matched"] += matched
         stats["heat_events"] += new_events
 
+    # Clay waterfall for leads still missing an email/phone (2026-07-28).
+    # Apollo+FullEnrich resolve most, but the rest used to sit in Airtable
+    # incomplete forever — Adam Shively (VCU Health) landed with a phone and
+    # no email and nothing carried him onward, because the dispatch was only
+    # ever a MANUAL endpoint nobody triggers. Capture is the moment we know a
+    # lead is short, so this fires here. Best-effort by contract: the leads
+    # are already durably persisted above, so a bridge hiccup costs a retry
+    # on the next tick, never a lost lead.
+    if not dry_run and results:
+        try:
+            stats["clay_dispatched"] = await _dispatch_incomplete_to_clay(results)
+        except Exception:  # noqa: BLE001 — enrichment must never fail the run
+            logger.exception("clay auto-dispatch failed (leads already saved)")
+
     summary = {"dry_run": dry_run, "stats": dict(stats), "results": results}
     logger.info("linkedin_ads run: %s", summary["stats"])
     return summary
+
+
+async def _dispatch_incomplete_to_clay(results: list[dict]) -> int:
+    """POST leads still missing an email or phone to the n8n->Clay bridge.
+
+    Returns the number dispatched (0 when the bridge isn't configured, so a
+    dev/test env is a clean no-op). `needs` tells Clay which waterfall to run;
+    company_domain is what the waterfall keys on, so a lead without one is
+    still sent (Clay can resolve from company name) but counted separately."""
+    import httpx
+
+    leads = []
+    for r in results:
+        email, phone = (r.get("email") or "").strip(), (r.get("phone") or "").strip()
+        if email and phone:
+            continue                      # complete — nothing for Clay to find
+        needs = [n for n, have in (("email", email), ("phone", phone)) if not have]
+        domain = clean_domain(r.get("domain") or "")
+        if not domain and email and "@" in email:
+            domain = clean_domain(email.rsplit("@", 1)[-1])
+        leads.append({
+            "record_id": (r.get("linkedin_url") or r.get("profile_id")
+                          or r.get("email") or r.get("name") or ""),
+            "first_name": (r.get("first_name") or "").strip(),
+            "last_name": (r.get("last_name") or "").strip(),
+            "full_name": (r.get("name") or "").strip(),
+            "company": (r.get("company") or "").strip(),
+            "company_domain": domain or "",
+            "linkedin_url": r.get("linkedin_url") or "",
+            "title": r.get("title") or "",
+            "needs": needs,
+        })
+    if not leads:
+        return 0
+
+    url = os.getenv("N8N_CLAY_DISPATCH_URL")
+    token = os.getenv("CLAY_BRIDGE_TOKEN")
+    if not (url and token):
+        # LOUD (2026-07-28): the vars lived only on the web service, so this
+        # path would have no-opped forever on the cron that actually captures
+        # leads — the same silent-config class as the missing REPLYIO key.
+        # Incomplete leads waiting with no bridge is an incident, not a debug
+        # line, so it raises: run() catches it, the leads are already saved,
+        # and the failure is visible in the run log instead of invisible.
+        raise RuntimeError(
+            f"clay bridge not configured on this service — {len(leads)} "
+            "incomplete lead(s) have nowhere to go (set N8N_CLAY_DISPATCH_URL "
+            "and CLAY_BRIDGE_TOKEN)")
+
+    batch = f"tofu_{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}"
+    async with httpx.AsyncClient(timeout=30) as http:
+        resp = await http.post(url, json={"batch_id": batch, "leads": leads},
+                               headers={"X-Bridge-Token": token})
+        resp.raise_for_status()
+    with_domain = sum(1 for x in leads if x["company_domain"])
+    logger.info("clay auto-dispatch: %d lead(s) sent (%d with domain, batch %s)",
+                len(leads), with_domain, batch)
+    return len(leads)
 
 
 def _contact_row(r: dict, enr: dict, email: str, domain: str | None,

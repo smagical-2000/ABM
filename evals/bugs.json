@@ -575,6 +575,16 @@
       "fix": "ops/env-manifest.json declares the required vars per service (with provenance comments and a recognized-optional list); scripts/check_env_manifest.py diffs it against live `railway variables --json` (presence-only, names never values, empty string = missing, unreadable service = fail not skip) and exits 1 on any missing var; ship.sh runs the gate BEFORE the deploy loop and refuses to ship red. First live run immediately flagged discovery-api missing SLACK_ENGAGEMENT_WEBHOOK plus two zombie vars (PDL_API_KEY, TRIGIFY_WEBHOOK_SECRET).",
       "guard": "tests/test_env_manifest.py",
       "lesson": "Config that only exists in a dashboard is config that drifts. A fleet's required env set belongs in the repo, and the deploy path must diff reality against it \u2014 graceful degradation without a loud gate is how a missing key becomes a 13-day silent outage."
+    },
+    {
+      "id": "notify-hold-was-silent-2026-07-28",
+      "date": "2026-07-28",
+      "area": "api/app.py notify-changes, ops/alerts, scripts/run_digest",
+      "symptom": "The daily notify leg evaluated 4 due accounts, sent nothing, and told nobody: no cards, no HELD alert, no digest trace. The accounts stayed due, silently.",
+      "root_cause": "Two independent silencers stacked: (1) the MAR2-32 audit interlock went red (most plausibly an identity split / stale-heal marker during-or-just-after the import heal) and held the send \u2014 a red the identity self-heal itself would have fixed; (2) the HELD ops alert sat behind should_alert, and a throttle stamp from a prior incident swallowed it, so the hold left zero artifacts anywhere.",
+      "fix": "notify-changes: a red audit on a write call now runs the identity self-heal ONCE, rebuilds the board, re-audits, and proceeds with the send in the same request when green (still-red holds as before). The audit-hold alert posts UNTHROTTLED (a hold is never routine); every hold stamps notify_last_hold ({at, violations}) and a clean write-mode pass stamps notify_last_send; run_digest renders '\u2022 notify: HELD at <time> (<codes>)' whenever the newest hold is newer than the newest send.",
+      "guard": "tests/test_notify_hold_visibility.py",
+      "lesson": "A fail-safe that can be tripped by a self-repairable condition needs the repair in its own loop, and a hold path must leave an unthrottled, persistent artifact \u2014 an alert that CAN be deduped away is not visibility."
     }
   ]
 }

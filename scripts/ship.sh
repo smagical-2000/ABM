@@ -22,6 +22,19 @@ if [[ -z "${ENGAGEMENT_APP_URL:-}" && -z "${DISCOVERY_API_URL:-}" ]]; then
   exit 1
 fi
 
+# Env-manifest gate (2026-07-28): a required var missing on ONE service is a
+# silent no-op for weeks (REPLYIO_API_KEY absent on discovery-cron = 13 days of
+# frozen Reply.io heat; the Clay bridge vars absent on linkedin-tofu-cron would
+# have no-opped auto-dispatch forever). Same philosophy as the vacuous-verify
+# refusal above: refuse to ship into a fleet we can see is misconfigured.
+echo "── env-manifest gate: required vars per service (ops/env-manifest.json) ──"
+if ! python3 scripts/check_env_manifest.py; then
+  echo "✗ env-manifest gate failed — set the missing var(s) on the flagged service(s)" >&2
+  echo "  (railway variables --set VAR=... --service <svc>), or update" >&2
+  echo "  ops/env-manifest.json if the requirement truly changed. Not shipping." >&2
+  exit 1
+fi
+
 STAMP="ship-$(date -u +%Y%m%dT%H%M%SZ)"
 echo "$STAMP" > .build-stamp
 echo "══ shipping build $STAMP to: ${SERVICES[*]} ══"

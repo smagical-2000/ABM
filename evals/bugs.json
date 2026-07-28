@@ -567,6 +567,16 @@
       "lesson": "A comment describing an alerting chain is not the chain. Resilience policies ('one source must not kill the run') silently downgrade every per-source failure \u2014 if a source can die, something must page at failure severity by name."
     },
     {
+      "id": "required-var-missing-on-one-service-2026-07-28",
+      "date": "2026-07-28",
+      "area": "ops/env-manifest.json, scripts/check_env_manifest.py, scripts/ship.sh",
+      "symptom": "A functionally-required env var present on one Railway service but absent on a sibling no-ops silently for weeks: REPLYIO_API_KEY was absent on discovery-cron for 13 days (the Reply.io leg 'cleanly no-opped' while heat froze); N8N_CLAY_DISPATCH_URL/CLAY_BRIDGE_TOKEN lived only on the web service, so Clay auto-dispatch would have no-opped forever on linkedin-tofu-cron, the service that actually captures leads.",
+      "root_cause": "Env config was per-service and unversioned, with no cross-service source of truth \u2014 nothing compared what a service's code path requires against what its Railway service actually carries, and 'missing key = graceful no-op' code made the gap invisible.",
+      "fix": "ops/env-manifest.json declares the required vars per service (with provenance comments and a recognized-optional list); scripts/check_env_manifest.py diffs it against live `railway variables --json` (presence-only, names never values, empty string = missing, unreadable service = fail not skip) and exits 1 on any missing var; ship.sh runs the gate BEFORE the deploy loop and refuses to ship red. First live run immediately flagged discovery-api missing SLACK_ENGAGEMENT_WEBHOOK plus two zombie vars (PDL_API_KEY, TRIGIFY_WEBHOOK_SECRET).",
+      "guard": "tests/test_env_manifest.py",
+      "lesson": "Config that only exists in a dashboard is config that drifts. A fleet's required env set belongs in the repo, and the deploy path must diff reality against it \u2014 graceful degradation without a loud gate is how a missing key becomes a 13-day silent outage."
+    },
+    {
       "id": "notify-hold-was-silent-2026-07-28",
       "date": "2026-07-28",
       "area": "api/app.py notify-changes, ops/alerts, scripts/run_digest",

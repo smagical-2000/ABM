@@ -20,6 +20,7 @@ Best-effort: never exits non-zero (the daily run must not fail on reporting).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -85,6 +86,40 @@ def _sec_due() -> str:
     return line + f" · stage=`{d.get('stage')}`"
 
 
+def _iso_or_none(v):
+    try:
+        return datetime.fromisoformat(str(v))
+    except (TypeError, ValueError):
+        return None
+
+
+def _sec_notify_hold(erepo) -> str:
+    """3b) HELD visibility (2026-07-28 silent-hold incident): the notify leg
+    evaluated 4 due accounts, held the send, and its throttled ops alert was
+    swallowed — zero cards, zero telling. The endpoint now stamps
+    `notify_last_hold` / `notify_last_send` (auto_search/api/app.py); this
+    line renders whenever the newest hold has NOT been superseded by a clean
+    write-mode pass, so a standing hold resurfaces in every daily digest
+    until it clears. Returns "" for no line (the assembler skips falsy)."""
+    try:
+        hold = json.loads(erepo.get_setting("notify_last_hold") or "null") or {}
+        send = json.loads(erepo.get_setting("notify_last_send") or "null") or {}
+    except (TypeError, ValueError):
+        return ""
+    hold_at = _iso_or_none(hold.get("at"))
+    if hold_at is None:
+        return ""
+    send_at = _iso_or_none(send.get("at"))
+    try:
+        superseded = send_at is not None and send_at >= hold_at
+    except TypeError:   # naive/aware mix from a hand-edited setting
+        superseded = str(send.get("at")) >= str(hold.get("at"))
+    if superseded:
+        return ""
+    codes = ", ".join(str(c) for c in (hold.get("violations") or [])) or "unknown"
+    return f"• notify: HELD at {str(hold.get('at'))[:16]} ({codes})"
+
+
 def _sec_unresolved(erepo) -> str:
     """4) unresolved contacts (the silent-miss queue)."""
     unresolved = erepo.contacts(unresolved_only=True)
@@ -124,6 +159,7 @@ def build_digest() -> str:
     sections = (("sync", lambda: _sec_sync(erepo)),
                 ("ingested", lambda: _sec_ingested(erepo)),
                 ("due", _sec_due),
+                ("notify", lambda: _sec_notify_hold(erepo)),
                 ("unresolved", lambda: _sec_unresolved(erepo)),
                 ("fleet", lambda: _sec_fleet(erepo)),
                 ("sources", _sec_sources))
@@ -132,10 +168,15 @@ def build_digest() -> str:
         # One bad section must never kill the digest — the digest going missing
         # IS the alarm, so it only ever degrades a line at a time.
         try:
-            lines.append(build())
+            line = build()
         except Exception as e:  # noqa: BLE001
             logger.exception("digest section %s failed", name)
             lines.append(f"• {name} unavailable: {e}")
+        else:
+            # A section may return "" to stay silent (notify-hold when nothing
+            # is held) — only real lines render.
+            if line:
+                lines.append(line)
     return "\n".join(lines)
 
 

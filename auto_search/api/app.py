@@ -1428,6 +1428,17 @@ def create_app() -> FastAPI:
         if not repo:
             raise HTTPException(status_code=503, detail="engagement store not available")
         ledger = json.loads(repo.get_setting("notified_tiers") or "{}")
+
+        def _record_hold(codes: list[str]) -> None:
+            """HOLD ALWAYS VISIBLE (2026-07-28 silent-hold incident): every
+            held write-mode call stamps WHEN and WHY under notify_last_hold.
+            An ops alert can be missed (throttle, muted channel, opt-out) —
+            this stamp cannot: the daily digest renders `notify: HELD …` from
+            it until a clean send stamps notify_last_send over it
+            (scripts/run_digest.py)."""
+            repo.set_setting("notify_last_hold", json.dumps(
+                {"at": datetime.now(UTC).isoformat(), "violations": codes}))
+
         board = _engaged_view()
         # TRUST INTERLOCK (MAR2-32): never seed or send from a board that fails
         # its own invariant audit — red means tiles/queue can't be trusted to
@@ -1460,16 +1471,22 @@ def create_app() -> FastAPI:
                 rows=board)
         if not audit_rep["ok"] and (seed or not dry_run):
             logger.error("notify HELD by audit: %s", audit_rep["violations"])
+            _record_hold([v.get("code") or "?" for v in audit_rep["violations"]])
             if repo.get_setting("audit_alerts") == "1":
                 from auto_search.ops import alerts as ops_alerts
-                if ops_alerts.should_alert(repo, "audit-hold", min_gap_hours=6):
-                    ops_alerts.post_ops_alert(
-                        kind="audit-hold", severity="failure",
-                        service="engagement-preview",
-                        title=f"Notify HELD: engagement audit failed "
-                              f"({len(audit_rep['violations'])} violations)",
-                        detail="; ".join(f"{v['code']}: {v['detail']}"
-                                         for v in audit_rep["violations"])[:900])
+                # UNTHROTTLED on purpose (2026-07-28 silent-hold incident):
+                # this alert used to sit behind should_alert, and a stamp from
+                # a prior incident swallowed it — the one message that says
+                # "your notify leg sent NOTHING today" never arrived. A hold
+                # survives the heal retry above only when it is real and rare;
+                # it is never routine, so it pages every single time.
+                ops_alerts.post_ops_alert(
+                    kind="audit-hold", severity="failure",
+                    service="engagement-preview",
+                    title=f"Notify HELD: engagement audit failed "
+                          f"({len(audit_rep['violations'])} violations)",
+                    detail="; ".join(f"{v['code']}: {v['detail']}"
+                                     for v in audit_rep["violations"])[:900])
             return {"due": 0, "posted": 0, "held": True, "stage": "audit",
                     "violations": audit_rep["violations"], "dry_run": False,
                     "detail": []}
@@ -1559,6 +1576,11 @@ def create_app() -> FastAPI:
                        "after a bulk import, not real engagement. ")
             logger.warning("notify breaker HELD: due=%d ceiling=%d (%s) held=[%s]",
                            len(due), sane_max, ceiling_src, names)
+            # The breaker keeps its 6h alert throttle (a standing burst
+            # re-triggers on every event-driven push), but the hold itself is
+            # stamped unconditionally so the daily digest surfaces it even
+            # when the alert sits inside the gap (2026-07-28 visibility rule).
+            _record_hold(["notify-burst"])
             from auto_search.ops import alerts as ops_alerts
             if ops_alerts.should_alert(repo, "notify-burst", min_gap_hours=6):
                 ops_alerts.post_ops_alert(
@@ -1649,6 +1671,15 @@ def create_app() -> FastAPI:
                                       d.get("touch"))
                     posted += 1
             fired.append(entry)
+        if not dry_run:
+            # The green half of HOLD ALWAYS VISIBLE (2026-07-28): a write-mode
+            # pass that cleared every gate stamps notify_last_send — the digest
+            # stops rendering `notify: HELD …` once a send is newer than the
+            # last hold. due=0 still stamps (a healthy no-op IS a clean pass);
+            # dry runs prove nothing about the write path and never stamp.
+            repo.set_setting("notify_last_send", json.dumps(
+                {"at": datetime.now(UTC).isoformat(), "due": len(due),
+                 "posted": posted}))
         return {"due": len(due), "posted": posted, "live": live,
                 "stage": "test" if staged else "live",
                 "dry_run": dry_run, "detail": fired[:60]}

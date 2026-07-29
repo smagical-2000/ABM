@@ -13,6 +13,10 @@
     6. AE/SDR notify    (run_engagement_notify.py)                — after the syncs
        recompute tiers, fire NEW upward tier changes to Slack (kill-switched off by
        default; capped; ledger-deduped so nothing re-fires). Best-effort.
+    7. Market news      (run_news.py)                             — the News tab's
+       topic feed (same engine as the UI Refresh button; dedup by URL, only new
+       articles enriched). Best-effort: before this it refreshed only when someone
+       pressed the button (~3 refreshes all July).
 
 Legs 1-5 run every time (one leg's failure never skips the others); the process
 exits non-zero if ANY of them failed, so Railway flags the run. Leg 6 is
@@ -165,6 +169,13 @@ def main() -> int:
     # Best-effort AE/SDR handoff — runs AFTER the syncs so tiers are current. A Slack
     # failure here must NOT fail the daily run, so its rc is logged, not gated on.
     notify_rc, _, _ = _leg("notify", "run_engagement_notify.py")
+
+    # Best-effort market-news refresh — the News tab feeds itself daily instead of
+    # waiting on someone to press Refresh. Free RSS + a cents-sized enrich pass over
+    # new URLs only; a feed hiccup must not fail the daily run.
+    news_rc, _, _ = _leg("news", "run_news.py")
+    if news_rc:
+        print(f"\n[run_daily] news refresh rc={news_rc} (non-fatal)", flush=True)
 
     # Best-effort: keep Galyna's tracking table ("ABM Flow LinkedIn <> Airtable")
     # in sync with funnel leads that arrive via the CLAY path — our runner

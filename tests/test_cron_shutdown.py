@@ -159,7 +159,7 @@ class TestHardExitReallyExits:
 
 
 class TestEntrypointsHardExit:
-    @pytest.mark.parametrize("script", ["run_linkedin_tofu.py", "run_daily.py"])
+    @pytest.mark.parametrize("script", ["run_linkedin_tofu.py", "run_daily.py", "run_news.py"])
     def test_entrypoint_hard_exits_instead_of_sys_exit(self, script):
         src = (_SCRIPTS / script).read_text()
         assert re.search(r"run_entrypoint\s*\(\s*main\b", src), (

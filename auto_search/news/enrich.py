@@ -32,12 +32,16 @@ SYSTEM_PROMPT = textwrap.dedent("""
     - relevant: true ONLY if it bears on US healthcare REVENUE CYCLE / back-office
       reimbursement: billing, claims, prior authorization, denials/appeals,
       eligibility/benefits verification, payer or CMS policy that affects
-      reimbursement, or healthcare-AI that automates that work. Set false for
-      generic clinical/health news, pharma, devices, plain hospital M&A,
-      unrelated AI.
+      reimbursement, healthcare-AI that automates that work, or hospital /
+      health-system FINANCIAL DISTRESS (closures, closure risk, bankruptcy,
+      margin crisis — especially rural; that pressure is what makes RCM
+      automation a survival buy). Set false for generic clinical/health news,
+      pharma, devices, plain hospital M&A, unrelated AI.
     - topic: one of prior_auth | denials | rcm_ai | eligibility | policy |
-      operations (best single fit; "policy" for CMS/regulatory, "rcm_ai" when
-      automation/AI is the angle, "operations" for general RCM ops).
+      hospital_distress | operations (best single fit; "policy" for
+      CMS/regulatory, "rcm_ai" when automation/AI is the angle,
+      "hospital_distress" for closures / bankruptcy / financial-distress
+      stories, "operations" for general RCM ops).
     - why_it_matters: ONE sentence of ANALYSIS the headline does NOT already state.
       The reader has read the title — do NOT restate, paraphrase, or repeat its
       numbers/claims. Instead say the SO-WHAT: the market shift it signals, the buyer

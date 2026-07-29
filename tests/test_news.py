@@ -33,6 +33,34 @@ def test_parse_rss_strips_source_suffix_and_dates():
     assert a.published_at and a.published_at.startswith("2026-06-09")
 
 
+_RSS_DISTRESS = """<?xml version="1.0"?><rss version="2.0"><channel>
+<item>
+  <title>700 rural hospitals at risk of closing, by state - Becker's Hospital Review</title>
+  <link>https://news.google.com/rss/articles/d1</link>
+  <pubDate>Mon, 27 Jul 2026 12:00:00 GMT</pubDate>
+  <source url="https://beckershospitalreview.com">Becker's Hospital Review</source>
+</item>
+</channel></rss>"""
+
+
+def test_hospital_distress_topic_is_wired_end_to_end():
+    """Becker's "700 rural hospitals at risk" class of story must have a home:
+    a registered query, a filterable topic + UI label, and a slot in the enrich
+    prompt (which enumerates topics — a topic missing there gets re-tagged or
+    dropped by the classifier)."""
+    from auto_search.news.models import TOPIC_LABELS, TOPICS
+    assert "hospital_distress" in feeds.QUERIES
+    q = feeds.QUERIES["hospital_distress"]
+    assert '"rural hospital"' in q and "closure" in q and "bankruptcy" in q
+    assert "hospital_distress" in TOPICS
+    assert TOPIC_LABELS["hospital_distress"]
+    assert "hospital_distress" in enrich_mod.SYSTEM_PROMPT
+    items = feeds._parse(_RSS_DISTRESS, "hospital_distress", "2026-07-28T00:00:00+00:00")
+    assert len(items) == 1
+    assert items[0].topic == "hospital_distress"
+    assert items[0].title == "700 rural hospitals at risk of closing, by state"
+
+
 class _FakeRepo:
     def __init__(self, existing=()):
         self._existing = list(existing)

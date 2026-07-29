@@ -154,6 +154,20 @@ def _sec_sources() -> str:
         source_streaks.compute_streaks(get_repository()))
 
 
+def _sec_news(erepo) -> str:
+    """7) market-news freshness — run_news.py stamps its summary after each daily
+    auto-refresh; rendering it here means a dead feed names itself. Returns ""
+    (silent) until the first stamped run exists."""
+    try:
+        rec = json.loads(erepo.get_setting("ops_news_last_run") or "null") or {}
+    except (TypeError, ValueError):
+        return ""
+    if not rec.get("at"):
+        return ""
+    return (f"• news refresh {str(rec.get('at'))[:16]} — "
+            f"{rec.get('new', 0)} new, {rec.get('stored', 0)} stored")
+
+
 def build_digest() -> str:
     erepo = get_engagement_repository()
     sections = (("sync", lambda: _sec_sync(erepo)),
@@ -162,7 +176,8 @@ def build_digest() -> str:
                 ("notify", lambda: _sec_notify_hold(erepo)),
                 ("unresolved", lambda: _sec_unresolved(erepo)),
                 ("fleet", lambda: _sec_fleet(erepo)),
-                ("sources", _sec_sources))
+                ("sources", _sec_sources),
+                ("news", lambda: _sec_news(erepo)))
     lines: list[str] = []
     for name, build in sections:
         # One bad section must never kill the digest — the digest going missing

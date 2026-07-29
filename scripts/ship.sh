@@ -35,6 +35,17 @@ if ! python3 scripts/check_env_manifest.py; then
   exit 1
 fi
 
+# Tick-window guard (2026-07-29): the 15-min cron ticks at :00/:15/:30/:45.
+# Deploying ON a tick minute kills the outgoing container mid-start, which
+# Railway records as CRASHED and emails the operator (two false "Deploy
+# Crashed!" emails in two days). Wait until we are safely between ticks.
+MIN=$((10#$(date -u +%M) % 15))
+if [[ $MIN -ge 13 || $MIN -le 1 ]]; then
+  WAIT=$(( (2 - MIN + 15) % 15 ))
+  echo "── tick window: waiting ${WAIT}m so the deploy can't collide with a cron tick ──"
+  sleep $((WAIT * 60))
+fi
+
 STAMP="ship-$(date -u +%Y%m%dT%H%M%SZ)"
 echo "$STAMP" > .build-stamp
 echo "══ shipping build $STAMP to: ${SERVICES[*]} ══"

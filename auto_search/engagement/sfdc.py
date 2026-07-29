@@ -87,7 +87,41 @@ def parse_leads(leads: list[dict], *, kind: str = "high_intent_lead",
                     "employee_range": ld.get("Employee_Range__c"),
                     "is_converted": bool(ld.get("IsConverted"))},
         })
-    return contact_rows, event_rows
+    return _collapse_same_day_resubmits(contact_rows, event_rows)
+
+
+def _collapse_same_day_resubmits(contact_rows: list[dict], event_rows: list[dict]
+                                 ) -> tuple[list[dict], list[dict]]:
+    """One form-lead event per (person, day) — the Ascension double-count
+    (MAR2-50): one human submitting the form twice in 6 minutes mints two SFDC
+    Lead ids, hence two event external_ids and +20 instead of +10. Collapse to
+    the OLDEST lead id, which is stable across re-pulls — an insert guard, not
+    a migration (already-stored events simply keep re-upserting under the same
+    id). Kind is constant within a parse_leads call, so the key is
+    (person, occurred date); person = email when present, else normalized
+    name+company (the echo filter's rule). A re-engagement on a LATER day keeps
+    its own lead id and still counts. PURE, order-independent."""
+    by_ext = {c["external_id"]: c for c in contact_rows}
+    best: dict[tuple[str, str], dict] = {}
+    for ev in event_rows:
+        c = by_ext.get(ev.get("contact_ext")) or {}
+        person = ((c.get("email") or "").strip().lower()
+                  or normalize_company_name(
+                      f"{c.get('name') or ''} {c.get('company') or ''}")
+                  or str(ev.get("contact_ext")))
+        key = (person, str(ev.get("occurred_at") or "")[:10])
+        cur = best.get(key)
+        if cur is None or _event_order(ev) < _event_order(cur):
+            best[key] = ev
+    keep = {ev.get("contact_ext") for ev in best.values()}
+    return ([c for c in contact_rows if c.get("external_id") in keep],
+            [ev for ev in event_rows if ev.get("contact_ext") in keep])
+
+
+def _event_order(ev: dict) -> tuple[str, str]:
+    """Sort key for the same-day collapse: oldest occurred_at wins, lead id
+    breaks the tie (SFDC ids grow over time, so lower ≈ earlier)."""
+    return (str(ev.get("occurred_at") or ""), str(ev.get("contact_ext") or ""))
 
 
 TOFU_ECHO_SOURCE = "TOFU Engagement Campaign"

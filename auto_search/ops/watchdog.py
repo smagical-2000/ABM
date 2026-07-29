@@ -7,7 +7,9 @@ Slack message.
 
 What it watches (stamps written by the crons themselves):
   - `ops_daily_last_ok`   — run_daily stamps on a fully-green run.
-                            Expected every weekday at 14:00 UTC (+2h grace).
+                            Expected once per weekday: schedule 12:30 UTC
+                            (railway.cron.json `30 12 * * 1-5`) + 2h grace; ANY
+                            green stamp on the expected day satisfies it.
   - `ops_tofu_last_tick`  — run_linkedin_tofu stamps at EVERY invocation
                             (even out-of-window no-ops), proving the 15-min
                             cron is alive. Checked only inside weekday selling
@@ -31,7 +33,11 @@ from auto_search.ops import alerts
 
 logger = logging.getLogger(__name__)
 
-DAILY_HOUR_UTC = 14          # discovery-cron schedule (Mon-Fri 14:00 UTC)
+# discovery-cron schedule — MUST mirror railway.cron.json ("30 12 * * 1-5").
+# The stale 14:00 here caused the 2026-07-28 double false alarm: the cron went
+# green at 12:56, before the watchdog's imagined slot, and read as a miss.
+DAILY_HOUR_UTC = 12
+DAILY_MINUTE_UTC = 30
 DAILY_GRACE_H = 2.0
 TOFU_START_UTC, TOFU_END_UTC = 13, 23   # selling-hours window the runner uses
 TOFU_GRACE_MIN = 45
@@ -49,21 +55,26 @@ def _parse(ts: str | None) -> datetime | None:
 
 def overdue_daily(last_ok: str | None, now: datetime) -> str | None:
     """Reason the daily run is overdue, or None. Expected: the most recent
-    weekday 14:00 UTC that is at least DAILY_GRACE_H in the past (so a Monday
-    morning check doesn't call the weekend a miss)."""
+    weekday 12:30 UTC slot that is at least DAILY_GRACE_H in the past (so a
+    Monday morning check doesn't call the weekend a miss). The cron runs ONCE
+    per weekday, so any green stamp on the expected slot's UTC day — even one
+    minted BEFORE the slot when the schedule drifts earlier — satisfies the
+    check until the NEXT weekday's slot + grace (the 2026-07-28 lesson: a
+    12:56 success must not page at 16:07 and 22:16 against a stale 14:00)."""
     expected = None
     for back in range(8):
         d = now - timedelta(days=back)
         if d.weekday() >= 5:                                   # Sat/Sun: no run
             continue
-        candidate = d.replace(hour=DAILY_HOUR_UTC, minute=0, second=0, microsecond=0)
+        candidate = d.replace(hour=DAILY_HOUR_UTC, minute=DAILY_MINUTE_UTC,
+                              second=0, microsecond=0)
         if candidate <= now - timedelta(hours=DAILY_GRACE_H):
             expected = candidate
             break
     if expected is None:                                       # week just started
         return None
     last = _parse(last_ok)
-    if last is None or last < expected:
+    if last is None or last.astimezone(UTC).date() < expected.date():
         seen = last.strftime("%b %d %H:%M UTC") if last else "never"
         return (f"no successful daily run since {seen}; expected one at "
                 f"{expected.strftime('%b %d %H:%M UTC')}")

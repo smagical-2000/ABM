@@ -107,9 +107,9 @@ def test_daily_fresh_run_is_ok():
 
 
 def test_daily_missed_run_is_overdue():
-    # last success yesterday; today's 14:00 + 2h grace has passed
+    # last success yesterday; today's 12:30 slot + 2h grace has passed
     reason = watchdog.overdue_daily(_dt(6, 14, 5).isoformat(), _dt(7, 16, 30))
-    assert reason and "expected one at Jul 07 14:00" in reason
+    assert reason and "expected one at Jul 07 12:30" in reason
 
 
 def test_daily_never_ran_is_overdue():
@@ -117,11 +117,30 @@ def test_daily_never_ran_is_overdue():
 
 
 def test_daily_grace_and_weekend_are_quiet():
-    # 15:00 is inside the 2h grace after the 14:00 run — expected slot is
-    # FRIDAY'S, and Friday's success covers it
-    assert watchdog.overdue_daily(_dt(3, 14, 10).isoformat(), _dt(6, 15, 0)) is None
+    # Monday 14:00 is inside the 2h grace after the 12:30 slot — expected slot
+    # is FRIDAY'S, and Friday's success covers it
+    assert watchdog.overdue_daily(_dt(3, 14, 10).isoformat(), _dt(6, 14, 0)) is None
     # Saturday: Friday's run covers the whole weekend
     assert watchdog.overdue_daily(_dt(3, 14, 10).isoformat(), _dt(4, 18, 0)) is None
+
+
+def test_daily_early_same_day_success_is_ok_all_day():
+    """The 2026-07-28 double false alarm, exactly: the cron runs at 12:30 UTC
+    (railway.cron.json `30 12 * * 1-5`) and stamped green at 12:56 — BEFORE the
+    watchdog's stale 14:00 expectation — so the 16:07 and 22:16 passes both
+    paged "Daily discovery cron did not run" on a day that had already run.
+    A same-day green stamp satisfies the whole day, wherever it lands."""
+    ok = datetime(2026, 7, 28, 12, 56, tzinfo=UTC).isoformat()   # Tue Jul 28
+    assert watchdog.overdue_daily(ok, datetime(2026, 7, 28, 16, 7, tzinfo=UTC)) is None
+    assert watchdog.overdue_daily(ok, datetime(2026, 7, 28, 22, 16, tzinfo=UTC)) is None
+
+
+def test_daily_same_day_forgiveness_ends_at_next_weekday_window():
+    # keep the REAL miss: Monday's green run does not cover Tuesday once
+    # Tuesday's 12:30 slot + 2h grace has passed
+    ok = datetime(2026, 7, 27, 12, 56, tzinfo=UTC).isoformat()   # Mon Jul 27
+    reason = watchdog.overdue_daily(ok, datetime(2026, 7, 28, 16, 7, tzinfo=UTC))
+    assert reason and "expected one at Jul 28 12:30" in reason
 
 
 def test_tofu_stale_only_inside_selling_hours():

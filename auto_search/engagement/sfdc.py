@@ -32,6 +32,7 @@ SOURCE = "sfdc"
 
 def parse_leads(leads: list[dict], *, kind: str = "high_intent_lead",
                 channel: str = "form", campaign_field: str = "LeadSource",
+                declared: bool = False,
                 now: str | None = None) -> tuple[list[dict], list[dict]]:
     """Map SFDC leads to (contact_rows, event_rows). PURE.
 
@@ -41,6 +42,11 @@ def parse_leads(leads: list[dict], *, kind: str = "high_intent_lead",
     high-intent inbound (`form`/`high_intent_lead`, campaign = LeadSource) and
     tradeshow-qualified meetings (`event`/`tradeshow`, campaign = Tradeshow__c).
     Crossing by email domain / company is applied later by cross.py.
+
+    `declared=True` (BOFU-class sources, MAR2-50) stamps `company_declared` on the
+    contact rows: the human typed the company on our own form, so the cross may
+    bind the name match past the domain-contradiction veto ('name+bofu'). The
+    flag is in-memory routing only — the repo's contact whitelist drops it.
     """
     now = now or datetime.now(UTC).isoformat()
     contact_rows: list[dict] = []
@@ -54,6 +60,8 @@ def parse_leads(leads: list[dict], *, kind: str = "high_intent_lead",
         seen.add(lid)
         email = (ld.get("Email") or "").strip() or None
         company = ld.get("Company")
+        name = (f"{ld.get('FirstName') or ''} {ld.get('LastName') or ''}".strip()
+                or None)
         domain = (clean_domain(ld.get("BN_Email_Domain__c"))
                   or _email_domain(email) or _website_domain(ld.get("Website")))
         occurred = _dt(ld.get("CreatedDate")) or now
@@ -61,6 +69,7 @@ def parse_leads(leads: list[dict], *, kind: str = "high_intent_lead",
             "source": SOURCE, "external_id": lid, "email": email,
             "email_domain": domain, "company": company,
             "company_key": normalize_company_name(company or ""),
+            "name": name, "company_declared": declared,
             "title": ld.get("Title"), "meeting_booked": kind == "tradeshow",
             "opted_out": False,
         })
@@ -78,7 +87,41 @@ def parse_leads(leads: list[dict], *, kind: str = "high_intent_lead",
                     "employee_range": ld.get("Employee_Range__c"),
                     "is_converted": bool(ld.get("IsConverted"))},
         })
-    return contact_rows, event_rows
+    return _collapse_same_day_resubmits(contact_rows, event_rows)
+
+
+def _collapse_same_day_resubmits(contact_rows: list[dict], event_rows: list[dict]
+                                 ) -> tuple[list[dict], list[dict]]:
+    """One form-lead event per (person, day) — the Ascension double-count
+    (MAR2-50): one human submitting the form twice in 6 minutes mints two SFDC
+    Lead ids, hence two event external_ids and +20 instead of +10. Collapse to
+    the OLDEST lead id, which is stable across re-pulls — an insert guard, not
+    a migration (already-stored events simply keep re-upserting under the same
+    id). Kind is constant within a parse_leads call, so the key is
+    (person, occurred date); person = email when present, else normalized
+    name+company (the echo filter's rule). A re-engagement on a LATER day keeps
+    its own lead id and still counts. PURE, order-independent."""
+    by_ext = {c["external_id"]: c for c in contact_rows}
+    best: dict[tuple[str, str], dict] = {}
+    for ev in event_rows:
+        c = by_ext.get(ev.get("contact_ext")) or {}
+        person = ((c.get("email") or "").strip().lower()
+                  or normalize_company_name(
+                      f"{c.get('name') or ''} {c.get('company') or ''}")
+                  or str(ev.get("contact_ext")))
+        key = (person, str(ev.get("occurred_at") or "")[:10])
+        cur = best.get(key)
+        if cur is None or _event_order(ev) < _event_order(cur):
+            best[key] = ev
+    keep = {ev.get("contact_ext") for ev in best.values()}
+    return ([c for c in contact_rows if c.get("external_id") in keep],
+            [ev for ev in event_rows if ev.get("contact_ext") in keep])
+
+
+def _event_order(ev: dict) -> tuple[str, str]:
+    """Sort key for the same-day collapse: oldest occurred_at wins, lead id
+    breaks the tie (SFDC ids grow over time, so lower ≈ earlier)."""
+    return (str(ev.get("occurred_at") or ""), str(ev.get("contact_ext") or ""))
 
 
 TOFU_ECHO_SOURCE = "TOFU Engagement Campaign"

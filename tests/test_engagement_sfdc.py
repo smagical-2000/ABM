@@ -199,8 +199,11 @@ def test_lead_domain_falls_back_to_email_then_website():
 
 
 def test_leads_deduped_by_id():
-    contacts, events = sfdc.parse_leads([_lead(Id="00Q1"), _lead(Id="00Q1"),
-                                         _lead(Id="00Q2")])
+    # 00Q2 must be a DIFFERENT person: two same-day leads for one person now
+    # collapse by design (MAR2-50 B, tests/test_sfdc_same_day_dedup.py).
+    contacts, events = sfdc.parse_leads(
+        [_lead(Id="00Q1"), _lead(Id="00Q1"),
+         _lead(Id="00Q2", Email="pat@acme.com", FirstName="Pat")])
     assert {c["external_id"] for c in contacts} == {"00Q1", "00Q2"}
     assert len(events) == 2
 

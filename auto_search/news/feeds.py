@@ -40,6 +40,9 @@ QUERIES = {
     "rcm_ai": '"revenue cycle" healthcare (automation OR AI OR "artificial intelligence" OR agentic)',
     "eligibility": '("eligibility verification" OR "insurance verification" OR "benefits verification") healthcare',
     "policy": 'CMS healthcare (rule OR regulation OR "final rule" OR mandate) (billing OR claims OR "prior authorization" OR reimbursement)',
+    # Becker's "700 rural hospitals at risk of closing" class of story — margin
+    # pressure that makes RCM automation a survival buy, not a nice-to-have.
+    "hospital_distress": '"rural hospital" (closure OR closing OR "at risk" OR bankruptcy OR "financial distress")',
 }
 
 _TAG_RE = re.compile(r"<[^>]+>")

@@ -6,7 +6,8 @@ from pydantic import BaseModel
 
 # The topic chips the News tab filters on. The enrich pass classifies each
 # article into exactly one of these (or marks it not relevant and drops it).
-TOPICS = ("prior_auth", "denials", "rcm_ai", "eligibility", "policy", "operations")
+TOPICS = ("prior_auth", "denials", "rcm_ai", "eligibility", "policy",
+          "hospital_distress", "operations")
 
 # Human labels for the UI / prompt.
 TOPIC_LABELS = {
@@ -15,6 +16,7 @@ TOPIC_LABELS = {
     "rcm_ai": "RCM / AI",
     "eligibility": "Eligibility",
     "policy": "CMS / Policy",
+    "hospital_distress": "Hospital Distress",
     "operations": "Operations",
 }
 

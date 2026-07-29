@@ -32,6 +32,7 @@ SOURCE = "sfdc"
 
 def parse_leads(leads: list[dict], *, kind: str = "high_intent_lead",
                 channel: str = "form", campaign_field: str = "LeadSource",
+                declared: bool = False,
                 now: str | None = None) -> tuple[list[dict], list[dict]]:
     """Map SFDC leads to (contact_rows, event_rows). PURE.
 
@@ -41,6 +42,11 @@ def parse_leads(leads: list[dict], *, kind: str = "high_intent_lead",
     high-intent inbound (`form`/`high_intent_lead`, campaign = LeadSource) and
     tradeshow-qualified meetings (`event`/`tradeshow`, campaign = Tradeshow__c).
     Crossing by email domain / company is applied later by cross.py.
+
+    `declared=True` (BOFU-class sources, MAR2-50) stamps `company_declared` on the
+    contact rows: the human typed the company on our own form, so the cross may
+    bind the name match past the domain-contradiction veto ('name+bofu'). The
+    flag is in-memory routing only — the repo's contact whitelist drops it.
     """
     now = now or datetime.now(UTC).isoformat()
     contact_rows: list[dict] = []
@@ -54,6 +60,8 @@ def parse_leads(leads: list[dict], *, kind: str = "high_intent_lead",
         seen.add(lid)
         email = (ld.get("Email") or "").strip() or None
         company = ld.get("Company")
+        name = (f"{ld.get('FirstName') or ''} {ld.get('LastName') or ''}".strip()
+                or None)
         domain = (clean_domain(ld.get("BN_Email_Domain__c"))
                   or _email_domain(email) or _website_domain(ld.get("Website")))
         occurred = _dt(ld.get("CreatedDate")) or now
@@ -61,6 +69,7 @@ def parse_leads(leads: list[dict], *, kind: str = "high_intent_lead",
             "source": SOURCE, "external_id": lid, "email": email,
             "email_domain": domain, "company": company,
             "company_key": normalize_company_name(company or ""),
+            "name": name, "company_declared": declared,
             "title": ld.get("Title"), "meeting_booked": kind == "tradeshow",
             "opted_out": False,
         })

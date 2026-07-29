@@ -112,7 +112,8 @@ _EMAILS = {"Abm": "anna@abmco.com", "Existing": "eve@abmco.com", "Cold": "carl@r
 
 
 class _FakeIndex:
-    def match(self, *, company=None, domain=None, email=None):
+    def match(self, *, company=None, domain=None, email=None,
+              trust_declared=False):
         if domain == "abmco.com":
             return AccountMatch("abm_abmco", company or "ABM Health", "domain", ("abm",))
         return None

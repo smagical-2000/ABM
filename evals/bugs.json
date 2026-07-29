@@ -585,6 +585,15 @@
       "fix": "notify-changes: a red audit on a write call now runs the identity self-heal ONCE, rebuilds the board, re-audits, and proceeds with the send in the same request when green (still-red holds as before). The audit-hold alert posts UNTHROTTLED (a hold is never routine); every hold stamps notify_last_hold ({at, violations}) and a clean write-mode pass stamps notify_last_send; run_digest renders '\u2022 notify: HELD at <time> (<codes>)' whenever the newest hold is newer than the newest send.",
       "guard": "tests/test_notify_hold_visibility.py",
       "lesson": "A fail-safe that can be tripped by a self-repairable condition needs the repair in its own loop, and a hold path must leave an unthrottled, persistent artifact \u2014 an alert that CAN be deduped away is not visibility."
+    },
+    {
+      "id": "watchdog-daily-slot-stale-early-success-pages",
+      "date": "2026-07-28",
+      "area": "auto_search/ops/watchdog.py (overdue_daily)",
+      "symptom": "Watchdog paged 'Daily discovery cron did not run' TWICE (16:07 and 22:16 UTC) on a day whose daily had already gone green at 12:56 UTC.",
+      "root_cause": "overdue_daily hardcoded a 14:00 UTC slot while railway.cron.json schedules 30 12 * * 1-5, and compared last_ok < expected as timestamps \u2014 so a green stamp minted BEFORE the imagined slot read as a miss, and the 6h re-alert loop re-paged the same non-incident.",
+      "guard": "tests/test_ops_alerts.py::test_daily_early_same_day_success_is_ok_all_day (+ ..._ends_at_next_weekday_window)",
+      "lesson": "A watchdog's expectation must mirror the deployed schedule file, not a copy of it; and a once-per-day job is satisfied by ANY same-day success, so compare dates, not timestamps, or every early run becomes a page."
     }
   ]
 }

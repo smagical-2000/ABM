@@ -17,6 +17,13 @@ the contact's corporate email domain and the account's stored domain provably
 disagree, unless the pair carries a verified-same verdict (site_verify). Name
 patterns alone put 155 national-CHS contacts on a Wisconsin FQHC and the NY
 Healthfirst insurer's book on Florida's Health First — never again.
+
+BOFU override (MAR2-50, Sunny 2026-07-28): the veto exists for INFERRED matches
+(ad reactors, scraped engagers). A contact whose company was DECLARED by the
+human on our own form (SFDC BOFU leads — SFDC vouches) passes
+`trust_declared=True` and the name match binds even across a domain
+contradiction, tagged tier 'name+bofu' (Fatma Mirza: fym4@cornell.edu +
+declared "Mount Sinai Health System" must never be silently lost again).
 """
 
 from __future__ import annotations
@@ -142,7 +149,12 @@ class CrossIndex:
         return len(self._s_key), len(self._a_key)
 
     def match(self, *, company: str | None = None, domain: str | None = None,
-              email: str | None = None) -> AccountMatch | None:
+              email: str | None = None,
+              trust_declared: bool = False) -> AccountMatch | None:
+        """`trust_declared=True` marks a contact whose company the HUMAN
+        declared on our form (SFDC BOFU leads): the name match then binds
+        past the domain-contradiction veto as tier 'name+bofu'. Every other
+        (inferred) path keeps the veto exactly as before."""
         raw_dom = domain if _exact_domain(domain) else (
             (email or "").rsplit("@", 1)[-1] if "@" in (email or "") else None)
         exact = _exact_domain(raw_dom)
@@ -155,18 +167,27 @@ class CrossIndex:
         # contact stays unresolved-for-review instead of merging wrongly.
         if scored and s_tier == "name" and not _domains_compatible(
                 dom, scored.get("domain"), self.same_pairs):
-            logger.info("cross: name-match veto %s (contact %s vs account %s)",
-                        scored["account_id"], dom, scored.get("domain"))
-            self.vetoed_pairs.add((dom, scored.get("domain") or "",
-                                   scored.get("name") or ""))
-            scored = None
+            if trust_declared:
+                # BOFU override (MAR2-50): the company was DECLARED on our
+                # form, not inferred — bind, visibly tagged. No verification
+                # queue entry: the pair resolved by declaration.
+                s_tier = "name+bofu"
+            else:
+                logger.info("cross: name-match veto %s (contact %s vs account %s)",
+                            scored["account_id"], dom, scored.get("domain"))
+                self.vetoed_pairs.add((dom, scored.get("domain") or "",
+                                       scored.get("name") or ""))
+                scored = None
         if abm and a_tier == "name" and not _domains_compatible(
                 dom, abm.get("domain"), self.same_pairs):
-            logger.info("cross: name-match veto %s (contact %s vs target %s)",
-                        abm["account_id"], dom, abm.get("domain"))
-            self.vetoed_pairs.add((dom, abm.get("domain") or "",
-                                   abm.get("name") or ""))
-            abm = None
+            if trust_declared:
+                a_tier = "name+bofu"       # same BOFU override, ABM side
+            else:
+                logger.info("cross: name-match veto %s (contact %s vs target %s)",
+                            abm["account_id"], dom, abm.get("domain"))
+                self.vetoed_pairs.add((dom, abm.get("domain") or "",
+                                       abm.get("name") or ""))
+                abm = None
         if scored:
             lists = ("scored", "abm") if abm else ("scored",)
             return AccountMatch(scored["account_id"], scored["name"], s_tier, lists)

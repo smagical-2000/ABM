@@ -594,6 +594,46 @@
       "root_cause": "overdue_daily hardcoded a 14:00 UTC slot while railway.cron.json schedules 30 12 * * 1-5, and compared last_ok < expected as timestamps \u2014 so a green stamp minted BEFORE the imagined slot read as a miss, and the 6h re-alert loop re-paged the same non-incident.",
       "guard": "tests/test_ops_alerts.py::test_daily_early_same_day_success_is_ok_all_day (+ ..._ends_at_next_weekday_window)",
       "lesson": "A watchdog's expectation must mirror the deployed schedule file, not a copy of it; and a once-per-day job is satisfied by ANY same-day success, so compare dates, not timestamps, or every early run becomes a page."
+    },
+    {
+      "id": "bofu-lead-silently-lost-2026-07-28",
+      "date": "2026-07-28",
+      "area": "engagement/cross.py, engagement/sync.py, engagement/sfdc.py",
+      "symptom": "SFDC BOFU form leads vanished with zero trace: Fatma Mirza declared 'Mount Sinai Health System' on our form but her cornell.edu email tripped the domain-contradiction veto, and run_sfdc_sync's persist_unmatched=False then discarded the vetoed contact silently (same for the Anthem KLAS lead; ~1,354 unresolved/run were dropping).",
+      "root_cause": "The domain-contradiction veto (built for INFERRED matches - ad reactors, scraped engagers) was applied to DECLARED matches too, and the sync's drop-unmatched policy had no trace, no queue, and no alert - two safety nets composed into silent data loss for the highest-intent signal we have.",
+      "fix": "cross.match(trust_declared=True) binds the name match past the veto as tier 'name+bofu' (high-intent form leg only; every inferred path keeps the veto). Unmatched SFDC contacts from the last 7 days persist as unresolved (triage queue, backlog stays out); newly-dropped BOFU leads fire one consolidated throttled ops alert naming them.",
+      "guard": "tests/test_bofu_declared.py",
+      "lesson": "A veto tuned for inferred evidence must not outrank an explicit human declaration, and 'drop by policy' still needs a trace: persist-for-review plus an alert, or the loss is invisible exactly when the signal matters most."
+    },
+    {
+      "id": "sfdc-double-submit-double-count-2026-07-28",
+      "date": "2026-07-28",
+      "area": "engagement/sfdc.py parse_leads",
+      "symptom": "One human submitted the contact form twice in 6 minutes; SFDC minted two Lead ids, so two form-lead events landed and Ascension scored +20 for one act of intent.",
+      "root_cause": "Event external_ids keyed on the SFDC Lead id, and SFDC creates a NEW Lead per submission - the idempotency key tracked the record, not the person-day act.",
+      "fix": "parse_leads collapses lead rows to one per (person, occurred date) - person = email, else normalized name+company - keeping the OLDEST lead id so the canonical external_id is stable across re-pulls (insert guard, no migration; stored events preserved). A re-engagement weeks later is a new date and still counts.",
+      "guard": "tests/test_sfdc_same_day_dedup.py",
+      "lesson": "Idempotency keys must identify the human act you are scoring, not the upstream system's record - any source that mints a fresh id per submission will double-count until you key on (person, kind, day)."
+    },
+    {
+      "id": "sfdc-daily-lag-on-bofu-2026-07-28",
+      "date": "2026-07-28",
+      "area": "scripts/run_linkedin_tofu.py, ops/env-manifest.json",
+      "symptom": "Mount Sinai's BOFU form lead (Mary Taylor) sat invisible for ~24h because the only SFDC pull was the daily cron - the hottest inbound signal moved at the slowest cadence in the fleet.",
+      "root_cause": "The SFDC sync leg lived exclusively on run_daily; the provably-ticking 15-min TOFU cron never carried it, and nothing else pulled SFDC in-day.",
+      "fix": "run_linkedin_tofu runs the same windowed idempotent SFDC pull inline on the first tick of each active hour (minute-of-hour < 15, derived from the clock - no persisted counter), even when the TOFU cost throttle skips the paid scrape. API-free (SOQL only), 240s timeout so the tick never stretches past ~5 min, failures logged and swallowed; new heat triggers the same notify push. env-manifest now requires the SFDC cred trio on linkedin-tofu-cron.",
+      "guard": "tests/test_sfdc_hourly_leg.py",
+      "lesson": "Signal freshness should ride the fastest cron you already trust - an API-free idempotent pull costs nothing to run hourly, but it must be bounded and isolated so the host tick can never inherit its failures."
+    },
+    {
+      "id": "clay-writeback-matched-nothing-2026-07-28",
+      "date": "2026-07-28",
+      "area": "api/app.py /api/enrichment/clay/results",
+      "symptom": "Clay returned Adam Shively's email with a linkedin_url byte-for-byte identical to his Airtable row's {LinkedIn URL}, and the receiver filled 0 rows - the lead was patched by hand. filled+skipped also never summed to received, hiding the drop.",
+      "root_cause": "The match key defaulted to the ENRICHED email whenever Clay found one - a value a row dispatched for-lacking-an-email cannot hold - so the LinkedIn URL was never tried; and an unmatched result incremented neither counter, so the outage was invisible in the response.",
+      "fix": "_clay_fill_any tries the keys we actually hold, strongest first: echoed record_id (verify guard intact), ORIGINAL match_email/orig_email, LinkedIn URL normalized on BOTH sides (normalize_linkedin_url; exact formula query then a normalized table scan), enriched email last. _clay_fill returns why it did not fill; filled+skipped==received with a skip_reasons map.",
+      "guard": "tests/test_clay_results_match.py",
+      "lesson": "Match on what the target row can actually contain - never on the value you are about to write - and make every batch endpoint's accounting a closed sum so 'matched nothing' is a visible number, not a silent zero."
     }
   ]
 }

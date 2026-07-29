@@ -12,7 +12,7 @@ are all pure, so it stays thin and testable with injected fakes.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from auto_search.engagement import identity as identity_mod
 from auto_search.engagement import ingest as ingest_mod
@@ -28,10 +28,19 @@ SOURCE = "replyio"
 PODCAST_SOURCE = "podcast"
 SFDC_SOURCE = "sfdc"
 
+# MAR2-50: unmatched SFDC contacts from the last N days persist as unresolved
+# (triage queue) instead of vanishing; anything older is the historical
+# backlog (~1,354 rows) and stays out.
+SFDC_UNRESOLVED_KEEP_DAYS = 7
+# The lead kinds where the human DECLARED their company on our form — the
+# BOFU class whose silent loss pages the team.
+BOFU_KINDS = frozenset({"high_intent_lead"})
+
 
 def cross_and_persist(*, engagement_repo, scoring_repo, discovery_repo,
                       contact_rows: list[dict], event_rows: list[dict],
-                      persist_unmatched: bool = False) -> tuple[int, int]:
+                      persist_unmatched: bool = False,
+                      keep_unmatched_after: str | None = None) -> tuple[int, int]:
     """Cross each contact to a scored/ABM account, stamp the result onto the
     contact's events, then upsert contacts + add events. Returns
     (matched_contacts, new_events). Shared by every source's sync.
@@ -40,12 +49,21 @@ def cross_and_persist(*, engagement_repo, scoring_repo, discovery_repo,
     discovery list, so by default we store only contacts/events that matched one of
     those — unmatched engagement is dropped, not queued. The matched count is still
     returned in full either way. Pass `persist_unmatched=True` to also keep the
-    unmatched (e.g. a future net-new-in-market view)."""
+    unmatched (e.g. a future net-new-in-market view).
+
+    `keep_unmatched_after` (YYYY-MM-DD, MAR2-50) softens the drop: an unmatched
+    contact whose latest event occurred ON/AFTER that date persists with an
+    empty account_id — the unresolved-triage queue, instead of a silent
+    discard (the Fatma Mirza / Anthem class). Older unmatched rows (the
+    historical backlog) still drop, and unmatched EVENTS always drop — heat
+    never accrues to nobody. A contact carrying `company_declared` (SFDC BOFU
+    form leads) crosses with `trust_declared=True` (see cross.match)."""
     index = build_index(scoring_repo, discovery_repo, engagement_repo)
     matched = 0
     for c in contact_rows:
         m = index.match(company=c.get("company"), domain=c.get("email_domain"),
-                        email=c.get("email"))
+                        email=c.get("email"),
+                        trust_declared=bool(c.get("company_declared")))
         if m:
             matched += 1
             c["account_id"], c["match_tier"], c["matched_lists"] = (
@@ -54,7 +72,19 @@ def cross_and_persist(*, engagement_repo, scoring_repo, discovery_repo,
     for e in event_rows:
         e["account_id"] = account_by_contact.get(e["contact_ext"])
     if not persist_unmatched:
-        contact_rows = [c for c in contact_rows if c.get("account_id")]
+        keep: set[str] = set()
+        if keep_unmatched_after:
+            last: dict[str, str] = {}
+            for e in event_rows:
+                ext = e.get("contact_ext")
+                if not e.get("account_id") and ext:
+                    oc = str(e.get("occurred_at") or "")
+                    if oc > last.get(ext, ""):
+                        last[ext] = oc
+            keep = {ext for ext, oc in last.items()
+                    if oc[:10] >= keep_unmatched_after[:10]}
+        contact_rows = [c for c in contact_rows
+                        if c.get("account_id") or c.get("external_id") in keep]
         event_rows = [e for e in event_rows if e.get("account_id")]
     for c in contact_rows:
         engagement_repo.upsert_contact(c)
@@ -246,6 +276,9 @@ def collect_sfdc_rows(client, engagement_repo, *, since: str, now: str
     hi_leads = list(client.iter_high_intent_leads(since=since))
     ts_leads = list(client.iter_tradeshow_leads(since=since))
     lo_leads = list(client.iter_low_intent_leads(since=since))
+    # BOFU-class = the high-intent form leads: the human DECLARED their company
+    # on our own form, SFDC vouches (Sunny 2026-07-28). Only this leg carries
+    # declared trust — tradeshow/TOFU/meeting matches keep the full veto.
     # Booked meetings (Event Type=Meeting) replace the old SAO signal per the
     # 2026-06 review: capture an actual booked meeting, not the SAO opp stage.
     # Opportunities are deliberately NOT pulled (parse([], opps=[]) below).
@@ -257,7 +290,8 @@ def collect_sfdc_rows(client, engagement_repo, *, since: str, now: str
     meetings = list(client.iter_meetings(days=meeting_days))
 
     c1, e1 = sfdc_mod.parse_leads(hi_leads, kind="high_intent_lead",
-                                  channel="form", campaign_field="LeadSource", now=now)
+                                  channel="form", campaign_field="LeadSource",
+                                  declared=True, now=now)
     c2, e2 = sfdc_mod.parse_leads(ts_leads, kind="tradeshow", channel="event",
                                   campaign_field="Tradeshow__c", now=now)
     c3, e3 = sfdc_mod.parse_leads(lo_leads, kind="low_intent_lead",
@@ -288,6 +322,46 @@ def collect_sfdc_rows(client, engagement_repo, *, since: str, now: str
     return list(contacts_by_id.values()), e1 + e2 + e3 + e4, counts
 
 
+def _alert_dropped_bofu(engagement_repo, contact_rows: list[dict],
+                        event_rows: list[dict], *, keep_after: str,
+                        already_known: set) -> None:
+    """ONE consolidated, throttled ops alert naming BOFU-grade leads that did
+    not cross to any account this sync (MAR2-50: the Anthem KLAS lead vanished
+    with zero trace). Only leads inside the retention window count, and leads
+    already sitting in the unresolved queue are never re-named. Best-effort —
+    alerting must never fail the sync it reports on."""
+    try:
+        by_ext = {c.get("external_id"): c for c in contact_rows}
+        lines: list[str] = []
+        for e in event_rows:
+            if e.get("account_id") or e.get("kind") not in BOFU_KINDS:
+                continue
+            if str(e.get("occurred_at") or "")[:10] < keep_after[:10]:
+                continue
+            if e.get("contact_ext") in already_known:
+                continue
+            c = by_ext.get(e.get("contact_ext")) or {}
+            lines.append(" · ".join(
+                x for x in (c.get("name"), c.get("company"), c.get("email"),
+                            f"lead {e.get('contact_ext')}") if x))
+        if not lines:
+            return
+        from auto_search.ops import alerts
+        if alerts.should_alert(engagement_repo, "sfdc-bofu-unresolved",
+                               min_gap_hours=24.0):
+            alerts.post_ops_alert(
+                kind="sfdc-bofu-unresolved", severity="warning",
+                service="discovery-cron",
+                title=f"{len(lines)} BOFU lead(s) did not cross to an account",
+                detail="\n".join(lines[:15]),
+                runbook="These are persisted as unresolved contacts. Run "
+                        "scripts/run_unresolved_triage.py, add the company/"
+                        "domain to the target list, then re-run the SFDC sync "
+                        "so the whole cluster attaches.")
+    except Exception:  # noqa: BLE001 — alert hygiene can never break the sync
+        logger.warning("bofu-unresolved alert failed (sync unaffected)")
+
+
 def run_sfdc_sync(*, engagement_repo, scoring_repo, discovery_repo, client=None,
                   since: str = "2026-01-01", now: str | None = None) -> dict:
     """Pull Salesforce (read-only) LEAD engagement -> cross -> store. Idempotent;
@@ -313,10 +387,23 @@ def run_sfdc_sync(*, engagement_repo, scoring_repo, discovery_repo, client=None,
             client, engagement_repo, since=since, now=now)
         # ELT raw landing: keep what we transform from, for replay/audit.
         engagement_repo.land_raw("sfdc_leads", counts, source=SFDC_SOURCE)
+        # Unresolved retention window (MAR2-50) + the already-known set, so a
+        # re-sync never re-alerts a lead the previous run already surfaced.
+        keep_after = (datetime.fromisoformat(now.replace("Z", "+00:00"))
+                      - timedelta(days=SFDC_UNRESOLVED_KEEP_DAYS)).date().isoformat()
+        try:
+            known_unresolved = {c.get("external_id")
+                                for c in engagement_repo.contacts(unresolved_only=True)
+                                if c.get("source") == SFDC_SOURCE}
+        except Exception:  # noqa: BLE001 — the snapshot is alert hygiene only
+            known_unresolved = set()
         matched, new_events = cross_and_persist(
             engagement_repo=engagement_repo, scoring_repo=scoring_repo,
             discovery_repo=discovery_repo, contact_rows=contact_rows,
-            event_rows=event_rows, persist_unmatched=False)
+            event_rows=event_rows, persist_unmatched=False,
+            keep_unmatched_after=keep_after)
+        _alert_dropped_bofu(engagement_repo, contact_rows, event_rows,
+                            keep_after=keep_after, already_known=known_unresolved)
         stats = {
             "high_intent_leads": counts["high_intent"],
             "tradeshow_leads": counts["tradeshow"],

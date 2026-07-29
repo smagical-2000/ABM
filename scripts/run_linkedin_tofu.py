@@ -5,6 +5,11 @@ EVERY reactor (ABM match is a Yes/No flag since 2026-07-08, not a gate) -> upser
 into the "LinkedIn <> Airtable" table; Reply.io enrollment + `linkedin_tofu` heat
 stay ABM-only. (SFDC creation is handled downstream by the Zapier Zap.)
 
+Since MAR2-50 C the first tick of each active hour ALSO runs the SFDC
+engagement pull inline (same windowed idempotent pull run_daily uses), so a
+BOFU form lead surfaces within the hour instead of waiting a day. Needs the
+SFDC_CLIENT_ID/SECRET/LOGIN_URL trio in this service's env.
+
 DISABLED BY DEFAULT. A live run is a no-op unless LINKEDIN_TOFU_CRON_ENABLED=1, so
 the cron service can be created/scheduled but will not write a thing until you flip
 that env var on (after confirming the manual run looks right). `--dry-run` always
@@ -144,6 +149,64 @@ def _hours_since(ts) -> float | None:
         return None
 
 
+# ── hourly SFDC leg (MAR2-50 C) ────────────────────────────────────────
+# Mount Sinai's BOFU form lead waited ~24h for the daily cron. This cron
+# provably ticks every 15 min, so the first tick of each hour also runs the
+# SFDC pull inline — the same windowed idempotent pull run_daily uses
+# (run_engagement_sfdc.py), imported and called, never a subprocess. The pull
+# is API-free (SOQL SELECT only — no paid vendor), so it is budget-safe at
+# any cadence; the timeout keeps the 15-min tick from ever stretching past
+# ~5 min, and any failure is logged + swallowed (never the tick's rc).
+
+_SFDC_LEG_TIMEOUT_S = 240
+_SFDC_LEG_SINCE = "2026-01-01"       # run_daily's window (idempotent re-pull)
+
+
+def _sfdc_leg_due(now: datetime | None = None) -> bool:
+    """True on the first tick of each hour (minute-of-hour 0-14) — derived
+    from the clock, never a persisted counter that could drift."""
+    now = now or datetime.now(UTC)
+    return now.minute < 15
+
+
+def _run_sfdc_leg(engagement_repo) -> None:
+    """Run the SFDC sync inline, bounded + isolated, then push the same
+    tier-change notifier the TOFU flow uses when new heat landed."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from auto_search.engagement import sync as engagement_sync
+    ex = ThreadPoolExecutor(max_workers=1)
+    try:
+        stats = ex.submit(
+            engagement_sync.run_sfdc_sync,
+            engagement_repo=engagement_repo,
+            scoring_repo=_opened(get_scoring_repository()),
+            discovery_repo=_opened(get_repository()),
+            since=_SFDC_LEG_SINCE).result(timeout=_SFDC_LEG_TIMEOUT_S)
+    except Exception:  # noqa: BLE001 — the SFDC leg must never fail the tick
+        logger.exception("[run_linkedin_tofu] hourly SFDC leg failed (tick unaffected)")
+        return
+    finally:
+        # A timed-out pull keeps running on its worker thread; run_entrypoint's
+        # os._exit reaps it at process end, so nothing here ever joins on it.
+        ex.shutdown(wait=False, cancel_futures=True)
+    print(f"[run_linkedin_tofu] hourly SFDC leg ok: {stats}", flush=True)
+    if (stats or {}).get("new_events", 0) > 0:
+        try:
+            subprocess.run(
+                [sys.executable,
+                 str(Path(__file__).resolve().parent / "run_engagement_notify.py")],
+                timeout=120)
+        except Exception:  # noqa: BLE001 — notify is best-effort, next cron re-pushes
+            logger.warning("[run_linkedin_tofu] notify push after SFDC leg failed")
+
+
+def _maybe_sfdc_leg(engagement_repo, *, dry_run: bool) -> None:
+    """The one gate every call site shares: live tick + first-of-the-hour."""
+    if not dry_run and _sfdc_leg_due():
+        _run_sfdc_leg(engagement_repo)
+
+
 def main() -> int:
     """Thin wrapper so every exit path closes the pools this run opened."""
     try:
@@ -217,6 +280,9 @@ def _run() -> int:
             if hrs is not None and hrs < min_h:
                 print(f"[run_linkedin_tofu] throttled: last run {hrs:.1f}h ago (< {min_h}h) "
                       "— no-op. (--force to override)", flush=True)
+                # The hourly SFDC leg rides EVERY due active-hours tick, even
+                # when the TOFU cost throttle skips the paid scrape (MAR2-50 C).
+                _maybe_sfdc_leg(engagement_repo, dry_run=args.dry_run)
                 return 0
 
         csv_path = args.csv or os.getenv("LINKEDIN_TOFU_CSV") or str(_DEFAULT_CSV)
@@ -306,6 +372,9 @@ def _run() -> int:
         ).returncode
         if rc:
             print(f"[run_linkedin_tofu] notify push rc={rc} (non-fatal)", flush=True)
+    # Hourly SFDC leg AFTER the TOFU work (MAR2-50 C) — inline, bounded,
+    # isolated; runs its own notify push when it lands new heat.
+    _maybe_sfdc_leg(engagement_repo, dry_run=args.dry_run)
     return 0
 
 

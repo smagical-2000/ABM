@@ -2706,11 +2706,13 @@ def create_app() -> FastAPI:
                 "batch_id": batch_id, "bridge_status": resp.status_code}
 
     async def _clay_fill(client, match_key: str, match_val: str, updates: dict, *,
-                         record_id: str | None = None, verify: dict | None = None) -> bool:
+                         record_id: str | None = None, verify: dict | None = None) -> str:
         """Fill ONLY blank cells on the matched row (never overwrite a value a
-        human or another source already set). Returns True if anything landed.
-        Prefers a direct Airtable record_id (exact, no search); falls back to
-        finding the row by match_key/match_val (email or LinkedIn URL).
+        human or another source already set). Returns a status string:
+        'filled' when anything landed, else 'no_row' / 'wrong_row' /
+        'nothing_to_fill' so the receiver's accounting can say WHY a result
+        was skipped (MAR2-50 D). Prefers a direct Airtable record_id (exact,
+        no search); falls back to finding the row by match_key/match_val.
 
         `verify` (field -> expected value): when a record_id is trusted, and the
         row ALREADY has that field populated, it must match — else the echoed
@@ -2720,7 +2722,7 @@ def create_app() -> FastAPI:
         import httpx as _httpx
         rid = record_id or await client._find_id({match_key: match_val}, [match_key])
         if not rid:
-            return False
+            return "no_row"
         async with _httpx.AsyncClient(timeout=30) as hc:
             # _url / _headers are @property (every other call site uses them
             # without parens) — calling them () raised TypeError on every row,
@@ -2733,15 +2735,71 @@ def create_app() -> FastAPI:
                 if cur and vv and cur != str(vv).strip().lower():
                     logger.warning("clay fill: record %s %s=%r != expected %r — wrong "
                                    "row, refusing", rid, vk, cur, vv)
-                    return False
+                    return "wrong_row"
             fill = {k: v for k, v in updates.items()
                     if v and not str(current.get(k) or "").strip()}
             if not fill:
-                return False
+                return "nothing_to_fill"
             patched = await hc.patch(f"{client._url}/{rid}", headers=client._headers,
                                      json={"fields": fill, "typecast": True})
             patched.raise_for_status()
-        return True
+        return "filled"
+
+    async def _clay_find_by_linkedin(client, url: str) -> str | None:
+        """Record id whose {LinkedIn URL} is the SAME profile as `url`, or None.
+        Exact formula match first (one indexed query); then a normalized scan of
+        the table — https/http, www., regional subdomains, query strings and
+        trailing slashes all collapse (normalize_linkedin_url), so the stored
+        and posted renderings of one profile can never miss each other
+        (MAR2-50 D: Adam Shively's exact-URL result filled nothing)."""
+        from auto_search.normalize import normalize_linkedin_url
+        norm = normalize_linkedin_url(url)
+        if not norm:
+            return None
+        rid = await client._find_id({"LinkedIn URL": url}, ["LinkedIn URL"])
+        if rid:
+            return rid
+        for r in await client.records():
+            cand = ((r.get("fields") or {}).get("LinkedIn URL") or "").strip()
+            if cand and normalize_linkedin_url(cand) == norm:
+                return r.get("id")
+        return None
+
+    async def _clay_fill_any(client, *, record_id: str | None, key_email: str,
+                             key_li: str, enriched_email: str, updates: dict,
+                             verify: dict | None) -> str:
+        """Try every match key we actually HOLD, strongest first: the echoed
+        record_id, the row's ORIGINAL email, the LinkedIn URL (normalized both
+        sides), and only then the ENRICHED email. The old receiver keyed on the
+        enriched email the moment Clay found one — a row dispatched WITHOUT an
+        email can never hold that value, so a row whose {LinkedIn URL} EXACTLY
+        equaled the posted linkedin_url filled nothing (Adam Shively, filled:0,
+        MAR2-50 D). Returns the best _clay_fill status seen."""
+        statuses: list[str] = []
+        if record_id:
+            statuses.append(await _clay_fill(client, "Email", key_email, updates,
+                                             record_id=record_id, verify=verify))
+            if statuses[-1] == "filled":
+                return "filled"
+        if key_email:
+            statuses.append(await _clay_fill(client, "Email", key_email, updates))
+            if statuses[-1] == "filled":
+                return "filled"
+        if key_li:
+            rid = await _clay_find_by_linkedin(client, key_li)
+            if rid:
+                statuses.append(await _clay_fill(client, "LinkedIn URL", key_li,
+                                                 updates, record_id=rid))
+                if statuses[-1] == "filled":
+                    return "filled"
+        if enriched_email and enriched_email != key_email:
+            statuses.append(await _clay_fill(client, "Email", enriched_email, updates))
+            if statuses[-1] == "filled":
+                return "filled"
+        for s in ("wrong_row", "nothing_to_fill"):    # most informative non-fill
+            if s in statuses:
+                return s
+        return "no_row"
 
     @app.post("/api/enrichment/clay/results")
     async def clay_results(request: Request):
@@ -2776,39 +2834,60 @@ def create_app() -> FastAPI:
                 base_id=os.environ["AIRTABLE_TOFU_MIRROR_BASE_ID"],
                 table=os.getenv("AIRTABLE_TOFU_MIRROR_TABLE", "ABM Flow LinkedIn <> Airtable"))
         filled = skipped = 0
+        skip_reasons: dict[str, int] = {}
+
+        def _skip(reason: str) -> None:
+            nonlocal skipped
+            skipped += 1
+            skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+
         for res in results:
             email = (res.get("email") or "").strip()
             phone = (res.get("phone") or "").strip()
             record_id = (res.get("record_id") or "").strip()
-            key_email = (res.get("match_email") or res.get("orig_email") or email).strip()
+            # The ORIGINAL email only — never default the match key to the
+            # ENRICHED value (the Adam Shively filled:0 mechanism, MAR2-50 D).
+            key_email = (res.get("match_email") or res.get("orig_email") or "").strip()
             key_li = (res.get("linkedin_url") or "").strip()
             updates = {}
             if email:
                 updates["Email"] = email
             if phone:
                 updates["Phone"] = phone
-            if not updates or not (record_id or key_email or key_li):
-                skipped += 1
+            if not updates:
+                _skip("no_updates")
                 continue
-            match_key, match_val = (("Email", key_email) if key_email
-                                    else ("LinkedIn URL", key_li))
+            if not (record_id or key_email or key_li or email):
+                _skip("no_match_key")
+                continue
             try:
-                # Primary: exact by record_id when Clay echoed it back; else find
-                # the row by email/LinkedIn. When we trust an echoed record_id and
-                # ALSO have the original email, cross-check it so a wrong id can't
-                # land PII on another person. Mirror: its record ids differ, so it
-                # always matches by email/LinkedIn.
+                # Primary: record_id when Clay echoed it back (cross-checked
+                # against the original email so a wrong id can't land PII on
+                # another person), then original email, then normalized
+                # LinkedIn URL, then the enriched email as a last resort.
+                # Mirror: its record ids differ, so it matches by keys only —
+                # best-effort, never counted.
                 verify = {"Email": key_email} if (record_id and key_email) else None
-                ok = await _clay_fill(primary, match_key, match_val, updates,
-                                      record_id=record_id or None, verify=verify)
-                if mirror is not None and (key_email or key_li):
-                    await _clay_fill(mirror, match_key, match_val, updates)
-                filled += 1 if ok else 0
+                status = await _clay_fill_any(
+                    primary, record_id=record_id or None, key_email=key_email,
+                    key_li=key_li, enriched_email=email, updates=updates,
+                    verify=verify)
+                if mirror is not None and (key_email or key_li or email):
+                    await _clay_fill_any(
+                        mirror, record_id=None, key_email=key_email, key_li=key_li,
+                        enriched_email=email, updates=updates, verify=None)
+                if status == "filled":
+                    filled += 1
+                else:
+                    _skip("no_row_matched" if status == "no_row" else status)
             except Exception:  # noqa: BLE001 — one bad row must not drop the batch
-                logger.exception("clay result fill failed for %s", match_val)
-                skipped += 1
-        logger.info("clay results: %d filled, %d skipped of %d", filled, skipped, len(results))
-        return {"filled": filled, "skipped": skipped, "received": len(results)}
+                logger.exception("clay result fill failed for %s",
+                                 key_email or key_li or email)
+                _skip("error")
+        logger.info("clay results: %d filled, %d skipped of %d (%s)",
+                    filled, skipped, len(results), skip_reasons or "-")
+        return {"filled": filled, "skipped": skipped, "received": len(results),
+                "skip_reasons": skip_reasons}
 
     @app.post("/api/abm/import")
     async def abm_import(request: Request):

@@ -295,14 +295,15 @@ function AccountsView({ accounts, onOpen, onActivate, segFilter, searchQ }){
 }
 
 // Activity = the worklist: only accounts that actually moved recently (a meaningful
-// touch, not a click — filtered server-side via `recent`), newest first, tier-jumps up
-// top. The short list a rep works from, vs Accounts (everything, by lifetime heat).
+// touch, not a click — filtered server-side via `recent`), strictly newest first —
+// the row whose "what changed" is freshest sits on top (Sunny's ask); tier-jumps and
+// week delta only break ties. The short list a rep works from, vs Accounts (by heat).
 function ActivityView({ accounts, onOpen, onActivate, segFilter, searchQ }){
   const up=a=>tierOf(a.score)!==tierOf(a.score-a.deltaWeek)?1:0;
   const vis=accounts
     .filter(a=>(segFilter==='all'||a.segment===segFilter)&&a.recent
       &&window.matchesQuery(searchQ,a.name,a.domain))
-    .sort((a,b)=> up(b)-up(a) || (b.recent.at||'').localeCompare(a.recent.at||'') || b.deltaWeek-a.deltaWeek);
+    .sort((a,b)=> (b.recent.at||'').localeCompare(a.recent.at||'') || up(b)-up(a) || b.deltaWeek-a.deltaWeek);
   return (
     <>
       <div style={{display:'grid',gridTemplateColumns:COLS,gap:20,padding:'8px 28px',borderBottom:'1px solid #f4f4f5',background:'#fafafa'}}>

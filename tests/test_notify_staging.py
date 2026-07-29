@@ -88,6 +88,29 @@ def test_staged_send_posts_test_only_and_keeps_account_due(client, monkeypatch):
     assert live_view["due"] == 1
 
 
+def test_manual_activate_is_coerced_to_test_while_staged(client, monkeypatch):
+    """Sunny's "if I hit Activate, does it go to TEST or main?" guarantee: while
+    notify_stage=test, a bare manual POST /api/engagement/<id>/activate (no
+    {"test": true} in the body) is COERCED to a test post by the staging gate in
+    app.py — test=True ([TEST] card on the private webhook), webhook=None (never
+    the live AE/SDR channel), no paid enrichment, and no activation claim, so
+    the account is still activatable for real after go-live."""
+    app = client.app
+    _seed_due_account(app)
+    app.state.engagement_repo.set_setting("notify_stage", "test")
+    calls = []
+    monkeypatch.setattr(notify_mod, "activate_account",
+                        lambda a, e, **kw: calls.append(kw) or True)
+
+    out = client.post("/api/engagement/abm_dueco/activate", json={}).json()
+    assert out["posted"] is True
+    assert calls and calls[0]["test"] is True    # is_test coerced true by the gate
+    assert calls[0]["webhook"] is None           # private test webhook, not a channel
+    assert calls[0]["dms"] == []                 # test posts never spend Apollo credits
+    # no claim taken -> not marked activated; the real send is still owed
+    assert app.state.engagement_repo.activated_account_ids() == set()
+
+
 def test_explicit_live_param_overrides_and_marks_ledger(client, monkeypatch):
     app = client.app
     _seed_due_account(app)
